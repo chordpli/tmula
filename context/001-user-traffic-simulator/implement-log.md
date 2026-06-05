@@ -71,5 +71,10 @@
   - 구현: `internal/load/runtime.go` — `VirtualUser`/`StepResult`/`Runner`. `Run`이 유저당 goroutine으로 walker 순회 + 노드별 API 호출, ctx 취소 시 즉시 중단, 결과를 mutex-guarded 수집, node→template 해석
   - Evidence: `go vet` clean · `go build` OK · `go test ./internal/load -race` ok(레이스 없음) · `gofmt -l` clean
 
+- **#9** — 완료 2026-06-05, branch `feat/pli/9-safety-guard` (base feat/pli/7-vu-runtime, stacked)
+  - AC: [x] 화이트리스트 밖 송신 0(AllowHost) / [x] rate+concurrency cap 초과 차단 / [x] 수동 kill 즉시 중단 + 자동 kill opt-in(기본 비활성 — 포화 관측 보장)
+  - 구현: `internal/safety/guard.go` — `Guard`(host 화이트리스트 매칭 *.wildcard, 토큰버킷 rate cap, concurrency 세마포어, 수동 `Kill`, `ReportOutcome` 기반 자동 임계 trip), `NewGuardForEnv`(prod-locked는 명시 unlock 필요 — 정책 §1), injectable clock, 테스트 7개
+  - Evidence: `go vet` clean · `go build` OK · `go test ./internal/safety -race` ok · `gofmt -l` clean
+
 ## 블로커
 - (없음)
