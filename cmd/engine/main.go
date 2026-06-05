@@ -15,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chordpli/tmula/internal/api"
 	"github.com/chordpli/tmula/internal/domain"
+	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/web"
 )
 
@@ -56,6 +58,10 @@ func run(args []string) error {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","role":%q,"version":%q}`, role, version)
 	})
+
+	// Control plane under /api; the embedded UI under everything else.
+	apiSrv := api.NewServer(load.NewRESTAdapter(30 * time.Second))
+	mux.Handle("/api/", http.StripPrefix("/api", apiSrv.Handler()))
 	mux.Handle("/", web.Handler())
 
 	srv := &http.Server{
