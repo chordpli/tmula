@@ -105,5 +105,11 @@
   - 참고: 런타임에 전략 적용(시간축 동시성 스케줄링)은 후속 wiring (runner 스케줄러 / #19)
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/load` ok · 전 패키지 green
 
+- **#10** — 완료 2026-06-05, branch `feat/pli/10-auth-provider` (base feat/pli/8-load-strategy, stacked)
+  - AC: [x] 토큰풀에서 유저별 자격증명 배분(라운드로빈) / [x] 부트스트랩 가입 트래픽 인원수만큼 선행(`Prewarm`) / [x] 자격증명 마스킹 저장(Credential.Secret json:"-")
+  - 구현: `internal/auth/auth.go`(신규 패키지) — `Provider` 인터페이스, `PoolProvider`(사전 풀), `BootstrapSignupProvider`(SignupFunc 주입, 유저별 캐시, Prewarm 선행 단계), `NewProvider` 팩토리. 테스트 6개
+  - 원칙: 관심사 분리(별도 패키지), SignupFunc 주입으로 transport 독립(테스트성), 인터페이스는 확장축(OAuth 등) 정당
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/auth -race` ok · 전 패키지 green
+
 ## 블로커
 - (없음)
