@@ -66,5 +66,10 @@
   - 구현: `internal/load/adapter.go` — `Adapter` 인터페이스, `Render`(text/template로 path·header·payload 치환, {{.token}}/{{.subject}} 노출, missingkey=error), `RESTAdapter`(net/http, latency 측정, 5xx는 응답·transport는 에러), 테스트 6개
   - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/load` ok(httptest) · `gofmt -l` clean
 
+- **#7** — 완료 2026-06-05, branch `feat/pli/7-vu-runtime` (base feat/pli/6-rest-adapter, stacked)
+  - AC: [x] N명 동시 실행 + graceful 취소(ctx 취소 시 무송신) / [x] 각 유저 독립 인증 컨텍스트(distinct creds) / [x] 동시 스모크(50, goroutine-per-user로 2k+ 지원 — 실부하는 #21)
+  - 구현: `internal/load/runtime.go` — `VirtualUser`/`StepResult`/`Runner`. `Run`이 유저당 goroutine으로 walker 순회 + 노드별 API 호출, ctx 취소 시 즉시 중단, 결과를 mutex-guarded 수집, node→template 해석
+  - Evidence: `go vet` clean · `go build` OK · `go test ./internal/load -race` ok(레이스 없음) · `gofmt -l` clean
+
 ## 블로커
 - (없음)
