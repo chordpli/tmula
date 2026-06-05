@@ -18,15 +18,17 @@ export function StatsView({ stats }: { stats: Stats }) {
 // ReportView renders a run report read-only: it is shared by the operator view
 // and the viewer (shared-link) page so both stay consistent.
 export default function ReportView({ report }: { report: Report }) {
+  // A Go nil slice marshals to JSON null, so default to an empty list.
+  const findings = report.findings ?? []
   return (
     <div>
       <StatsView stats={report.stats} />
-      <h3>Findings ({report.findings.length})</h3>
-      {report.findings.length === 0 ? (
+      <h3>Findings ({findings.length})</h3>
+      {findings.length === 0 ? (
         <p style={{ color: '#1a7f37' }}>No issues detected.</p>
       ) : (
         <ul style={{ lineHeight: 1.7 }}>
-          {report.findings.map((f, i) => (
+          {findings.map((f, i) => (
             <li key={i}>
               <span style={{ color: sevColor[f.severity] ?? '#555', fontWeight: 600 }}>[{f.category}]</span>{' '}
               {f.description}

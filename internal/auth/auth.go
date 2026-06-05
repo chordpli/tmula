@@ -44,12 +44,21 @@ func (p *PoolProvider) Acquire(_ context.Context, userIndex int) (domain.Credent
 // so the bootstrap provider is independent of any concrete signup transport.
 type SignupFunc func(ctx context.Context, userIndex int) (domain.Credential, error)
 
+// signupCall tracks one in-flight signup so concurrent Acquire calls for the
+// same user share a single signup instead of all serializing on one lock.
+type signupCall struct {
+	done chan struct{}
+	cred domain.Credential
+	err  error
+}
+
 // BootstrapSignupProvider provisions an account per virtual user by running a
 // signup up front, caching the result so each user keeps a stable identity.
 type BootstrapSignupProvider struct {
-	signup SignupFunc
-	mu     sync.Mutex
-	cache  map[int]domain.Credential
+	signup   SignupFunc
+	mu       sync.Mutex
+	cache    map[int]domain.Credential
+	inflight map[int]*signupCall
 }
 
 // NewBootstrapSignupProvider builds a provider that signs up accounts on demand.
@@ -57,22 +66,45 @@ func NewBootstrapSignupProvider(signup SignupFunc) (*BootstrapSignupProvider, er
 	if signup == nil {
 		return nil, fmt.Errorf("auth: bootstrap provider needs a signup function")
 	}
-	return &BootstrapSignupProvider{signup: signup, cache: make(map[int]domain.Credential)}, nil
+	return &BootstrapSignupProvider{
+		signup:   signup,
+		cache:    make(map[int]domain.Credential),
+		inflight: make(map[int]*signupCall),
+	}, nil
 }
 
 // Acquire returns the credential for userIndex, signing up (once) if needed.
+// The signup runs without holding the lock, so different users sign up in
+// parallel and concurrent callers for the same user share one signup. A failed
+// signup is not cached, so it can be retried.
 func (b *BootstrapSignupProvider) Acquire(ctx context.Context, userIndex int) (domain.Credential, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if c, ok := b.cache[userIndex]; ok {
+		b.mu.Unlock()
 		return c, nil
 	}
-	c, err := b.signup(ctx, userIndex)
-	if err != nil {
-		return domain.Credential{}, fmt.Errorf("auth: signup user %d: %w", userIndex, err)
+	if call, ok := b.inflight[userIndex]; ok {
+		b.mu.Unlock()
+		<-call.done
+		return call.cred, call.err
 	}
-	b.cache[userIndex] = c
-	return c, nil
+	call := &signupCall{done: make(chan struct{})}
+	b.inflight[userIndex] = call
+	b.mu.Unlock()
+
+	cred, err := b.signup(ctx, userIndex)
+
+	b.mu.Lock()
+	if err != nil {
+		call.err = fmt.Errorf("auth: signup user %d: %w", userIndex, err)
+	} else {
+		call.cred = cred
+		b.cache[userIndex] = cred
+	}
+	delete(b.inflight, userIndex)
+	b.mu.Unlock()
+	close(call.done)
+	return call.cred, call.err
 }
 
 // Prewarm runs the bootstrap signup phase for n users ahead of the run.

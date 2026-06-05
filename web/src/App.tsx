@@ -67,6 +67,7 @@ function Operator() {
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
   const esRef = useRef<EventSource | null>(null)
+  const doneRef = useRef(false)
 
   useEffect(() => () => esRef.current?.close(), [])
 
@@ -93,6 +94,7 @@ function Operator() {
 
   function listen(id: string) {
     esRef.current?.close()
+    doneRef.current = false
     const es = new EventSource(streamURL(id))
     esRef.current = es
     es.onmessage = (ev) => {
@@ -101,6 +103,7 @@ function Operator() {
         if (frame.status) setStatus(frame.status)
         if (frame.stats) setStats(frame.stats)
         if (frame.status && frame.status !== 'running' && frame.status !== 'pending') {
+          doneRef.current = true
           es.close()
           getReport(id).then(setReport).catch((e) => setError(String(e)))
         }
@@ -108,7 +111,15 @@ function Operator() {
         /* ignore malformed frame */
       }
     }
-    es.onerror = () => es.close()
+    es.onerror = () => {
+      es.close()
+      // The server closes the stream on completion too; only treat it as an
+      // error if the run had not already reached a terminal state.
+      if (!doneRef.current) {
+        setStatus('')
+        setError('Connection lost while streaming progress.')
+      }
+    }
   }
 
   return (
@@ -127,16 +138,18 @@ function Operator() {
           <Field label="Virtual users">
             <input
               type="number"
+              min={1}
               value={form.users}
-              onChange={(e) => set('users', Number(e.target.value))}
+              onChange={(e) => set('users', Math.max(1, Number(e.target.value) || 1))}
               style={inp}
             />
           </Field>
           <Field label="Max steps">
             <input
               type="number"
+              min={1}
               value={form.maxSteps}
-              onChange={(e) => set('maxSteps', Number(e.target.value))}
+              onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
               style={inp}
             />
           </Field>
@@ -156,11 +169,18 @@ function Operator() {
           />
         </Field>
         <div>
-          <button onClick={run} style={btn}>
+          <button
+            onClick={run}
+            disabled={status === 'starting' || status === 'running'}
+            style={{ ...btn, opacity: status === 'starting' || status === 'running' ? 0.5 : 1 }}
+          >
             Run experiment
           </button>
           {runId && status === 'running' && (
-            <button onClick={() => killRun(runId)} style={{ ...btn, background: '#d73a4a', marginLeft: 8 }}>
+            <button
+              onClick={() => killRun(runId).catch((e) => setError(String(e)))}
+              style={{ ...btn, background: '#d73a4a', marginLeft: 8 }}
+            >
               Kill
             </button>
           )}

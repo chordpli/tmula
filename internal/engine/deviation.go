@@ -21,6 +21,9 @@ type DeviationPolicy struct {
 // uniformly-random eligible transition instead of the weighted one. A node is
 // still only entered once its dependency predecessors are visited.
 func (w *Walker) WalkWithDeviation(start domain.ID, maxSteps int, p DeviationPolicy) ([]domain.ID, error) {
+	if maxSteps < 0 {
+		return nil, fmt.Errorf("engine: maxSteps must be >= 0, got %d", maxSteps)
+	}
 	if !w.nodes[start] {
 		return nil, fmt.Errorf("engine: start node %q not in graph", start)
 	}

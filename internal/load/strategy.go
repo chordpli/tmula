@@ -2,6 +2,7 @@ package load
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/chordpli/tmula/internal/domain"
@@ -37,7 +38,9 @@ func (s RampStrategy) TargetConcurrency(elapsed time.Duration) int {
 		return s.Start
 	}
 	frac := float64(elapsed) / float64(s.Ramp)
-	return s.Start + int(float64(s.Peak-s.Start)*frac+0.5)
+	// math.Round handles ramp-down (Peak < Start) correctly; int(x+0.5) would
+	// round the wrong way for a negative delta.
+	return s.Start + int(math.Round(float64(s.Peak-s.Start)*frac))
 }
 func (s RampStrategy) Name() string { return "ramp" }
 

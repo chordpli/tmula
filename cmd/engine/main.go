@@ -84,6 +84,7 @@ func run(args []string) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		_ = apiSrv.Shutdown(shutdownCtx) // cancel and drain in-flight runs first
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err

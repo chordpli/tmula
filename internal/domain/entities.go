@@ -111,8 +111,10 @@ func (g ScenarioGraph) Validate() error {
 		if !known[e.From] || !known[e.To] {
 			return fmt.Errorf("scenario graph: edge %q->%q references unknown node", e.From, e.To)
 		}
-		if e.Weight < 0 {
-			return fmt.Errorf("scenario graph: edge %q->%q has negative weight", e.From, e.To)
+		// Use a positive predicate so NaN (which fails every comparison) is
+		// rejected rather than silently passing as "not negative".
+		if !(e.Weight >= 0) {
+			return fmt.Errorf("scenario graph: edge %q->%q has invalid weight %v", e.From, e.To, e.Weight)
 		}
 	}
 	return nil
@@ -125,6 +127,14 @@ func (g ScenarioGraph) Validate() error {
 type Credential struct {
 	Subject string `json:"subject"`
 	Secret  string `json:"-"`
+}
+
+// String redacts the secret so a Credential cannot leak via %v/%+v in logs.
+func (c Credential) String() string {
+	if c.Secret == "" {
+		return fmt.Sprintf("Credential{Subject:%q}", c.Subject)
+	}
+	return fmt.Sprintf("Credential{Subject:%q, Secret:***}", c.Subject)
 }
 
 // CredentialPool supplies credentials to virtual users.
@@ -143,8 +153,8 @@ func (c CredentialPool) Validate() error {
 	if c.Strategy == CredPool && len(c.Entries) == 0 {
 		return fmt.Errorf("credential pool %q: pool strategy needs at least one entry", c.ID)
 	}
-	if c.Strategy == CredBootstrapSignup && c.BootstrapFlowID == nil {
-		return fmt.Errorf("credential pool %q: bootstrap-signup needs a bootstrapFlowId", c.ID)
+	if c.Strategy == CredBootstrapSignup && (c.BootstrapFlowID == nil || *c.BootstrapFlowID == "") {
+		return fmt.Errorf("credential pool %q: bootstrap-signup needs a non-empty bootstrapFlowId", c.ID)
 	}
 	return nil
 }
@@ -153,11 +163,10 @@ func (c CredentialPool) Validate() error {
 
 // ProfileShape parameterizes a load strategy over time.
 type ProfileShape struct {
-	Multiplier       float64 `json:"multiplier,omitempty"`
-	StartConcurrency int     `json:"startConcurrency,omitempty"`
-	PeakConcurrency  int     `json:"peakConcurrency,omitempty"`
-	RampSeconds      int     `json:"rampSeconds,omitempty"`
-	HoldSeconds      int     `json:"holdSeconds,omitempty"`
+	StartConcurrency int `json:"startConcurrency,omitempty"`
+	PeakConcurrency  int `json:"peakConcurrency,omitempty"`
+	RampSeconds      int `json:"rampSeconds,omitempty"`
+	HoldSeconds      int `json:"holdSeconds,omitempty"`
 }
 
 // LoadProfile concentrates load on a target API using a strategy + shape.
@@ -175,6 +184,10 @@ func (l LoadProfile) Validate() error {
 	}
 	if l.TargetAPIID == "" {
 		return fmt.Errorf("load profile %q: targetApiId is required", l.ID)
+	}
+	s := l.Shape
+	if s.StartConcurrency < 0 || s.PeakConcurrency < 0 || s.RampSeconds < 0 || s.HoldSeconds < 0 {
+		return fmt.Errorf("load profile %q: shape parameters must be non-negative", l.ID)
 	}
 	return nil
 }

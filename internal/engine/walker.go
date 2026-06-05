@@ -56,6 +56,9 @@ func (w *Walker) canEnter(node domain.ID, visited map[domain.ID]bool) bool {
 // It stops early when no eligible transition remains (a terminal node or all
 // outgoing targets blocked by unmet dependencies).
 func (w *Walker) Walk(start domain.ID, maxSteps int) ([]domain.ID, error) {
+	if maxSteps < 0 {
+		return nil, fmt.Errorf("engine: maxSteps must be >= 0, got %d", maxSteps)
+	}
 	if !w.nodes[start] {
 		return nil, fmt.Errorf("engine: start node %q not in graph", start)
 	}

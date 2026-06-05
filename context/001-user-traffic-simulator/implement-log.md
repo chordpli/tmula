@@ -149,5 +149,21 @@
   - 원칙: ReportView 추출로 중복 제거(DRY), 런타임 의존성 추가 0, 순수 헬퍼 테스트
   - Evidence: vitest 7/7 · `tsc --noEmit` + `vite build` ok(149KB) · 전 Go 패키지 green
 
+- **review-improvements** — 완료 2026-06-05, branch `refactor/pli/review-improvements` (base feat/pli/18-viewer) — **17 PR 코드 리뷰 + gemini 유효 피드백 반영**
+  - 방식: 8개 병렬 리뷰 에이전트가 패키지별로 원칙 대조 + 각 PR gemini 리뷰 fetch → 유효한 설계/로직/보안만 추출(의존성 버전·sunset 배너·false positive 폐기)
+  - 적용한 수정 (15 소스):
+    - `safety`: **auto-kill 누적률→롤링 윈도우**(긴 런에서 안 터지던 버그) · parseHost 스킴 없는 호스트 · AllowHost 락 밖 파싱
+    - `mask`: **pin/card 과잉마스킹→토큰 매칭**(shipping_address 등 보호) · passphrase/private/signature 등 누락 보강 · HTML 이스케이프 끔
+    - `obs`: **FirstSeen API별** · **threshold가 mutated 제외** · Snapshot 정렬을 락 밖으로
+    - `domain`: NaN weight 거부 · Shape 음수 거부 · bootstrap 빈 flowid 거부 · Credential.String() 시크릿 가림 · dead Multiplier 제거
+    - `scenario`: NaN weight 거부 / `engine`: 음수 maxSteps 거부
+    - `auth`: signup I/O를 락 밖으로(in-flight 메모이제이션) / `load`: 응답 body LimitReader · ramp 부호인식 반올림 · cancel break
+    - `api`: **Server.Shutdown(런 goroutine drain)** · killRun 409 · body MaxBytesReader · SSE 25→250ms / `main`: shutdown에 drain
+    - `store`: 원자적 SaveToFile(tmp+rename)
+    - UI: SSE onerror 멈춤 가드 · Run 중복실행 disable · killRun .catch · 숫자입력 clamp · findings null 가드 · killRun 에러 표면화
+  - **codegen(#44) 결정**: 하지 않음. 대신 `api/review_test.go`의 **drift-guard 골든 JSON 테스트**로 TS 타입 동기화 보장(에이전트 권고)
+  - 회귀 테스트 8개 파일 추가(`*_review_test.go`) — 각 수정 잠금
+  - Evidence: `go vet`/`gofmt` clean · `go test ./... -race` 전 패키지 green · vitest 7/7 · `vite build` ok · 바이너리 스모크 ok · go.mod 새 의존성 0
+
 ## 블로커
 - (없음)

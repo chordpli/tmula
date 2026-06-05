@@ -125,7 +125,8 @@ export async function getReport(runId: string): Promise<Report> {
 }
 
 export async function killRun(runId: string): Promise<void> {
-  await fetch(`${API}/runs/${runId}/kill`, { method: 'POST' })
+  const res = await fetch(`${API}/runs/${runId}/kill`, { method: 'POST' })
+  if (!res.ok) throw new Error(`kill failed: ${res.status}`)
 }
 
 export function streamURL(runId: string): string {
