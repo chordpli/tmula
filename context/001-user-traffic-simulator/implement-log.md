@@ -136,5 +136,12 @@
   - 참고: 3모드(준수/이탈/부하) 명시 분리 비교는 후속(현재 단일 run stats+findings); per-request 라이브 메트릭도 후속
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/api -race` ok(9) · 전 패키지 green
 
+- **#17** — 완료 2026-06-05, branch `feat/pli/17-react-ui` (base feat/pli/16-report-share, stacked)
+  - AC: [x] 실험 생성→실행→리포트 열람 E2E(폼→createExperiment→startRun→SSE→getReport) / [x] 그래프 작성(JSON textarea 에디터) / [x] `make embed` 단일 바이너리에 UI 임베드(검증: / → React 번들, assets 200)
+  - 구현: `web/src/api.ts`(순수 헬퍼 buildRunSpec/parseSSEData + fetch 래퍼), `App.tsx`(폼·실시간 SSE·findings 뷰), `api.test.ts`(vitest 5). package.json build=`tsc --noEmit && vite build`, test=`vitest run`. CI web job에 `npm test` 추가
+  - 원칙: 런타임 의존성은 react/react-dom만(추가 0), 테스트는 dev 전용 vitest, 순수 로직 분리해 테스트성 확보
+  - 빌드 아티팩트(static/assets, dist) gitignore — 커밋엔 placeholder index.html 유지(go-only CI 빌드 보호)
+  - Evidence: vitest 5/5 · `tsc --noEmit` + `vite build` ok(148KB) · `make embed` → 바이너리 UI 서빙 스모크 ok · 전 Go 패키지 green
+
 ## 블로커
 - (없음)
