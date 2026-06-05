@@ -1,0 +1,20 @@
+version: v2
+modules:
+  # Root the module at the proto's directory so paths=source_relative emits a
+  # single flat package at internal/cluster/clusterpb whose directory matches
+  # the go_package import path the issue mandates.
+  - path: proto/cluster/v1
+lint:
+  use:
+    - STANDARD
+  except:
+    # The issue spec fixes the message names (ShardResult, PingReply, etc.); keep
+    # them rather than the *Response suffix buf's STANDARD set would require.
+    - PACKAGE_VERSION_SUFFIX
+    - RPC_RESPONSE_STANDARD_NAME
+    # go_package is pinned to .../internal/cluster/clusterpb by the issue, which
+    # intentionally does not mirror the cluster.v1 package path.
+    - PACKAGE_DIRECTORY_MATCH
+breaking:
+  use:
+    - FILE
