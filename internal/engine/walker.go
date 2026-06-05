@@ -70,32 +70,42 @@ func (w *Walker) Walk(start domain.ID, maxSteps int) ([]domain.ID, error) {
 		path = append(path, cur)
 		visited[cur] = true
 
-		var eligible []domain.Edge
-		var total float64
-		for _, e := range w.outgoing[cur] {
-			if e.Weight <= 0 {
-				continue
-			}
-			if w.canEnter(e.To, visited) {
-				eligible = append(eligible, e)
-				total += e.Weight
-			}
-		}
+		eligible, total := w.eligible(cur, visited)
 		if len(eligible) == 0 || total <= 0 || step == maxSteps {
 			break
 		}
-
-		r := w.rng.Float64() * total
-		next := eligible[len(eligible)-1].To
-		var acc float64
-		for _, e := range eligible {
-			acc += e.Weight
-			if r < acc {
-				next = e.To
-				break
-			}
-		}
-		cur = next
+		cur = weightedPick(eligible, total, w.rng)
 	}
 	return path, nil
+}
+
+// eligible returns the outgoing edges from cur whose target may be entered
+// (dependency predecessors satisfied) and that carry positive weight, with the
+// sum of their weights.
+func (w *Walker) eligible(cur domain.ID, visited map[domain.ID]bool) ([]domain.Edge, float64) {
+	var edges []domain.Edge
+	var total float64
+	for _, e := range w.outgoing[cur] {
+		if e.Weight <= 0 {
+			continue
+		}
+		if w.canEnter(e.To, visited) {
+			edges = append(edges, e)
+			total += e.Weight
+		}
+	}
+	return edges, total
+}
+
+// weightedPick chooses a target proportional to edge weight.
+func weightedPick(edges []domain.Edge, total float64, rng *rand.Rand) domain.ID {
+	r := rng.Float64() * total
+	var acc float64
+	for _, e := range edges {
+		acc += e.Weight
+		if r < acc {
+			return e.To
+		}
+	}
+	return edges[len(edges)-1].To
 }
