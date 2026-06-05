@@ -1,0 +1,13 @@
+version: v2
+plugins:
+  # With the buf module rooted at proto/cluster/v1, the source-relative path is
+  # just cluster.proto, so both plugins emit cluster.pb.go / cluster_grpc.pb.go
+  # directly into internal/cluster/clusterpb (a single flat package).
+  - local: protoc-gen-go
+    out: internal/cluster/clusterpb
+    opt:
+      - paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: internal/cluster/clusterpb
+    opt:
+      - paths=source_relative

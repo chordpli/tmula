@@ -9,13 +9,18 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+
 	"github.com/chordpli/tmula/internal/api"
+	"github.com/chordpli/tmula/internal/cluster"
+	"github.com/chordpli/tmula/internal/cluster/clusterpb"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/web"
@@ -53,6 +58,12 @@ func run(args []string) error {
 	}
 	slog.Info("starting tmula", "role", role, "addr", *addr, "version", version)
 
+	// A worker serves the gRPC cluster service (master/local serve the HTTP
+	// control plane + UI below).
+	if role == domain.RoleWorker {
+		return runWorker(*addr)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -88,5 +99,35 @@ func run(args []string) error {
 		return srv.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
+	}
+}
+
+// runWorker serves the gRPC cluster service: a master distributes shards of a
+// run to workers, which execute them and stream results back.
+func runWorker(addr string) error {
+	lis, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("worker: listen on %s: %w", addr, err)
+	}
+	gs := grpc.NewServer()
+	clusterpb.RegisterClusterServiceServer(gs, cluster.NewWorkerServer())
+	slog.Info("worker serving gRPC cluster service", "addr", addr)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := gs.Serve(lis); err != nil {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		gs.GracefulStop()
+		return nil
+	case err := <-errCh:
+		return fmt.Errorf("worker: serve: %w", err)
 	}
 }
