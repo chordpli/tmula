@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildRunSpec, parseSSEData, type ExperimentForm } from './api'
+import { buildRunSpec, parseSSEData, shareTokenFromQuery, type ExperimentForm } from './api'
 
 const form: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
@@ -42,5 +42,18 @@ describe('parseSSEData', () => {
     expect(parseSSEData(': comment')).toBeNull()
     expect(parseSSEData('data: {bad json')).toBeNull()
     expect(parseSSEData('event: ping')).toBeNull()
+  })
+})
+
+describe('shareTokenFromQuery', () => {
+  it('extracts a share token', () => {
+    expect(shareTokenFromQuery('?share=abc123')).toBe('abc123')
+    expect(shareTokenFromQuery('?foo=1&share=tok')).toBe('tok')
+  })
+
+  it('returns null when absent or blank', () => {
+    expect(shareTokenFromQuery('')).toBeNull()
+    expect(shareTokenFromQuery('?foo=1')).toBeNull()
+    expect(shareTokenFromQuery('?share=')).toBeNull()
   })
 })

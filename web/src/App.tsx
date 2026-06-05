@@ -5,12 +5,15 @@ import {
   createExperiment,
   getReport,
   killRun,
+  shareTokenFromQuery,
   startRun,
   streamURL,
   type ExperimentForm,
   type Report,
   type Stats,
 } from './api'
+import ReportView, { StatsView } from './ReportView'
+import Viewer from './Viewer'
 
 const defaultGraph = JSON.stringify(
   {
@@ -49,7 +52,14 @@ const initialForm: ExperimentForm = {
   templatesJSON: defaultTemplates,
 }
 
+// App routes to the read-only viewer when a ?share=<token> link is opened,
+// otherwise it shows the operator console.
 export default function App() {
+  const token = shareTokenFromQuery(window.location.search)
+  return token ? <Viewer token={token} /> : <Operator />
+}
+
+function Operator() {
   const [form, setForm] = useState<ExperimentForm>(initialForm)
   const [runId, setRunId] = useState<string>('')
   const [status, setStatus] = useState<string>('')
@@ -77,7 +87,7 @@ export default function App() {
       listen(id)
     } catch (e) {
       setStatus('')
-      setError(String(e))
+      setError(String(e instanceof Error ? e.message : e))
     }
   }
 
@@ -100,8 +110,6 @@ export default function App() {
     }
     es.onerror = () => es.close()
   }
-
-  const sev: Record<string, string> = { critical: '#d73a4a', warning: '#d4a72c', info: '#0969da' }
 
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 880, margin: '2rem auto', padding: '0 1rem' }}>
@@ -166,34 +174,13 @@ export default function App() {
           <h2>
             Run {runId} — <span>{status}</span>
           </h2>
-          {stats && (
-            <ul style={{ lineHeight: 1.7 }}>
-              <li>requests: {stats.total}</li>
-              <li>error rate: {(stats.errorRate * 100).toFixed(1)}%</li>
-              <li>
-                latency p50/p95/p99: {stats.p50.toFixed(0)} / {stats.p95.toFixed(0)} / {stats.p99.toFixed(0)} ms
-              </li>
-              <li>timeouts: {stats.timeouts}</li>
-            </ul>
-          )}
+          {stats && <StatsView stats={stats} />}
         </section>
       )}
 
       {report && (
         <section style={{ marginTop: '1rem' }}>
-          <h3>Findings ({report.findings.length})</h3>
-          {report.findings.length === 0 ? (
-            <p style={{ color: '#1a7f37' }}>No issues detected.</p>
-          ) : (
-            <ul style={{ lineHeight: 1.7 }}>
-              {report.findings.map((f, i) => (
-                <li key={i}>
-                  <span style={{ color: sev[f.severity] ?? '#555', fontWeight: 600 }}>[{f.category}]</span>{' '}
-                  {f.description}
-                </li>
-              ))}
-            </ul>
-          )}
+          <ReportView report={report} />
         </section>
       )}
     </main>
