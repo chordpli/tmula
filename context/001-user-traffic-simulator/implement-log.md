@@ -81,5 +81,11 @@
   - 구현: `internal/obs/collector.go` — `Collector`(thread-safe Record/RecordSample), `Snapshot`→`Stats`(nearest-rank 백분위, error_rate, timeout, status 분포 복사). 4xx/5xx 또는 errorClass present = error, errorClass="timeout" = timeout. 테스트 5개
   - Evidence: `go vet` clean · `go build` OK · `go test ./internal/obs -race` ok · `gofmt -l` clean
 
+- **#15** — 완료 2026-06-05, branch `feat/pli/15-control-plane` (base feat/pli/11-obs-collector, stacked) — **P0 임계경로 캡스톤**
+  - AC: [x] 전 엔드포인트 동작+입력검증(lifecycle, 빈 spec→400) / [x] SSE 실시간 진행 스트림(`/runs/{id}/stream`) / [x] kill 엔드포인트 Safety Guard 연동(guard.Kill + ctx cancel)
+  - 구현: `internal/api/server.go` — `Server`(in-memory 레지스트리), 엔드포인트 `POST /experiments`·`GET /experiments/{id}`·`POST /experiments/{id}/run`·`POST /runs/{id}/kill`·`GET /runs/{id}/report`·`GET /runs/{id}/stream`(SSE). run은 engine+runtime+safety+obs를 통합 실행. `cmd/engine/main.go`에 `/api` 마운트(바이너리 통합)
+  - Evidence: `go vet` clean · `go build` OK · `go test ./internal/api -race` PASS(5) · 전 패키지 `-race` green · 바이너리 스모크(`/api/...` 404/400 JSON) · `gofmt -l` clean
+  - 참고: SSE는 현재 주기적 스냅샷(완료 시 최종 프레임); per-request 라이브 메트릭은 runtime sink 도입 시 향상(후속). store는 in-memory(#14에서 영속화 교체)
+
 ## 블로커
 - (없음)
