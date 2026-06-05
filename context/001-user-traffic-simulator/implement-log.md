@@ -1,5 +1,10 @@
 # Implement Log: user-traffic-simulator
 
+## 코딩 원칙 (사용자 표준 — 2026-06-05, 전 이슈 적용)
+- **고퍼스럽게(idiomatic Go)**: accept interfaces / return structs, 작은 인터페이스, error wrapping, zero-value 유용성, 표준 레이아웃.
+- **의존성 최소**: stdlib 우선. 새 외부 Go 의존성 금지 (기존 `sigs.k8s.io/yaml`만 유지). #14 저장소도 SQLite 대신 stdlib(in-memory + JSON 파일).
+- **SOLID + 확장 개방 / 과도한 추상화 회피**: 실제 확장 축이 있는 곳만 인터페이스(Adapter/LoadStrategy/Mutator 등). 구현 1개뿐인데 인터페이스 만들지 않음.
+
 ## 작업 목록
 - [x] #1 [infra] 프로젝트 스캐폴딩 & 빌드/테스트 파이프라인 (source: GitHub issue #1)
 - [x] #2 [feat] 코어 도메인 모델 정의
@@ -86,6 +91,12 @@
   - 구현: `internal/api/server.go` — `Server`(in-memory 레지스트리), 엔드포인트 `POST /experiments`·`GET /experiments/{id}`·`POST /experiments/{id}/run`·`POST /runs/{id}/kill`·`GET /runs/{id}/report`·`GET /runs/{id}/stream`(SSE). run은 engine+runtime+safety+obs를 통합 실행. `cmd/engine/main.go`에 `/api` 마운트(바이너리 통합)
   - Evidence: `go vet` clean · `go build` OK · `go test ./internal/api -race` PASS(5) · 전 패키지 `-race` green · 바이너리 스모크(`/api/...` 404/400 JSON) · `gofmt -l` clean
   - 참고: SSE는 현재 주기적 스냅샷(완료 시 최종 프레임); per-request 라이브 메트릭은 runtime sink 도입 시 향상(후속). store는 in-memory(#14에서 영속화 교체)
+
+- **#5** — 완료 2026-06-05, branch `feat/pli/5-deviation-mutation` (base feat/pli/15-control-plane, stacked) — **P1 시작**
+  - AC: [x] 이탈% 분포 + 의존엣지 위반 0(500런) / [x] 변형이 4xx 유발(mutate→adapter→SUT 400) / [x] 변형 on/off 토글 + 강도(Rate, 빈 set no-op)
+  - 구현: `internal/engine/deviation.go`(`DeviationPolicy`{Rate,Abandon,Explore}, `WalkWithDeviation` — 의존엣지 불변), walker DRY 리팩터(`eligible`/`weightedPick` 추출). `internal/load/mutate.go`(`Mutate` + `DefaultMutations` 슬라이스 — null/empty/huge/negative/type-swap). 테스트 7개
+  - 원칙 적용: stdlib only · Mutation은 슬라이스(인터페이스 남발 회피) · 확장은 DefaultMutations append로
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/engine ./internal/load -race` ok · 전 패키지 green
 
 ## 블로커
 - (없음)
