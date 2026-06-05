@@ -1,0 +1,35 @@
+# --- Build artifacts ---
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+*.prof
+
+# --- Go ---
+/vendor/
+
+# --- Node / web ---
+web/node_modules/
+web/dist/
+node_modules/
+
+# Built React UI assets copied into the embed dir (index.html placeholder stays tracked)
+internal/web/static/assets/
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Local dev tooling (vskills / codex / omc) — not part of the product ---
+# Remove these lines if you want to version the tooling/skills.
+.omc/
+.claude/
+.codex/
+.vills-lock.json
