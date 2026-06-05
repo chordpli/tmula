@@ -2,7 +2,7 @@
 
 ## 작업 목록
 - [x] #1 [infra] 프로젝트 스캐폴딩 & 빌드/테스트 파이프라인 (source: GitHub issue #1)
-- [ ] #2 [feat] 코어 도메인 모델 정의
+- [x] #2 [feat] 코어 도메인 모델 정의
 - [ ] #3 [feat] 그래프 정의 포맷 파서·검증
 - [ ] #4~#21 (linear-plan 참조)
 
@@ -11,7 +11,13 @@
 
 ## 완료
 
-- **#1** — 완료 2026-06-05, commit `<pending push>` `chore: scaffold Go+React project with build pipeline (#1)`
+- **#2** — 완료 2026-06-05, branch `feat/pli/2-domain-model` (base main, stacked PR)
+  - AC: [x] 11 엔티티 구조체+검증 단위테스트 / [x] Edge.dependency JSON 라운드트립(`TestEdgeDependencyRoundTrip`) / [x] env_class prod-locked 플래그(`TestProdLockedFlagExists`)
+  - 구현: `internal/domain/enums.go`(10 enum + Valid), `entities.go`(TargetEnv·APITemplate·ScenarioGraph·Node·Edge·CredentialPool·LoadProfile·Experiment·RunExecution·MetricSample·Finding·ReportShare + Validate), 테스트 3파일
+  - 추가 검증: Credential.Secret은 `json:"-"`로 직렬화 제외(PII, `TestCredentialSecretNotSerialized`)
+  - Evidence: `go vet` clean · `go build ./...` OK · `go test ./...` ok · `gofmt -l` clean
+
+- **#1** — 완료 2026-06-05, commit `602e4a2` `chore: scaffold Go+React project with build pipeline (#1)` (pushed origin/main, 이슈 #1 closed)
 
   ### #1 AC (Acceptance Criteria)
   - [x] `make build`가 단일 바이너리 산출 (React 정적 자산 embed.FS 골격 포함 — placeholder index.html)
