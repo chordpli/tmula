@@ -3,7 +3,7 @@
 ## 작업 목록
 - [x] #1 [infra] 프로젝트 스캐폴딩 & 빌드/테스트 파이프라인 (source: GitHub issue #1)
 - [x] #2 [feat] 코어 도메인 모델 정의
-- [ ] #3 [feat] 그래프 정의 포맷 파서·검증
+- [x] #3 [feat] 그래프 정의 포맷 파서·검증
 - [ ] #4~#21 (linear-plan 참조)
 
 ## 진행 중
@@ -49,6 +49,12 @@
   - web `npm run build`: vite v5.4.21 → 30 modules, dist/assets/index-*.js 143KB, built in 343ms
   - 바이너리 스모크: `--version`→`dev`; `GET /healthz`→`{"status":"ok","role":"local","version":"dev"}`; `GET /`→embed UI
   - 상태: 빌드 OK / 테스트 OK / AC ✓ / commit+push 대기 (사용자 OK 게이트)
+
+- **#3** — 완료 2026-06-05, branch `feat/pli/3-graph-format` (base feat/pli/2-domain-model, stacked)
+  - AC: [x] 유효 그래프 YAML/JSON 파싱 + 라운드트립 / [x] weight>1·의존 사이클 거부 / [x] 의존엣지 위상정렬(`TopoSortDependencies`)
+  - 구현: `internal/scenario/scenario.go`(Parse JSON·YAML via sigs.k8s.io/yaml, MarshalJSON), `validate.go`(weight 범위·per-node 합 검증, Kahn 위상정렬로 의존 사이클 탐지), 테스트 9개
+  - 의존성 추가: `sigs.k8s.io/yaml`(json 태그 존중 → 도메인 모델 단일 소스)
+  - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/scenario` ok · `gofmt -l` clean
 
 ## 블로커
 - (없음)
