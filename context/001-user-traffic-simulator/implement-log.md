@@ -98,5 +98,12 @@
   - 원칙 적용: stdlib only · Mutation은 슬라이스(인터페이스 남발 회피) · 확장은 DefaultMutations append로
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/engine ./internal/load -race` ok · 전 패키지 green
 
+- **#8** — 완료 2026-06-05, branch `feat/pli/8-load-strategy` (base feat/pli/5-deviation-mutation, stacked)
+  - AC: [x] 가중 집중(graph weight + LoadProfile.TargetAPIID) / [x] ramp/spike 시계열 의도 형태 추종(정확 보간, ±10% 테스트) / [x] 전략 플러그인으로 절대 RPS 후속 추가 가능(`LoadStrategy` 인터페이스)
+  - 구현: `internal/load/strategy.go` — `LoadStrategy` 인터페이스 + `Constant`/`Ramp`/`Spike`/`Soak` + `NewStrategy`(domain.LoadProfile→전략). 순수 함수(시간→목표 동시성), 테스트 7개
+  - 원칙: 인터페이스는 *실제 확장 축*(다중 전략 + 미래 RPS)이라 정당. stdlib only
+  - 참고: 런타임에 전략 적용(시간축 동시성 스케줄링)은 후속 wiring (runner 스케줄러 / #19)
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/load` ok · 전 패키지 green
+
 ## 블로커
 - (없음)
