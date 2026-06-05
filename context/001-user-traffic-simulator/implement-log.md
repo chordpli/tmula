@@ -117,5 +117,11 @@
   - 원칙: stdlib only, 인터페이스 없이 구조체+메서드(과추상화 회피), 결정적 정렬
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/obs -race` ok · 전 패키지 green
 
+- **#13** — 완료 2026-06-05, branch `feat/pli/13-pii-masking` (base feat/pli/12-finding-classifier, stacked)
+  - AC: [x] 지정 필드(토큰/이메일/전화) 마스킹 / [x] 미지정 의심필드 기본 가림(deny-by-default 휴리스틱) / [x] 로그·리포트·저장 적용 — Masker가 단일 chokepoint(`MaskJSON`/`MaskValue`); 실제 호출 wiring은 #16 리포트·#14 저장 통합 시
+  - 구현: `internal/mask/mask.go`(신규 패키지) — `Masker`(always/allow + 휴리스틱 substr: password/token/secret/email/phone/jwt/session/card...), `MaskJSON`(재귀 워크 중첩·배열), `MaskValue`, allowlist override. 테스트 7개
+  - 원칙: 단일 책임 패키지, 인터페이스 없이 구조체(1구현), stdlib only, deny-by-default(정책 §5.3)
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/mask` ok · 전 패키지 green
+
 ## 블로커
 - (없음)
