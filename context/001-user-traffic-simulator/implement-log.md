@@ -76,5 +76,10 @@
   - 구현: `internal/safety/guard.go` — `Guard`(host 화이트리스트 매칭 *.wildcard, 토큰버킷 rate cap, concurrency 세마포어, 수동 `Kill`, `ReportOutcome` 기반 자동 임계 trip), `NewGuardForEnv`(prod-locked는 명시 unlock 필요 — 정책 §1), injectable clock, 테스트 7개
   - Evidence: `go vet` clean · `go build` OK · `go test ./internal/safety -race` ok · `gofmt -l` clean
 
+- **#11** — 완료 2026-06-05, branch `feat/pli/11-obs-collector` (base feat/pli/9-safety-guard, stacked)
+  - AC: [x] status/latency/error_class 기록 / [x] p50/95/99·error_rate·timeout 집계 정확 / [x] 응답 assertion 결과 수집(errorClass로 기록 → #12 분류)
+  - 구현: `internal/obs/collector.go` — `Collector`(thread-safe Record/RecordSample), `Snapshot`→`Stats`(nearest-rank 백분위, error_rate, timeout, status 분포 복사). 4xx/5xx 또는 errorClass present = error, errorClass="timeout" = timeout. 테스트 5개
+  - Evidence: `go vet` clean · `go build` OK · `go test ./internal/obs -race` ok · `gofmt -l` clean
+
 ## 블로커
 - (없음)
