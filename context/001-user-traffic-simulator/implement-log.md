@@ -111,5 +111,11 @@
   - 원칙: 관심사 분리(별도 패키지), SignupFunc 주입으로 transport 독립(테스트성), 인터페이스는 확장축(OAuth 등) 정당
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/auth -race` ok · 전 패키지 green
 
+- **#12** — 완료 2026-06-05, branch `feat/pli/12-finding-classifier` (base feat/pli/10-auth-provider, stacked)
+  - AC: [x] 4 카테고리 탐지(threshold/contract/mutation/availability) / [x] severity 부여 + evidence_ref(apiID) / [x] 3모드 집계 — Aggregator는 모드-무관, 준수/이탈/부하 결합은 리포트(#16) 책임
+  - 구현: `internal/obs/finding.go` — `RequestObservation`(Mutated 컨텍스트 포함), `Aggregator.Classify(cfg)` → `[]domain.Finding`. mutation(변형 실패), contract(정상경로 5xx/assertion), availability(연속 실패 run≥N), threshold(error_rate/p95 초과). API별 그룹핑(엔드포인트 1개=Finding 1개). 테스트 8개
+  - 원칙: stdlib only, 인터페이스 없이 구조체+메서드(과추상화 회피), 결정적 정렬
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/obs -race` ok · 전 패키지 green
+
 ## 블로커
 - (없음)
