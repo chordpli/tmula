@@ -56,5 +56,10 @@
   - 의존성 추가: `sigs.k8s.io/yaml`(json 태그 존중 → 도메인 모델 단일 소스)
   - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/scenario` ok · `gofmt -l` clean
 
+- **#4** — 완료 2026-06-05, branch `feat/pli/4-graph-engine` (base feat/pli/3-graph-format, stacked)
+  - AC: [x] 전이확률 분포 통계 일치(4000샘플 ~70%) / [x] 의존 선행 미충족 전이 0건(500런) / [x] 종료 조건 정상 종료
+  - 구현: `internal/engine/walker.go` — `NewWalker`(seeded RNG), `Walk`(가중 랜덤 전이 + `canEnter` 의존엣지 불가침 검증, 종료/maxSteps 가드), 테스트 6개
+  - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/engine` PASS(6) · `gofmt -l` clean
+
 ## 블로커
 - (없음)
