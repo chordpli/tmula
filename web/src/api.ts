@@ -131,3 +131,18 @@ export async function killRun(runId: string): Promise<void> {
 export function streamURL(runId: string): string {
   return `${API}/runs/${runId}/stream`
 }
+
+export async function getSharedReport(token: string): Promise<Report> {
+  const res = await fetch(`${API}/reports/shared/${token}`)
+  if (res.status === 410) throw new Error('This shared report has expired.')
+  if (res.status === 404) throw new Error('This shared report was not found.')
+  if (!res.ok) throw new Error(`Shared report unavailable (${res.status}).`)
+  return (await res.json()) as Report
+}
+
+// shareTokenFromQuery extracts a read-only viewer token from a query string,
+// e.g. "?share=abc" -> "abc". Returns null when absent or blank.
+export function shareTokenFromQuery(search: string): string | null {
+  const t = new URLSearchParams(search).get('share')
+  return t && t.trim() ? t.trim() : null
+}

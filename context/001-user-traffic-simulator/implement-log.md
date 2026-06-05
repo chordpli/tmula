@@ -143,5 +143,11 @@
   - 빌드 아티팩트(static/assets, dist) gitignore — 커밋엔 placeholder index.html 유지(go-only CI 빌드 보호)
   - Evidence: vitest 5/5 · `tsc --noEmit` + `vite build` ok(148KB) · `make embed` → 바이너리 UI 서빙 스모크 ok · 전 Go 패키지 green
 
+- **#18** — 완료 2026-06-05, branch `feat/pli/18-viewer` (base feat/pli/17-react-ui, stacked) — **P1 마지막**
+  - AC: [x] 토큰 URL로 read-only 리포트(`?share=<token>` → Viewer) / [x] 설정/실행 컨트롤 비노출(Viewer는 ReportView만) / [x] 만료 토큰 거부(getSharedReport 410→메시지)
+  - 구현: `web/src/ReportView.tsx`(공유 프레젠테이션 — operator+viewer 재사용 DRY), `Viewer.tsx`(share 리포트 fetch·read-only), `App.tsx`가 `shareTokenFromQuery`로 Viewer/Operator 분기, `api.ts`에 getSharedReport/shareTokenFromQuery. vitest 2개 추가
+  - 원칙: ReportView 추출로 중복 제거(DRY), 런타임 의존성 추가 0, 순수 헬퍼 테스트
+  - Evidence: vitest 7/7 · `tsc --noEmit` + `vite build` ok(149KB) · 전 Go 패키지 green
+
 ## 블로커
 - (없음)
