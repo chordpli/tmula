@@ -165,5 +165,16 @@
   - 회귀 테스트 8개 파일 추가(`*_review_test.go`) — 각 수정 잠금
   - Evidence: `go vet`/`gofmt` clean · `go test ./... -race` 전 패키지 green · vitest 7/7 · `vite build` ok · 바이너리 스모크 ok · go.mod 새 의존성 0
 
+- **스택 머지** — 2026-06-06, P0+P1+review (18 커밋)을 main으로 fast-forward (59c0d3b). 이슈 #1~#18 closed, Epic E1~E6 closed, 로컬 브랜치 정리, main CI green.
+
+- **P2 분산 (#19·#20·#21)** — 완료 2026-06-06, branch `feat/pli/p2-distributed` → PR #47 (base main) — **병렬 구현**
+  - 방식: Phase0 토대(go 1.23+/grpc·pgx 의존성·CI) → **Phase1 3개 worktree 에이전트 병렬**(#19 cluster·#20 store·#21 bench) → Phase2 파일단위 통합+cmd 배선
+  - #19 `internal/cluster`: gRPC master/worker. master가 가상유저를 워커에 분할(splitUsers)→server-streaming RunShard→결과를 한 Collector로 집계. 워커는 기존 load.Runner로 샤드 실행. 생성 protobuf 커밋(CI 코드젠 불요). bufconn 인-프로세스 테스트
+  - #20 `internal/store/postgres.go`: PostgresStore(pgx/v5)가 기존 Store 인터페이스 2번째 구현(MemStore 불변). 멱등 Migrate, JSONB+쿼리컬럼. 통합테스트는 `TMULA_TEST_POSTGRES` 없으면 SKIP + no-DB 유닛테스트
+  - #21 `internal/bench`: stdlib capacity 하니스(목표 동시성 대비 달성 RPS·tracking error·백분위) + 벤치마크(~15.6k RPS 측정)
+  - cmd: `--role worker`가 gRPC cluster 서비스 서빙
+  - 의존성 결정(사용자 허용): grpc v1.81→**go 1.25 필요** → go.mod·CI 1.25. buf(자체 컴파일러)로 코드젠
+  - Evidence: `go vet`/`gofmt` clean · `go test ./... -race` 전 14 패키지 green · 바이너리 worker 기동 ok · **PR #47 CI(go 1.25) success**
+
 ## 블로커
 - (없음)
