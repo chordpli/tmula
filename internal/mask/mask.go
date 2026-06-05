@@ -5,15 +5,24 @@
 package mask
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
 
-// defaultSensitive are substrings that mark a field name as sensitive.
-var defaultSensitive = []string{
-	"password", "passwd", "secret", "token", "authorization", "apikey",
-	"api_key", "jwt", "session", "credential", "email", "phone", "ssn",
-	"card", "cvv", "pin",
+// substringSensitive are unambiguous substrings: if the field name contains
+// one, it is masked (e.g. "userToken", "billing_email").
+var substringSensitive = []string{
+	"password", "passwd", "passphrase", "secret", "token", "authorization",
+	"apikey", "api_key", "jwt", "session", "credential", "private",
+	"signature", "cookie", "bearer", "email", "phone",
+}
+
+// tokenSensitive are short/ambiguous names matched only as whole tokens (split
+// on non-alphanumeric and camelCase), so "pin"/"card" mask "user_pin"/"cardNo"
+// but NOT "shipping_address" or "shopping_cart".
+var tokenSensitive = []string{
+	"pin", "card", "cvv", "ssn", "otp", "key", "salt", "iban", "dob",
 }
 
 // Config configures a Masker.
@@ -63,13 +72,58 @@ func (m *Masker) IsSensitive(field string) bool {
 	if m.always[f] {
 		return true
 	}
-	for _, s := range defaultSensitive {
+	for _, s := range substringSensitive {
 		if strings.Contains(f, s) {
 			return true
 		}
 	}
+	if len(tokenSensitive) > 0 {
+		tokens := tokenize(field)
+		for _, t := range tokens {
+			for _, s := range tokenSensitive {
+				if t == s {
+					return true
+				}
+			}
+		}
+	}
 	return false
 }
+
+// tokenize splits a field name into lowercased tokens on non-alphanumeric
+// separators and camelCase boundaries: "userPin" -> ["user","pin"],
+// "shipping_address" -> ["shipping","address"].
+func tokenize(field string) []string {
+	var tokens []string
+	start := -1
+	flush := func(end int) {
+		if start >= 0 {
+			tokens = append(tokens, strings.ToLower(field[start:end]))
+			start = -1
+		}
+	}
+	for i := 0; i < len(field); i++ {
+		c := field[i]
+		if !isAlnum(c) {
+			flush(i)
+			continue
+		}
+		if start >= 0 && isUpper(c) && !isUpper(field[i-1]) {
+			flush(i) // camelCase boundary
+		}
+		if start < 0 {
+			start = i
+		}
+	}
+	flush(len(field))
+	return tokens
+}
+
+func isAlnum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+func isUpper(c byte) bool { return c >= 'A' && c <= 'Z' }
 
 // MaskValue returns the value to use for a field: redacted if the field is
 // sensitive, otherwise the original value.
@@ -89,11 +143,13 @@ func (m *Masker) MaskJSON(data []byte) []byte {
 		return data
 	}
 	masked := m.walk(v)
-	out, err := json.Marshal(masked)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // don't turn <,>,& in non-sensitive values into \u00xx
+	if err := enc.Encode(masked); err != nil {
 		return data
 	}
-	return out
+	return bytes.TrimRight(buf.Bytes(), "\n") // Encoder appends a trailing newline
 }
 
 func (m *Masker) walk(v any) any {

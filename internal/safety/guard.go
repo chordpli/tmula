@@ -57,8 +57,11 @@ type Guard struct {
 	lastFill time.Time
 	inFlight int
 
-	total int
-	errs  int
+	// rolling window of recent outcomes for the auto-kill policy (true = ok).
+	window    []bool
+	winPos    int
+	winFilled int
+	winErrs   int
 
 	now func() time.Time
 }
@@ -72,7 +75,7 @@ func NewGuard(cfg Config) (*Guard, error) {
 		return nil, fmt.Errorf("safety: MaxRPS and MaxConcurrency must be > 0")
 	}
 	now := time.Now
-	return &Guard{
+	g := &Guard{
 		allow:    cfg.Allowlist,
 		maxRPS:   float64(cfg.MaxRPS),
 		maxConc:  cfg.MaxConcurrency,
@@ -80,7 +83,13 @@ func NewGuard(cfg Config) (*Guard, error) {
 		tokens:   float64(cfg.MaxRPS),
 		lastFill: now(),
 		now:      now,
-	}, nil
+	}
+	// The auto-kill window holds the most recent MinSamples outcomes so the
+	// error rate is rolling, not cumulative over the whole run.
+	if cfg.AutoKill != nil && cfg.AutoKill.MinSamples > 0 {
+		g.window = make([]bool, cfg.AutoKill.MinSamples)
+	}
+	return g, nil
 }
 
 // NewGuardForEnv builds a Guard for a target environment. A prod-locked
@@ -111,14 +120,14 @@ func (g *Guard) setClock(f func() time.Time) {
 // AllowHost reports whether a request to target is permitted by the allowlist
 // (and that the guard has not been killed).
 func (g *Guard) AllowHost(target string) error {
+	host := parseHost(target) // pure: do it before taking the lock
+	if host == "" {
+		return fmt.Errorf("safety: cannot parse host from %q", target)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.killed {
 		return &KilledError{g.reason}
-	}
-	host := parseHost(target)
-	if host == "" {
-		return fmt.Errorf("safety: cannot parse host from %q", target)
 	}
 	if !matchAny(host, g.allow) {
 		return fmt.Errorf("safety: host %q not in allowlist", host)
@@ -192,21 +201,39 @@ func (g *Guard) Killed() (bool, string) {
 func (g *Guard) ReportOutcome(ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.total++
-	if !ok {
-		g.errs++
-	}
-	if g.autoKill == nil || g.killed || g.total < g.autoKill.MinSamples {
+	if g.autoKill == nil || g.killed || len(g.window) == 0 {
 		return
 	}
-	rate := float64(g.errs) / float64(g.total)
+	// Slide the window: evict the slot we are about to overwrite.
+	if g.winFilled == len(g.window) {
+		if !g.window[g.winPos] {
+			g.winErrs--
+		}
+	} else {
+		g.winFilled++
+	}
+	g.window[g.winPos] = ok
+	if !ok {
+		g.winErrs++
+	}
+	g.winPos = (g.winPos + 1) % len(g.window)
+
+	if g.winFilled < len(g.window) {
+		return // not enough recent samples yet
+	}
+	rate := float64(g.winErrs) / float64(g.winFilled)
 	if rate > g.autoKill.ErrorRateThreshold {
 		g.killed = true
-		g.reason = fmt.Sprintf("auto: error rate %.2f exceeded threshold %.2f over %d samples", rate, g.autoKill.ErrorRateThreshold, g.total)
+		g.reason = fmt.Sprintf("auto: rolling error rate %.2f over last %d exceeded threshold %.2f", rate, g.winFilled, g.autoKill.ErrorRateThreshold)
 	}
 }
 
 func parseHost(target string) string {
+	// A bare "host" or "host:port" has no scheme; prefix "//" so url.Parse
+	// treats it as authority rather than a scheme or path.
+	if !strings.Contains(target, "://") {
+		target = "//" + target
+	}
 	u, err := url.Parse(target)
 	if err != nil {
 		return ""

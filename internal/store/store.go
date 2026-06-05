@@ -158,8 +158,15 @@ func (s *MemStore) SaveToFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal snapshot: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// Write to a sibling temp file then rename, so a crash or disk-full mid-write
+	// cannot truncate or corrupt an existing snapshot (rename is atomic same-fs).
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("store: write snapshot: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("store: replace snapshot: %w", err)
 	}
 	return nil
 }

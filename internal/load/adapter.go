@@ -91,6 +91,10 @@ func apply(name, text string, ctx map[string]string) (string, error) {
 	return buf.String(), nil
 }
 
+// maxResponseBytes bounds how much of a response body is read, so a hostile or
+// buggy system under test cannot OOM the load generator.
+const maxResponseBytes = 8 << 20 // 8 MiB
+
 // RESTAdapter sends rendered requests over HTTP.
 type RESTAdapter struct {
 	client *http.Client
@@ -128,7 +132,7 @@ func (a *RESTAdapter) Send(ctx context.Context, r RenderedRequest) (Response, er
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return Response{StatusCode: resp.StatusCode, LatencyMs: latency}, fmt.Errorf("load: read body: %w", err)
 	}

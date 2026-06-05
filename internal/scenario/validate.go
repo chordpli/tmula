@@ -27,7 +27,9 @@ func Validate(g domain.ScenarioGraph) error {
 func validateWeights(g domain.ScenarioGraph) error {
 	sum := make(map[domain.ID]float64, len(g.Nodes))
 	for _, e := range g.Edges {
-		if e.Weight < 0 || e.Weight > 1 {
+		// Positive predicate so NaN is rejected (it fails every comparison)
+		// instead of slipping through and poisoning the per-node sum below.
+		if !(e.Weight >= 0 && e.Weight <= 1) {
 			return fmt.Errorf("scenario: edge %s->%s weight %v out of range [0,1]", e.From, e.To, e.Weight)
 		}
 		sum[e.From] += e.Weight

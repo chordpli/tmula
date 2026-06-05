@@ -103,6 +103,31 @@ func NewServer(adapter load.Adapter) *Server {
 // Handler exposes the control-plane routes.
 func (s *Server) Handler() http.Handler { return s.mux }
 
+// maxRequestBytes bounds decoded request bodies so a huge/streaming POST cannot
+// exhaust memory.
+const maxRequestBytes = 4 << 20 // 4 MiB
+
+// Shutdown cancels every in-flight run and waits for their goroutines to drain,
+// or until ctx is done. Call it during graceful shutdown so background runs are
+// not abandoned.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	dones := make([]<-chan struct{}, 0, len(s.runs))
+	for _, rs := range s.runs {
+		rs.cancel()
+		dones = append(dones, rs.done)
+	}
+	s.mu.Unlock()
+	for _, d := range dones {
+		select {
+		case <-d:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /experiments", s.createExperiment)
 	s.mux.HandleFunc("GET /experiments/{id}", s.getExperiment)
@@ -119,6 +144,7 @@ func (s *Server) nextID(prefix string) domain.ID {
 }
 
 func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	var spec RunSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("decode: %w", err))
@@ -247,10 +273,14 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 		reason = "operator kill"
 	}
 	rs.mu.Lock()
-	if rs.exec.Status == domain.RunRunning {
-		rs.exec.Status = domain.RunKilled
-		rs.exec.KillReason = reason
+	if rs.exec.Status != domain.RunRunning {
+		st := rs.exec.Status
+		rs.mu.Unlock()
+		writeErr(w, http.StatusConflict, fmt.Errorf("run %q is not running (status: %s)", id, st))
+		return
 	}
+	rs.exec.Status = domain.RunKilled
+	rs.exec.KillReason = reason
 	rs.mu.Unlock()
 	rs.guard.Kill(reason)
 	rs.cancel()
@@ -303,7 +333,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ticker := time.NewTicker(25 * time.Millisecond)
+	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	emit := func() {
 		status, reason := rs.snapshotStatus()

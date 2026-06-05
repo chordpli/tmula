@@ -70,16 +70,16 @@ func (a *Aggregator) Classify(runID domain.ID, cfg ClassifyConfig) []domain.Find
 
 func classifyMutation(runID domain.ID, obs []RequestObservation) []domain.Finding {
 	counts := map[domain.ID]int{}
-	var first time.Time
+	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
 		if o.Mutated && o.failed() {
 			counts[o.APIID]++
-			if first.IsZero() {
-				first = o.TS
+			if _, ok := firstSeen[o.APIID]; !ok {
+				firstSeen[o.APIID] = o.TS
 			}
 		}
 	}
-	return findingsFromCounts(runID, domain.FindingMutation, domain.SeverityWarning, counts, first,
+	return findingsFromCounts(runID, domain.FindingMutation, domain.SeverityWarning, counts, firstSeen,
 		"mutated input surfaced %d error(s) on %s")
 }
 
@@ -87,19 +87,19 @@ func classifyContract(runID domain.ID, obs []RequestObservation) []domain.Findin
 	// A non-mutated request that gets a 5xx or fails an assertion is a contract
 	// issue: the happy path produced an error a developer likely missed.
 	counts := map[domain.ID]int{}
-	var first time.Time
+	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
 		if o.Mutated {
 			continue
 		}
 		if o.StatusCode >= 500 || o.ErrorClass == "assertion" {
 			counts[o.APIID]++
-			if first.IsZero() {
-				first = o.TS
+			if _, ok := firstSeen[o.APIID]; !ok {
+				firstSeen[o.APIID] = o.TS
 			}
 		}
 	}
-	return findingsFromCounts(runID, domain.FindingContract, domain.SeverityCritical, counts, first,
+	return findingsFromCounts(runID, domain.FindingContract, domain.SeverityCritical, counts, firstSeen,
 		"%d contract violation(s) on %s (unexpected error on the happy path)")
 }
 
@@ -125,24 +125,28 @@ func classifyAvailability(runID domain.ID, obs []RequestObservation, run int) []
 			counts[api] = m
 		}
 	}
-	return findingsFromCounts(runID, domain.FindingAvailability, domain.SeverityCritical, counts, time.Time{},
+	return findingsFromCounts(runID, domain.FindingAvailability, domain.SeverityCritical, counts, nil,
 		"%d consecutive failures on %s (saturation or downtime)")
 }
 
 func classifyThreshold(runID domain.ID, obs []RequestObservation, cfg ClassifyConfig) []domain.Finding {
-	if len(obs) == 0 {
-		return nil
-	}
-	var failed int
+	var failed, total int
 	latencies := make([]float64, 0, len(obs))
 	for _, o := range obs {
+		if o.Mutated {
+			continue // mutation testing deliberately fails; not a threshold signal
+		}
+		total++
 		if o.failed() {
 			failed++
 		}
 		latencies = append(latencies, o.LatencyMs)
 	}
+	if total == 0 {
+		return nil
+	}
 	var findings []domain.Finding
-	rate := float64(failed) / float64(len(obs))
+	rate := float64(failed) / float64(total)
 	if cfg.ErrorRateThreshold > 0 && rate > cfg.ErrorRateThreshold {
 		findings = append(findings, domain.Finding{
 			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
@@ -162,8 +166,9 @@ func classifyThreshold(runID domain.ID, obs []RequestObservation, cfg ClassifyCo
 }
 
 // findingsFromCounts builds one finding per API present in counts, in stable
-// API-id order, using a format string of (count, apiID).
-func findingsFromCounts(runID domain.ID, cat domain.FindingCategory, sev domain.Severity, counts map[domain.ID]int, first time.Time, format string) []domain.Finding {
+// API-id order, using a format string of (count, apiID). firstSeen supplies the
+// per-API first-occurrence timestamp (may be nil to leave it zero).
+func findingsFromCounts(runID domain.ID, cat domain.FindingCategory, sev domain.Severity, counts map[domain.ID]int, firstSeen map[domain.ID]time.Time, format string) []domain.Finding {
 	if len(counts) == 0 {
 		return nil
 	}
@@ -180,7 +185,7 @@ func findingsFromCounts(runID domain.ID, cat domain.FindingCategory, sev domain.
 			Category:    cat,
 			Severity:    sev,
 			EvidenceRef: string(api),
-			FirstSeen:   first,
+			FirstSeen:   firstSeen[api],
 			Description: fmt.Sprintf(format, counts[api], api),
 		})
 	}

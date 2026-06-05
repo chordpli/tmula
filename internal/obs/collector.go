@@ -67,8 +67,6 @@ func (c *Collector) RecordSample(s domain.MetricSample) {
 // Snapshot computes the current aggregate. The returned StatusCounts is a copy.
 func (c *Collector) Snapshot() Stats {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	st := Stats{
 		Total:        c.total,
 		Errors:       c.errors,
@@ -78,12 +76,19 @@ func (c *Collector) Snapshot() Stats {
 	for k, v := range c.statusCounts {
 		st.StatusCounts[k] = v
 	}
-	if c.total > 0 {
-		st.ErrorRate = float64(c.errors) / float64(c.total)
-	}
+	var sorted []float64
 	if len(c.latencies) > 0 {
-		sorted := make([]float64, len(c.latencies))
+		sorted = make([]float64, len(c.latencies))
 		copy(sorted, c.latencies)
+	}
+	c.mu.Unlock()
+
+	// Sort + percentiles run on the copy, outside the lock, so a Snapshot does
+	// not block concurrent Record calls for O(n log n).
+	if st.Total > 0 {
+		st.ErrorRate = float64(st.Errors) / float64(st.Total)
+	}
+	if len(sorted) > 0 {
 		sort.Float64s(sorted)
 		st.P50 = percentile(sorted, 0.50)
 		st.P95 = percentile(sorted, 0.95)

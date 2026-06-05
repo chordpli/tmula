@@ -77,7 +77,7 @@ func (r *Runner) Run(ctx context.Context, g domain.ScenarioGraph, start domain.I
 			}
 			for _, nodeID := range path {
 				if ctx.Err() != nil {
-					return // cancelled (kill switch)
+					break // cancelled (kill switch): stop this user's journey
 				}
 				tmpl, ok := nodeTmpl[nodeID]
 				if !ok {
