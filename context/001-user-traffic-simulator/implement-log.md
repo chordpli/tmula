@@ -61,5 +61,10 @@
   - 구현: `internal/engine/walker.go` — `NewWalker`(seeded RNG), `Walk`(가중 랜덤 전이 + `canEnter` 의존엣지 불가침 검증, 종료/maxSteps 가드), 테스트 6개
   - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/engine` PASS(6) · `gofmt -l` clean
 
+- **#6** — 완료 2026-06-05, branch `feat/pli/6-rest-adapter` (base feat/pli/4-graph-engine, stacked)
+  - AC: [x] REST GET/POST/PUT/DELETE status/latency/body 수집 / [x] payload 템플릿 변수 치환 / [x] 인터페이스 gRPC/WS 확장 가능(Adapter 인터페이스)
+  - 구현: `internal/load/adapter.go` — `Adapter` 인터페이스, `Render`(text/template로 path·header·payload 치환, {{.token}}/{{.subject}} 노출, missingkey=error), `RESTAdapter`(net/http, latency 측정, 5xx는 응답·transport는 에러), 테스트 6개
+  - Evidence: `go vet` clean · `go build ./...` OK · `go test ./internal/load` ok(httptest) · `gofmt -l` clean
+
 ## 블로커
 - (없음)
