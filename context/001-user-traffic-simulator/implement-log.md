@@ -130,5 +130,11 @@
   - 원칙: Store 인터페이스는 확장축(local/distributed) 정당, 컴파일 타임 `var _ Store` 보증, stdlib only
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/store -race` ok · 전 패키지 green · go.mod=sigs.k8s.io/yaml만
 
+- **#16** — 완료 2026-06-05, branch `feat/pli/16-report-share` (base feat/pli/14-local-store, stacked)
+  - AC: [x] 지표 + findings 포함 리포트(execute가 Aggregator로 분류해 Report.Findings) / [x] share-token 발급 + 토큰 보유로만 read-only(`POST /runs/{id}/share`·`GET /reports/shared/{token}`, scope=viewer) / [x] 공유 리포트 PII 마스킹(`mask.MaskJSON`)
+  - 구현: `internal/api/share.go`(신규 — crypto/rand opaque 토큰, ttl 만료, masked read-only), `server.go` 확장(findings 계산, Report.Findings, masker 필드, `runState.report` 헬퍼). 테스트 4개 + 기존 5개
+  - 참고: 3모드(준수/이탈/부하) 명시 분리 비교는 후속(현재 단일 run stats+findings); per-request 라이브 메트릭도 후속
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/api -race` ok(9) · 전 패키지 green
+
 ## 블로커
 - (없음)
