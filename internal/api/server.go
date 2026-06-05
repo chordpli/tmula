@@ -15,6 +15,7 @@ import (
 
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
+	"github.com/chordpli/tmula/internal/mask"
 	"github.com/chordpli/tmula/internal/obs"
 	"github.com/chordpli/tmula/internal/safety"
 )
@@ -60,6 +61,7 @@ type runState struct {
 	guard     *safety.Guard
 	cancel    context.CancelFunc
 	done      chan struct{}
+	findings  []domain.Finding
 }
 
 func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
@@ -74,7 +76,9 @@ type Server struct {
 	mu      sync.Mutex
 	specs   map[domain.ID]RunSpec
 	runs    map[domain.ID]*runState
+	shares  map[string]shareEntry
 	adapter load.Adapter
+	masker  *mask.Masker
 	seq     atomic.Int64
 	now     func() time.Time
 	mux     *http.ServeMux
@@ -86,7 +90,9 @@ func NewServer(adapter load.Adapter) *Server {
 	s := &Server{
 		specs:   make(map[domain.ID]RunSpec),
 		runs:    make(map[domain.ID]*runState),
+		shares:  make(map[string]shareEntry),
 		adapter: adapter,
+		masker:  mask.New(mask.Config{}),
 		now:     time.Now,
 		mux:     http.NewServeMux(),
 	}
@@ -104,6 +110,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /runs/{id}/kill", s.killRun)
 	s.mux.HandleFunc("GET /runs/{id}/report", s.getReport)
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
+	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
+	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 }
 
 func (s *Server) nextID(prefix string) domain.ID {
@@ -186,11 +194,23 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	defer close(rs.done)
 	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
 	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
-	for _, res := range results {
-		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, errorClass(res))
-	}
 	end := s.now()
+	agg := obs.NewAggregator()
+	for _, res := range results {
+		cls := errorClass(res)
+		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, cls)
+		agg.Add(obs.RequestObservation{
+			APIID:      res.NodeID,
+			StatusCode: res.Resp.StatusCode,
+			LatencyMs:  res.Resp.LatencyMs,
+			ErrorClass: cls,
+			TS:         end,
+		})
+	}
+	findings := agg.Classify(rs.exec.ID, obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5})
+
 	rs.mu.Lock()
+	rs.findings = findings
 	rs.exec.EndedAt = &end
 	switch {
 	case rs.exec.Status == domain.RunKilled:
@@ -239,8 +259,18 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 
 // Report is the operator-facing run report.
 type Report struct {
-	Run   domain.RunExecution `json:"run"`
-	Stats obs.Stats           `json:"stats"`
+	Run      domain.RunExecution `json:"run"`
+	Stats    obs.Stats           `json:"stats"`
+	Findings []domain.Finding    `json:"findings"`
+}
+
+// report assembles the report for a run (caller must not hold rs.mu).
+func (rs *runState) report(collector *obs.Collector) Report {
+	rs.mu.Lock()
+	exec := rs.exec
+	findings := append([]domain.Finding(nil), rs.findings...)
+	rs.mu.Unlock()
+	return Report{Run: exec, Stats: collector.Snapshot(), Findings: findings}
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
@@ -252,10 +282,7 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", id))
 		return
 	}
-	rs.mu.Lock()
-	exec := rs.exec
-	rs.mu.Unlock()
-	writeJSON(w, http.StatusOK, Report{Run: exec, Stats: rs.collector.Snapshot()})
+	writeJSON(w, http.StatusOK, rs.report(rs.collector))
 }
 
 func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
