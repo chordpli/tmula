@@ -123,5 +123,12 @@
   - 원칙: 단일 책임 패키지, 인터페이스 없이 구조체(1구현), stdlib only, deny-by-default(정책 §5.3)
   - Evidence: `go vet`/`gofmt` clean · `go test ./internal/mask` ok · 전 패키지 green
 
+- **#14** — 완료 2026-06-05, branch `feat/pli/14-local-store` (base feat/pli/13-pii-masking, stacked)
+  - AC: [x] 실험/런/결과 CRUD + 조회 / [x] 메트릭 고빈도 쓰기 로컬 수용(slice append, -race) / [x] Store 인터페이스가 분산(Postgres+TSDB) 교체 가능
+  - 구현: `internal/store/store.go` — `Store` 인터페이스, `MemStore`(RWMutex, ErrNotFound, 복사 반환), `SaveToFile`/`LoadFromFile`(JSON 스냅샷). 테스트 6개
+  - **사용자 지시 준수: SQLite/cgo 의존성 없이 stdlib(in-memory + JSON 파일)** — go.mod 새 의존성 0
+  - 원칙: Store 인터페이스는 확장축(local/distributed) 정당, 컴파일 타임 `var _ Store` 보증, stdlib only
+  - Evidence: `go vet`/`gofmt` clean · `go test ./internal/store -race` ok · 전 패키지 green · go.mod=sigs.k8s.io/yaml만
+
 ## 블로커
 - (없음)
