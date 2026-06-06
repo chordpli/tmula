@@ -20,21 +20,41 @@ mode for large traffic. Client-side observation is the core; server-side
 metrics are opt-in.
 
 ```
-cmd/engine        entrypoint (--role local|master|worker)
-internal/domain   core model: experiments, scenario graphs, virtual users, ...
-internal/engine   scenario graph execution (dependency edges inviolable)
-internal/load     virtual users, load profiles, protocol adapters
-internal/obs      observation collector + finding classification
-internal/safety   allowlist, rate cap, kill switch
-internal/store    in-memory (local) + Postgres (distributed) persistence
-internal/cluster  gRPC master/worker for distributed runs
-internal/pipeline buffered metric ingest for high-frequency persistence
-internal/web      embedded React UI
-web/              React + Vite control-plane UI
-examples/         sample API + scenario + one-command demo
+cmd/engine           entrypoint: serve (--role local|master|worker), run, init
+internal/domain      core model: experiments, scenario graphs, virtual users, ...
+internal/engine      scenario graph execution (dependency edges inviolable)
+internal/load        virtual users, load profiles, protocol adapters
+internal/workload    open-model (arrival-rate) scheduler + capacity planning
+internal/obs         observation collector, finding classification, mergeable summary
+internal/safety      allowlist, rate cap, kill switch
+internal/store       in-memory (local) + Postgres (distributed) persistence
+internal/cluster     gRPC master/worker for distributed runs
+internal/pipeline    buffered metric ingest for high-frequency persistence
+internal/scenariofile  compact scenario file (YAML/JSON) -> RunSpec
+internal/importer    OpenAPI / HAR -> scenario scaffold
+internal/report      standalone HTML report + run-to-run comparison
+internal/web         embedded React UI
+web/                 React + Vite control-plane UI
+examples/            sample API, scenario, one-command demo, USAGE guide
 ```
 
-## Quick demo
+## Quick start — the `tmula run` CLI
+
+One binary, one command — no curl, no jq, no separately running server:
+
+```bash
+go build -o ./bin/tmula ./cmd/engine
+
+./bin/tmula run --target http://localhost:9000 --get /health --users 20  # one endpoint
+./bin/tmula run examples/shop/scenario.yaml --users 80                   # a whole scenario
+./bin/tmula init --from openapi.yaml --out scenario.yaml                 # scaffold from a spec
+```
+
+It boots an in-process engine, runs the experiment, and prints the findings.
+`--fail-on-findings` turns it into a CI gate (exit 2 on issues). See
+[`examples/USAGE.md`](examples/USAGE.md) for the full 0→100 guide.
+
+## Full demo (sample API with planted bugs)
 
 ```bash
 ./examples/run-demo.sh
@@ -46,7 +66,7 @@ details and how to point it at your own API. Requires `go`, `jq`, `curl`.
 
 ## Requirements
 
-- Go 1.23+
+- Go 1.25+
 - Node 20+ (only to build the web UI)
 - Docker + Postgres (optional — only for the distributed store integration test)
 
