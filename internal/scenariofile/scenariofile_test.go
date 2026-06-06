@@ -72,6 +72,45 @@ func TestParseAndExpandClosed(t *testing.T) {
 	}
 }
 
+// TestNonAdjacentDependencyDoesNotCreateShortcut guards the regression where a
+// dependsOn pointing at a non-preceding step added a traversable forward edge,
+// letting the walk skip the steps in between (~50% of the time).
+func TestNonAdjacentDependencyDoesNotCreateShortcut(t *testing.T) {
+	spec, err := Expand(Scenario{
+		Target: "http://h:1",
+		Flow: []Step{
+			{ID: "a", Request: "GET /a"},
+			{ID: "b", Request: "GET /b"},
+			{ID: "c", Request: "GET /c", DependsOn: "a"}, // non-adjacent dependency
+		},
+	})
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+
+	var outA float64
+	var depRecorded bool
+	for _, e := range spec.Graph.Edges {
+		if e.From == "a" {
+			outA += e.Weight
+		}
+		if e.From == "a" && e.To == "c" {
+			if e.Weight > 0 {
+				t.Errorf("phantom traversable edge a->c (weight %v) lets the walk skip b", e.Weight)
+			}
+			if e.Dependency {
+				depRecorded = true
+			}
+		}
+	}
+	if outA > 1 {
+		t.Errorf("node a outgoing weight sum = %v, want <= 1 (no skip shortcut)", outA)
+	}
+	if !depRecorded {
+		t.Error("c's dependency precondition on a was not recorded")
+	}
+}
+
 func TestExpandOpenWithSegments(t *testing.T) {
 	s := Scenario{
 		Target: "http://127.0.0.1:9000",

@@ -93,6 +93,9 @@ func runScenario(args []string) error {
 		}
 	}
 
+	if sc.Target == "" {
+		return fmt.Errorf("no target URL in the scenario; pass --target")
+	}
 	spec, err := scenariofile.Expand(sc)
 	if err != nil {
 		return err
@@ -134,6 +137,9 @@ func buildScenario(file, target, get, post string) (scenariofile.Scenario, error
 	if file == "" {
 		if get == "" && post == "" {
 			return scenariofile.Scenario{}, fmt.Errorf("provide a scenario file, or --get/--post with --target")
+		}
+		if get != "" && post != "" {
+			return scenariofile.Scenario{}, fmt.Errorf("use only one of --get or --post (single-endpoint mode is one request)")
 		}
 		if target == "" {
 			return scenariofile.Scenario{}, fmt.Errorf("--target is required in single-endpoint mode")
