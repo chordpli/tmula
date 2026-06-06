@@ -30,6 +30,7 @@ import (
 	"github.com/chordpli/tmula/internal/api"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
+	"github.com/chordpli/tmula/internal/scenario"
 )
 
 // Scenario is the compact, single-document description of a run. Only Target and
@@ -122,6 +123,12 @@ func Expand(s Scenario) (api.RunSpec, error) {
 	graph, err := buildGraph(s.Flow)
 	if err != nil {
 		return api.RunSpec{}, err
+	}
+	// Validate the generated graph with the stricter scenario rules (transition
+	// weights in [0,1], per-node outgoing sum <= 1, dependency edges form a DAG)
+	// so a malformed flow is rejected here rather than running a skewed walk.
+	if err := scenario.Validate(graph); err != nil {
+		return api.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
 	}
 
 	allow := s.Allow
@@ -251,8 +258,12 @@ func buildGraph(flow []Step) (domain.ScenarioGraph, error) {
 		if i > 0 && flow[i-1].ID == st.DependsOn {
 			continue // already marked on the consecutive edge above
 		}
+		// A precondition-only edge with weight 0: the walker records the
+		// dependency from Dependency=true (not weight), and skips weight-0 edges
+		// as transitions — so this enforces the precondition WITHOUT adding a
+		// traversable shortcut that could skip the steps in between.
 		edges = append(edges, domain.Edge{
-			From: domain.ID(st.DependsOn), To: domain.ID(st.ID), Weight: 1, Dependency: true,
+			From: domain.ID(st.DependsOn), To: domain.ID(st.ID), Weight: 0, Dependency: true,
 		})
 	}
 	return domain.ScenarioGraph{ID: "scenario", Nodes: nodes, Edges: edges}, nil
