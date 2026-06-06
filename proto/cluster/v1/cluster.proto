@@ -15,6 +15,14 @@ service ClusterService {
   // when the shard finishes (or the context is cancelled).
   rpc RunShard(RunShardRequest) returns (stream ShardResult);
 
+  // RunShardSummary executes the same shard as RunShard but, instead of
+  // streaming one message per request, aggregates the whole shard on the worker
+  // and returns a single compact, mergeable summary. The master folds the
+  // per-worker summaries together, trading per-request fidelity for bounded
+  // network and memory at millions of requests — the same shard, summarized at
+  // the edge rather than streamed.
+  rpc RunShardSummary(RunShardRequest) returns (ShardSummary);
+
   // Ping is a liveness probe used to confirm a worker is reachable.
   rpc Ping(PingRequest) returns (PingReply);
 }
@@ -54,6 +62,31 @@ message ShardResult {
   double latency_ms = 4;
   // error_class names the failure class (empty on success).
   string error_class = 5;
+}
+
+// ShardSummary is a worker's compact aggregate of its entire shard: running
+// counters, observed status codes, finding-signal tallies, and a serialized
+// latency histogram in the package's fixed bucket layout. It is mergeable — the
+// master sums the counters and maps and folds the histograms — so run-wide stats
+// (including percentiles) are recovered without the master seeing any individual
+// request.
+message ShardSummary {
+  // total, errors and timeouts are run-wide request counters.
+  int64 total = 1;
+  int64 errors = 2;
+  int64 timeouts = 3;
+  // status_counts tallies observed HTTP status codes (status code -> count).
+  map<int32, int64> status_counts = 4;
+  // finding_counts tallies finding-category signals (category string -> count),
+  // e.g. "contract" or "availability"; the master turns non-zero tallies into
+  // run-wide findings.
+  map<string, int64> finding_counts = 5;
+  // hist_buckets is the latency histogram's bucket counts in the fixed layout
+  // every Histogram shares, so the master merges by element-wise addition.
+  repeated uint64 hist_buckets = 6;
+  // hist_max is the exact maximum latency (ms) the worker observed, tracked
+  // alongside the (lossy) buckets.
+  double hist_max = 7;
 }
 
 // PingRequest carries an optional caller-chosen nonce echoed back in the reply.

@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/chordpli/tmula/internal/domain"
@@ -193,6 +194,111 @@ func (s *Summary) FindingCounts() map[domain.FindingCategory]int {
 	out := make(map[domain.FindingCategory]int, len(s.findingCounts))
 	for k, v := range s.findingCounts {
 		out[k] = v
+	}
+	return out
+}
+
+// SummaryData is the exported, plain-data form of a Summary: every field needed
+// to serialize it across a wire and rebuild a mergeable Summary on the far side.
+// The histogram travels as its fixed-layout bucket counts plus the exact max.
+type SummaryData struct {
+	Total         int
+	Errors        int
+	Timeouts      int
+	StatusCounts  map[int]int
+	FindingCounts map[domain.FindingCategory]int
+	HistBuckets   []uint64
+	HistMax       float64
+}
+
+// Export returns the summary as plain data, taken under the lock, ready to
+// serialize. LoadSummary is its inverse.
+func (s *Summary) Export() SummaryData {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := SummaryData{
+		Total:         s.total,
+		Errors:        s.errors,
+		Timeouts:      s.timeouts,
+		StatusCounts:  make(map[int]int, len(s.statusCounts)),
+		FindingCounts: make(map[domain.FindingCategory]int, len(s.findingCounts)),
+		HistBuckets:   s.hist.Buckets(),
+		HistMax:       s.hist.Max(),
+	}
+	for k, v := range s.statusCounts {
+		d.StatusCounts[k] = v
+	}
+	for k, v := range s.findingCounts {
+		d.FindingCounts[k] = v
+	}
+	return d
+}
+
+// LoadSummary rebuilds a Summary from exported data (e.g. decoded off the wire)
+// so it can be Merged with locally built summaries. It errors if the histogram
+// buckets do not match the fixed layout.
+func LoadSummary(d SummaryData) (*Summary, error) {
+	h, err := LoadHistogram(d.HistBuckets, d.HistMax)
+	if err != nil {
+		return nil, err
+	}
+	s := &Summary{
+		hist:          h,
+		total:         d.Total,
+		errors:        d.Errors,
+		timeouts:      d.Timeouts,
+		statusCounts:  make(map[int]int, len(d.StatusCounts)),
+		findingCounts: make(map[domain.FindingCategory]int, len(d.FindingCounts)),
+	}
+	for k, v := range d.StatusCounts {
+		s.statusCounts[k] = v
+	}
+	for k, v := range d.FindingCounts {
+		s.findingCounts[k] = v
+	}
+	return s, nil
+}
+
+// FindingsFromSummary derives run-wide findings from a (merged) Summary. Because
+// a Summary keeps only category tallies — no per-API breakdown and no ordering —
+// these are deliberately coarser than the Aggregator's per-endpoint, run-length
+// findings: at most one finding per tripped category for the whole run. It is the
+// classification the worker-aggregated distributed path uses, where trading that
+// fidelity for bounded memory is the entire point. The category order matches
+// Aggregator.Classify (mutation, contract, availability, threshold).
+func FindingsFromSummary(runID domain.ID, s *Summary, cfg ClassifyConfig) []domain.Finding {
+	st := s.Stats()
+	counts := s.FindingCounts()
+	var out []domain.Finding
+	if n := counts[domain.FindingMutation]; n > 0 {
+		out = append(out, domain.Finding{
+			RunID: runID, Category: domain.FindingMutation, Severity: domain.SeverityWarning,
+			Description: fmt.Sprintf("mutated input surfaced %d error(s) across the run", n),
+		})
+	}
+	if n := counts[domain.FindingContract]; n > 0 {
+		out = append(out, domain.Finding{
+			RunID: runID, Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			Description: fmt.Sprintf("%d contract violation(s) across the run (unexpected error on the happy path)", n),
+		})
+	}
+	if n := counts[domain.FindingAvailability]; cfg.AvailabilityRun > 0 && n >= cfg.AvailabilityRun {
+		out = append(out, domain.Finding{
+			RunID: runID, Category: domain.FindingAvailability, Severity: domain.SeverityCritical,
+			Description: fmt.Sprintf("%d unavailable response(s) across the run (saturation or downtime)", n),
+		})
+	}
+	if cfg.ErrorRateThreshold > 0 && st.ErrorRate > cfg.ErrorRateThreshold {
+		out = append(out, domain.Finding{
+			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", st.ErrorRate, cfg.ErrorRateThreshold),
+		})
+	}
+	if cfg.P95LatencyMs > 0 && st.P95 > cfg.P95LatencyMs {
+		out = append(out, domain.Finding{
+			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", st.P95, cfg.P95LatencyMs),
+		})
 	}
 	return out
 }

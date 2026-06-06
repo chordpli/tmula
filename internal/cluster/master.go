@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/chordpli/tmula/internal/cluster/clusterpb"
+	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/obs"
 )
 
@@ -116,6 +117,97 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 		return obs.Stats{}, nil, firstErr
 	}
 	return collector.Snapshot(), steps, nil
+}
+
+// DistributeSummary fans the run's users across workers like Distribute, but
+// asks each worker to aggregate its shard and return a single ShardSummary
+// rather than streaming every request. It merges the per-worker summaries into
+// one and returns it, so the caller recovers run-wide stats (and finding
+// tallies) at a fixed network and memory cost no matter how many requests the
+// run makes — the path that scales to millions. Like Distribute it blocks until
+// every shard completes and returns the first worker error, if any.
+func (c *Coordinator) DistributeSummary(ctx context.Context, spec ShardSpec, totalUsers int) (*obs.Summary, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if totalUsers <= 0 {
+		return nil, fmt.Errorf("cluster: distribute summary: totalUsers must be > 0")
+	}
+	specJSON, err := encodeSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+
+	assignments := splitUsers(totalUsers, len(c.workers))
+	var (
+		mu        sync.Mutex
+		summaries []*obs.Summary
+		firstErr  error
+		wg        sync.WaitGroup
+	)
+	for i, a := range assignments {
+		wg.Add(1)
+		go func(worker clusterpb.ClusterServiceClient, a shardAssignment) {
+			defer wg.Done()
+			req := &clusterpb.RunShardRequest{
+				SpecJson:   specJSON,
+				UserOffset: int32(a.Offset),
+				UserCount:  int32(a.Count),
+				Seed:       spec.Seed,
+				MaxSteps:   int32(spec.MaxSteps),
+				StartNode:  string(spec.Start),
+			}
+			ps, err := worker.RunShardSummary(ctx, req)
+			if err == nil {
+				var sum *obs.Summary
+				sum, err = fromShardSummary(ps)
+				if err == nil {
+					mu.Lock()
+					summaries = append(summaries, sum)
+					mu.Unlock()
+					return
+				}
+			}
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("cluster: run shard summary: %w", err)
+			}
+			mu.Unlock()
+		}(c.workers[i], a)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	// Merge sequentially after the barrier: simple and obviously correct, and the
+	// per-shard summaries are already bounded in size.
+	merged := obs.NewSummary()
+	for _, s := range summaries {
+		merged.Merge(s)
+	}
+	return merged, nil
+}
+
+// fromShardSummary rebuilds a mergeable obs.Summary from a worker's wire summary.
+func fromShardSummary(ps *clusterpb.ShardSummary) (*obs.Summary, error) {
+	status := make(map[int]int, len(ps.GetStatusCounts()))
+	for code, n := range ps.GetStatusCounts() {
+		status[int(code)] = int(n)
+	}
+	findings := make(map[domain.FindingCategory]int, len(ps.GetFindingCounts()))
+	for cat, n := range ps.GetFindingCounts() {
+		findings[domain.FindingCategory(cat)] = int(n)
+	}
+	return obs.LoadSummary(obs.SummaryData{
+		Total:         int(ps.GetTotal()),
+		Errors:        int(ps.GetErrors()),
+		Timeouts:      int(ps.GetTimeouts()),
+		StatusCounts:  status,
+		FindingCounts: findings,
+		HistBuckets:   ps.GetHistBuckets(),
+		HistMax:       ps.GetHistMax(),
+	})
 }
 
 // ShardStep is one request outcome reported by a worker, surfaced to the caller
