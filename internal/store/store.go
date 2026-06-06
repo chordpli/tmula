@@ -24,6 +24,12 @@ type Store interface {
 	GetRun(id domain.ID) (domain.RunExecution, error)
 
 	AppendMetric(domain.MetricSample) error
+	// AppendMetrics appends a batch of samples in one call. High-frequency runs
+	// emit thousands of samples per second; batching lets a backend persist a
+	// whole batch in a single round-trip instead of one insert per sample. An
+	// empty batch is a no-op. Either every sample in the batch is stored or, on
+	// error, none are.
+	AppendMetrics(ms []domain.MetricSample) error
 	Metrics(runID domain.ID) ([]domain.MetricSample, error)
 
 	SaveFindings(runID domain.ID, findings []domain.Finding) error
@@ -104,6 +110,27 @@ func (s *MemStore) AppendMetric(m domain.MetricSample) error {
 	}
 	s.mu.Lock()
 	s.metrics[m.RunID] = append(s.metrics[m.RunID], m)
+	s.mu.Unlock()
+	return nil
+}
+
+// AppendMetrics appends a batch of samples under a single lock. Validation runs
+// before any mutation so a bad sample rejects the whole batch without a partial
+// write. An empty batch is a no-op.
+func (s *MemStore) AppendMetrics(ms []domain.MetricSample) error {
+	if len(ms) == 0 {
+		return nil
+	}
+	for i := range ms {
+		if ms[i].RunID == "" {
+			return fmt.Errorf("store: metric[%d] runId is required", i)
+		}
+	}
+	s.mu.Lock()
+	for i := range ms {
+		rid := ms[i].RunID
+		s.metrics[rid] = append(s.metrics[rid], ms[i])
+	}
 	s.mu.Unlock()
 	return nil
 }
