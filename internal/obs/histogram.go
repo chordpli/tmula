@@ -27,7 +27,8 @@ import "math"
 // rather than as unbounded error.
 const (
 	// subBucketBits controls sub-buckets per octave: 2^subBucketBits of them.
-	// 6 -> 64 sub-buckets per power-of-two -> <0.79% relative quantile error.
+	// 6 -> 64 sub-buckets per power-of-two -> ~1.1% worst-case relative quantile
+	// error (see the type doc; empirically ~1.04%, peaking at the bottom octave).
 	subBucketBits  = 6
 	subBucketCount = 1 << subBucketBits // 64
 
