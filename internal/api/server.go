@@ -231,6 +231,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /experiments/{id}/run", s.runExperiment)
 	s.mux.HandleFunc("POST /runs/{id}/kill", s.killRun)
 	s.mux.HandleFunc("GET /runs/{id}/report", s.getReport)
+	s.mux.HandleFunc("GET /runs/{id}/report.html", s.getReportHTML)
+	s.mux.HandleFunc("GET /runs/compare", s.compareRuns)
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
