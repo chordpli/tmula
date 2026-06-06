@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"html"
 	"net/http"
 
 	"github.com/chordpli/tmula/internal/domain"
@@ -28,12 +29,12 @@ func (s *Server) getReportHTML(w http.ResponseWriter, r *http.Request) {
 	rs, ok := s.runs[id]
 	s.mu.Unlock()
 	if !ok {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", id))
+		writeHTMLError(w, http.StatusNotFound, fmt.Sprintf("Run %q is not available.", id))
 		return
 	}
 	out, err := report.HTML(reportData(rs.report()))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeHTMLError(w, http.StatusInternalServerError, "The report could not be rendered.")
 		return
 	}
 	writeHTML(w, out)
@@ -46,11 +47,11 @@ func (s *Server) compareRuns(w http.ResponseWriter, r *http.Request) {
 	aID := domain.ID(r.URL.Query().Get("a"))
 	bID := domain.ID(r.URL.Query().Get("b"))
 	if aID == "" || bID == "" {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("both a and b run ids are required"))
+		writeHTMLError(w, http.StatusBadRequest, "Both run ids (a and b) are required.")
 		return
 	}
 	if aID == bID {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("a and b must be different runs"))
+		writeHTMLError(w, http.StatusBadRequest, "Pick two different runs to compare.")
 		return
 	}
 
@@ -59,17 +60,17 @@ func (s *Server) compareRuns(w http.ResponseWriter, r *http.Request) {
 	rb, bok := s.runs[bID]
 	s.mu.Unlock()
 	if !aok {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", aID))
+		writeHTMLError(w, http.StatusNotFound, fmt.Sprintf("Run %q is not available.", aID))
 		return
 	}
 	if !bok {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", bID))
+		writeHTMLError(w, http.StatusNotFound, fmt.Sprintf("Run %q is not available.", bID))
 		return
 	}
 
 	out, err := report.CompareHTML(reportData(ra.report()), reportData(rb.report()))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err)
+		writeHTMLError(w, http.StatusInternalServerError, "The comparison could not be rendered.")
 		return
 	}
 	writeHTML(w, out)
@@ -81,4 +82,17 @@ func writeHTML(w http.ResponseWriter, body []byte) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// writeHTMLError renders a small standalone HTML error page, so a stale or bad
+// report/compare link opened in a browser explains itself rather than returning
+// a raw JSON error. msg may carry a user-controlled run id, so it is escaped.
+func writeHTMLError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>tmula</title>`+
+		`<body style="font-family:system-ui,sans-serif;max-width:560px;margin:4rem auto;padding:0 1rem;color:#333">`+
+		`<h1 style="font-size:1.25rem">Report unavailable</h1><p>%s</p>`+
+		`<p style="color:#888;font-size:.9rem">Runs are held in memory, so a link can stop working after the engine restarts.</p>`+
+		`</body>`, html.EscapeString(msg))
 }
