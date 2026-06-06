@@ -147,6 +147,56 @@ func TestPostgresStoreRoundTrip(t *testing.T) {
 		t.Errorf("unknown-run metrics = %v, %v (want empty non-nil)", got, err)
 	}
 
+	// --- Batched metrics round-trip (AppendMetrics) ---
+	// A separate run keeps these assertions independent of the single-append run
+	// above. The batch must persist every sample, in (ts, seq) order.
+	batchRun := domain.ID("r-pg-batch")
+	bbase := time.Now().UTC().Truncate(time.Microsecond)
+	const batchN = 250 // > a single round-trip's worth; exercises the real batch
+	batch := make([]domain.MetricSample, batchN)
+	for i := range batch {
+		batch[i] = domain.MetricSample{
+			RunID:      batchRun,
+			TS:         bbase.Add(time.Duration(i) * time.Millisecond),
+			APIID:      "api-batch",
+			StatusCode: 200 + i%3,
+			LatencyMs:  float64(i),
+			WorkerID:   "w-batch",
+		}
+	}
+	if err := s.AppendMetrics(batch); err != nil {
+		t.Fatalf("AppendMetrics: %v", err)
+	}
+	// Empty batch is a no-op, not an error.
+	if err := s.AppendMetrics(nil); err != nil {
+		t.Fatalf("AppendMetrics(nil): %v", err)
+	}
+	got, err := s.Metrics(batchRun)
+	if err != nil {
+		t.Fatalf("Metrics(batch): %v", err)
+	}
+	if len(got) != batchN {
+		t.Fatalf("batched metrics count = %d, want %d", len(got), batchN)
+	}
+	if got[0].LatencyMs != 0 || got[batchN-1].LatencyMs != float64(batchN-1) {
+		t.Errorf("batched metrics order/fields wrong: first=%+v last=%+v", got[0], got[batchN-1])
+	}
+	if got[10].WorkerID != "w-batch" || got[10].APIID != "api-batch" {
+		t.Errorf("batched metric field round-trip mismatch: %+v", got[10])
+	}
+	// A batch containing a sample with no runId must fail atomically: nothing from
+	// the batch is written (the transaction rolls back).
+	badRun := domain.ID("r-pg-batch-bad")
+	if err := s.AppendMetrics([]domain.MetricSample{
+		{RunID: badRun, TS: bbase, StatusCode: 200},
+		{RunID: "", TS: bbase, StatusCode: 200},
+	}); err == nil {
+		t.Error("AppendMetrics with empty runId should error")
+	}
+	if leftover, _ := s.Metrics(badRun); len(leftover) != 0 {
+		t.Errorf("failed batch must roll back, got %d rows for %q", len(leftover), badRun)
+	}
+
 	// --- Findings round-trip (replace semantics) ---
 	findings := []domain.Finding{
 		{RunID: run.ID, Category: domain.FindingContract, Severity: domain.SeverityCritical, Description: "first", FirstSeen: base},

@@ -21,9 +21,10 @@ import (
 // already tag secrets json:"-"), so no auth material reaches the database.
 //
 // Metrics are high-frequency and append-only: they live in their own table keyed
-// by (run_id, ts) with a monotonic sequence for a stable total order. A dedicated
-// time-series store or ingest queue is out of scope for v1 — Postgres handles the
-// metric volume directly.
+// by (run_id, ts) with a monotonic sequence for a stable total order. Producers
+// fan in through internal/pipeline and land here via AppendMetrics, which batches
+// many samples into one round-trip; Migrate additionally upgrades the metrics
+// table to a TimescaleDB hypertable when that extension is available.
 //
 // A *pgxpool.Pool backs the store; pgxpool is safe for concurrent use, so
 // PostgresStore is safe to share across goroutines without additional locking.
@@ -93,6 +94,15 @@ CREATE INDEX IF NOT EXISTS findings_run_idx ON findings (run_id, seq);
 func (s *PostgresStore) Migrate(ctx context.Context) error {
 	if _, err := s.pool.Exec(ctx, schemaDDL); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
+	}
+	// Best-effort: when the TimescaleDB extension is present this upgrades the
+	// metrics table to a TSDB hypertable for time-partitioned, high-frequency
+	// writes. Plain Postgres lacks the function, so a failure is expected and
+	// ignored — the table works unchanged as a regular relation.
+	const hypertable = `SELECT create_hypertable('metrics', 'ts', if_not_exists => TRUE)`
+	if _, err := s.pool.Exec(ctx, hypertable); err != nil {
+		// Intentionally swallowed: missing extension or unsupported server.
+		_ = err
 	}
 	return nil
 }
@@ -180,9 +190,63 @@ func (s *PostgresStore) AppendMetric(m domain.MetricSample) error {
 		return fmt.Errorf("store: marshal metric for run %q: %w", m.RunID, err)
 	}
 	ctx := context.Background()
-	const q = `INSERT INTO metrics (run_id, ts, body) VALUES ($1, $2, $3)`
-	if _, err := s.pool.Exec(ctx, q, string(m.RunID), m.TS, body); err != nil {
+	if _, err := s.pool.Exec(ctx, insertMetricQ, string(m.RunID), m.TS, body); err != nil {
 		return fmt.Errorf("store: append metric for run %q: %w", m.RunID, err)
+	}
+	return nil
+}
+
+// insertMetricQ is the single-row insert reused for both AppendMetric and each
+// queued statement of an AppendMetrics batch.
+const insertMetricQ = `INSERT INTO metrics (run_id, ts, body) VALUES ($1, $2, $3)`
+
+// AppendMetrics inserts a batch of samples with one network round-trip using
+// pgx.Batch. The batch is sent inside a transaction so the whole set commits
+// atomically — a failure on any row rolls back the rest, satisfying the
+// all-or-nothing contract. An empty batch is a no-op. Samples are validated and
+// marshalled up front so a bad sample never leaves a partial batch in flight.
+func (s *PostgresStore) AppendMetrics(ms []domain.MetricSample) error {
+	if len(ms) == 0 {
+		return nil
+	}
+	bodies := make([][]byte, len(ms))
+	for i := range ms {
+		if ms[i].RunID == "" {
+			return fmt.Errorf("store: metric[%d] runId is required", i)
+		}
+		body, err := json.Marshal(ms[i])
+		if err != nil {
+			return fmt.Errorf("store: marshal metric[%d] for run %q: %w", i, ms[i].RunID, err)
+		}
+		bodies[i] = body
+	}
+
+	ctx := context.Background()
+	batch := &pgx.Batch{}
+	for i := range ms {
+		batch.Queue(insertMetricQ, string(ms[i].RunID), ms[i].TS, bodies[i])
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: begin metrics batch: %w", err)
+	}
+	// Rollback is a no-op once the tx has committed.
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	br := tx.SendBatch(ctx, batch)
+	// Drain one result per queued insert; the first error fails the whole batch.
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			_ = br.Close()
+			return fmt.Errorf("store: append metric batch[%d] for run %q: %w", i, ms[i].RunID, err)
+		}
+	}
+	if err := br.Close(); err != nil {
+		return fmt.Errorf("store: close metrics batch: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: commit metrics batch: %w", err)
 	}
 	return nil
 }
