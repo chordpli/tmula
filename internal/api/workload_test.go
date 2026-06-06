@@ -105,6 +105,28 @@ func TestSegmentsRejectedOnClosedModel(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestOpenModelRejectsWorkers ensures the open model refuses distributed worker
+// fields instead of silently running locally and dropping them.
+func TestOpenModelRejectsWorkers(t *testing.T) {
+	cp, closeCP := newCP(t)
+	defer closeCP()
+	sut := sutOK()
+	defer sut.Close()
+
+	spec := specFor(sut.URL, 1)
+	spec.Workload = &domain.WorkloadModel{
+		Kind:            domain.WorkloadOpen,
+		Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 10},
+		DurationSeconds: 1,
+	}
+	spec.Workers = []string{"127.0.0.1:9101"}
+	resp := postJSON(t, cp.URL+"/experiments", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("open + workers = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestOpenModelRejectsInvalidWorkload(t *testing.T) {
 	cp, closeCP := newCP(t)
 	defer closeCP()

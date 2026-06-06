@@ -86,6 +86,11 @@ func (r RunSpec) Validate() error {
 	if !r.isOpen() && len(r.Users) == 0 {
 		return fmt.Errorf("api: at least one virtual user is required")
 	}
+	// The open model runs in-process only; refuse worker fields rather than
+	// silently dropping them and running locally.
+	if r.isOpen() && (len(r.Workers) > 0 || r.AggregateWorkers) {
+		return fmt.Errorf("api: distributed workers are not supported with the open workload model")
+	}
 	if len(r.Segments) > 0 {
 		if !r.isOpen() {
 			return fmt.Errorf("api: segments (personas) apply only to the open workload model")
