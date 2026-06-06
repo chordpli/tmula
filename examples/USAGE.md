@@ -99,6 +99,28 @@ segments:                    # 선택: 페르소나 믹스 (open 전용)
   - { name: buyer,   weight: 0.3, start: cart }
 ```
 
+### 기존 API에서 시작: `tmula init`
+
+빈 시나리오를 손으로 쓰지 말고, **OpenAPI 스펙이나 HAR 녹화**에서 초벌 시나리오를 생성하세요.
+
+```bash
+tmula init --from openapi.yaml --out scenario.yaml   # OpenAPI(서버/경로/예시 바디)에서
+tmula init --from session.har  --out scenario.yaml   # 브라우저 HAR 녹화(요청 순서 그대로)에서
+# 그 다음 스텝 순서/바디만 다듬고:
+tmula run scenario.yaml --users 50
+```
+> 생성물은 **시작점**입니다 — 경로 파라미터(`{id}`)·바디·스텝 순서를 검토하세요. 형식은 `--format openapi|har`로 강제할 수 있고, `--target`으로 대상 URL을 덮어쓸 수 있습니다.
+
+### 결과를 HTML로 보기 / 두 런 비교
+
+```bash
+# 한 런을 공유용 단독 HTML 페이지로
+curl -s "$API/runs/$RUN/report.html" > report.html
+
+# 두 런 비교 (회귀 감지: 새로 생긴 / 해결된 / 지속되는 findings + 통계 델타)
+curl -s "$API/runs/compare?a=$RUN_BEFORE&b=$RUN_AFTER" > compare.html
+```
+
 ## Step 1b — 풀스택 데모 한 방
 
 ```bash
@@ -484,6 +506,8 @@ curl -fsS -X POST "$API/experiments" -H 'Content-Type: application/json' -d "$(j
 | `POST /api/runs/{id}/kill` | 긴급 정지 |
 | `POST /api/runs/{id}/share?ttl=초` | 읽기전용 공유 토큰 |
 | `GET /api/reports/shared/{token}` | 공유 리포트 (PII 마스킹) |
+| `GET /api/runs/{id}/report.html` | 단독 HTML 리포트 |
+| `GET /api/runs/compare?a=&b=` | 두 런 HTML 비교 (회귀 감지) |
 | `GET /api/capacity?totalUsers=&windowSeconds=&avgSessionSeconds=&perWorkerCap=` | 규모/워커 산정 |
 
 ## 자주 막히는 곳
