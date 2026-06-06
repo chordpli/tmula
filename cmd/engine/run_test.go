@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +12,9 @@ import (
 	"testing"
 )
 
-// captureStdout runs fn with os.Stdout redirected to a pipe and returns what it
-// printed. It fails the test if fn returns an error.
-func captureStdout(t *testing.T, fn func() error) string {
+// captureStdoutErr runs fn with os.Stdout redirected to a pipe and returns what
+// it printed along with fn's error.
+func captureStdoutErr(t *testing.T, fn func() error) (string, error) {
 	t.Helper()
 	old := os.Stdout
 	r, w, err := os.Pipe()
@@ -25,10 +26,17 @@ func captureStdout(t *testing.T, fn func() error) string {
 	_ = w.Close()
 	os.Stdout = old
 	out, _ := io.ReadAll(r)
-	if runErr != nil {
-		t.Fatalf("runScenario: %v\noutput:\n%s", runErr, out)
+	return string(out), runErr
+}
+
+// captureStdout is captureStdoutErr that fails the test if fn errors.
+func captureStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	out, err := captureStdoutErr(t, fn)
+	if err != nil {
+		t.Fatalf("runScenario: %v\noutput:\n%s", err, out)
 	}
-	return string(out)
+	return out
 }
 
 // TestRunSingleEndpointInProcess drives `tmula run --target ... --get /` end to
@@ -83,6 +91,28 @@ func TestRunScenarioFileInProcess(t *testing.T) {
 	if rep.Run.Status != "completed" || rep.Stats.Total != 4 {
 		t.Errorf("got status=%q total=%d, want completed/4", rep.Run.Status, rep.Stats.Total)
 	}
+}
+
+// TestRunFailOnFindings checks the CI gate: a SUT that always 5xxs produces
+// findings, so --fail-on-findings makes the run return errFindings; without the
+// flag the same run succeeds (findings are output, not a failure).
+func TestRunFailOnFindings(t *testing.T) {
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer sut.Close()
+
+	_, err := captureStdoutErr(t, func() error {
+		return runScenario([]string{"--target", sut.URL, "--get", "/", "--users", "5", "--fail-on-findings"})
+	})
+	if !errors.Is(err, errFindings) {
+		t.Fatalf("err = %v, want errFindings", err)
+	}
+
+	// Same run without the flag must not error.
+	captureStdout(t, func() error {
+		return runScenario([]string{"--target", sut.URL, "--get", "/", "--users", "5"})
+	})
 }
 
 func TestRunScenarioArgErrors(t *testing.T) {

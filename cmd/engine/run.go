@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,23 +20,28 @@ import (
 	"github.com/chordpli/tmula/internal/scenariofile"
 )
 
+// errFindings signals that findings were detected under --fail-on-findings. main
+// maps it to a quiet non-zero exit — an expected gate outcome, not a crash.
+var errFindings = errors.New("findings detected")
+
 // runScenario implements `tmula run`: build a RunSpec from a scenario file (or
 // single-endpoint flags), execute it — in-process by default, or against a
 // running engine via --engine — and print the findings.
 func runScenario(args []string) error {
 	fs := flag.NewFlagSet("tmula run", flag.ContinueOnError)
 	var (
-		target  = fs.String("target", "", "target base URL (overrides the scenario file)")
-		get     = fs.String("get", "", "single-endpoint mode: GET this path (no scenario file)")
-		post    = fs.String("post", "", "single-endpoint mode: POST this path (no scenario file)")
-		users   = fs.Int("users", 0, "virtual user count for the closed model")
-		openR   = fs.Float64("open", 0, "open model: arrivals per second")
-		forSec  = fs.Int("for", 0, "open model: how long to keep arriving (seconds)")
-		rampTo  = fs.Float64("ramp-to", 0, "open model: ramp peak rate (uses --open as the start)")
-		seed    = fs.Int64("seed", 0, "random seed (default 1)")
-		engine  = fs.String("engine", "", "run against an existing engine base URL instead of in-process")
-		asJSON  = fs.Bool("json", false, "print the raw report JSON instead of a summary")
-		timeout = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
+		target         = fs.String("target", "", "target base URL (overrides the scenario file)")
+		get            = fs.String("get", "", "single-endpoint mode: GET this path (no scenario file)")
+		post           = fs.String("post", "", "single-endpoint mode: POST this path (no scenario file)")
+		users          = fs.Int("users", 0, "virtual user count for the closed model")
+		openR          = fs.Float64("open", 0, "open model: arrivals per second")
+		forSec         = fs.Int("for", 0, "open model: how long to keep arriving (seconds)")
+		rampTo         = fs.Float64("ramp-to", 0, "open model: ramp peak rate (uses --open as the start)")
+		seed           = fs.Int64("seed", 0, "random seed (default 1)")
+		engine         = fs.String("engine", "", "run against an existing engine base URL instead of in-process")
+		asJSON         = fs.Bool("json", false, "print the raw report JSON instead of a summary")
+		failOnFindings = fs.Bool("fail-on-findings", false, "exit non-zero if any finding is detected (CI gate)")
+		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, "usage: tmula run [scenario.yaml] [flags]\n\n"+
@@ -121,11 +127,18 @@ func runScenario(args []string) error {
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(report)
+		if err := enc.Encode(report); err != nil {
+			return err
+		}
+	} else {
+		printReport(report)
 	}
-	printReport(report)
+
 	if report.Run.Status == "failed" {
 		return fmt.Errorf("run failed: %s", report.Run.KillReason)
+	}
+	if *failOnFindings && len(report.Findings) > 0 {
+		return fmt.Errorf("%w (%d)", errFindings, len(report.Findings))
 	}
 	return nil
 }

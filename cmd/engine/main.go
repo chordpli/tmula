@@ -32,6 +32,12 @@ var version = "0.0.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// --fail-on-findings is an expected CI gate, not a crash: report it
+		// plainly and exit 2 rather than logging a fatal error.
+		if errors.Is(err, errFindings) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		slog.Error("fatal", "err", err)
 		os.Exit(1)
 	}
