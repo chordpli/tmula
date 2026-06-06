@@ -10,6 +10,12 @@ const form: ExperimentForm = {
   graphJSON: '{"id":"g","nodes":[{"id":"a"}],"edges":[]}',
   templatesJSON: '{"ta":{"method":"GET","path":"/a"}}',
   workers: '',
+  workloadKind: 'closed',
+  arrivalRate: 50,
+  durationSeconds: 10,
+  maxConcurrency: 500,
+  thinkMinMs: 0,
+  thinkMaxMs: 0,
 }
 
 describe('buildRunSpec', () => {
@@ -39,6 +45,29 @@ describe('buildRunSpec', () => {
     expect(buildRunSpec({ ...form, workers: '' }).workers).toBeUndefined()
     expect(buildRunSpec({ ...form, workers: '  ' }).workers).toBeUndefined()
     expect(buildRunSpec({ ...form, workers: ' , , ' }).workers).toBeUndefined()
+  })
+
+  it('omits the workload for the closed model', () => {
+    expect(buildRunSpec(form).workload).toBeUndefined()
+  })
+
+  it('attaches an open workload when selected', () => {
+    const spec = buildRunSpec({
+      ...form,
+      workloadKind: 'open',
+      arrivalRate: 100,
+      durationSeconds: 30,
+      maxConcurrency: 1000,
+      thinkMinMs: 100,
+      thinkMaxMs: 500,
+    })
+    expect(spec.workload).toEqual({
+      kind: 'open',
+      arrival: { shape: 'constant', startRate: 100, peakRate: 100 },
+      durationSeconds: 30,
+      maxConcurrency: 1000,
+      thinkTime: { minMs: 100, maxMs: 500 },
+    })
   })
 })
 

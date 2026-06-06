@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/chordpli/tmula/internal/mask"
 	"github.com/chordpli/tmula/internal/obs"
 	"github.com/chordpli/tmula/internal/safety"
+	"github.com/chordpli/tmula/internal/workload"
 )
 
 // RunSpec is a self-contained experiment definition: everything needed to run.
@@ -40,6 +42,11 @@ type RunSpec struct {
 	// their streamed results identically to the local path.
 	Workers []string `json:"workers,omitempty"`
 
+	// Workload selects the user-generation model. Nil or a closed model runs a
+	// fixed set of users (the default); an open model generates sessions at an
+	// arrival rate over time so concurrency emerges organically.
+	Workload *domain.WorkloadModel `json:"workload,omitempty"`
+
 	id domain.ID
 }
 
@@ -57,10 +64,22 @@ func (r RunSpec) Validate() error {
 	if r.Start == "" {
 		return fmt.Errorf("api: start node is required")
 	}
-	if len(r.Users) == 0 {
+	if r.Workload != nil {
+		if err := r.Workload.Validate(); err != nil {
+			return err
+		}
+	}
+	// The open model generates its own sessions from the arrival rate, so it
+	// needs no user list; every other path needs at least one user.
+	if !r.isOpen() && len(r.Users) == 0 {
 		return fmt.Errorf("api: at least one virtual user is required")
 	}
 	return nil
+}
+
+// isOpen reports whether the spec uses the open (arrival-rate) workload model.
+func (r RunSpec) isOpen() bool {
+	return r.Workload != nil && r.Workload.Kind == domain.WorkloadOpen
 }
 
 type runState struct {
@@ -71,9 +90,25 @@ type runState struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	findings  []domain.Finding
+	// finalStats holds stats produced directly by a run (the open model returns
+	// an aggregate rather than feeding the collector). When nil, the live
+	// collector snapshot is used instead.
+	finalStats *obs.Stats
 	// workers is the number of remote workers a distributed run fanned out to
 	// (0 for a local run). It is fixed at run creation, so it needs no locking.
 	workers int
+}
+
+// stats returns the run's stats: the final aggregate if one was produced
+// directly (open model), otherwise a live snapshot of the collector.
+func (rs *runState) stats() obs.Stats {
+	rs.mu.Lock()
+	fs := rs.finalStats
+	rs.mu.Unlock()
+	if fs != nil {
+		return *fs
+	}
+	return rs.collector.Snapshot()
 }
 
 func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
@@ -163,6 +198,36 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
+	s.mux.HandleFunc("GET /capacity", s.getCapacity)
+}
+
+// getCapacity estimates what a target population implies for a run via Little's
+// Law: GET /capacity?totalUsers=&windowSeconds=&avgSessionSeconds=&perWorkerCap=
+func (s *Server) getCapacity(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	totalUsers := atoiDefault(q.Get("totalUsers"), 0)
+	windowSeconds := atofDefault(q.Get("windowSeconds"), 0)
+	avgSessionSeconds := atofDefault(q.Get("avgSessionSeconds"), 0)
+	perWorkerCap := atoiDefault(q.Get("perWorkerCap"), 2000)
+	if totalUsers <= 0 || windowSeconds <= 0 || avgSessionSeconds <= 0 {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("totalUsers, windowSeconds and avgSessionSeconds must be > 0"))
+		return
+	}
+	writeJSON(w, http.StatusOK, domain.PlanCapacity(totalUsers, windowSeconds, avgSessionSeconds, perWorkerCap))
+}
+
+func atoiDefault(s string, def int) int {
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
+	}
+	return def
+}
+
+func atofDefault(s string, def float64) float64 {
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return v
+	}
+	return def
 }
 
 func (s *Server) nextID(prefix string) domain.ID {
@@ -254,6 +319,22 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	defer close(rs.done)
 
+	// Open model: the scheduler generates sessions over time and returns the
+	// aggregate directly.
+	if spec.isOpen() {
+		stats, findings, err := s.executeOpen(ctx, rs, spec)
+		if err == nil {
+			rs.mu.Lock()
+			rs.finalStats = &stats
+			rs.findings = findings
+			rs.mu.Unlock()
+		}
+		s.finalizeRun(ctx, rs, err)
+		return
+	}
+
+	// Closed model (local or distributed): feed the collector + aggregator, then
+	// classify.
 	agg := obs.NewAggregator()
 	var err error
 	if len(spec.Workers) > 0 {
@@ -261,11 +342,18 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	} else {
 		err = s.executeLocal(ctx, rs, spec, agg)
 	}
-	end := s.now()
 	findings := agg.Classify(rs.exec.ID, obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5})
-
 	rs.mu.Lock()
 	rs.findings = findings
+	rs.mu.Unlock()
+	s.finalizeRun(ctx, rs, err)
+}
+
+// finalizeRun stamps the end time and final status of a run.
+func (s *Server) finalizeRun(ctx context.Context, rs *runState, err error) {
+	end := s.now()
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
 	rs.exec.EndedAt = &end
 	switch {
 	case rs.exec.Status == domain.RunKilled:
@@ -278,7 +366,31 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	default:
 		rs.exec.Status = domain.RunCompleted
 	}
-	rs.mu.Unlock()
+}
+
+// executeOpen runs the experiment with the open (arrival-rate) workload model:
+// the scheduler generates user sessions over time and returns the aggregate
+// stats + findings directly.
+func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (obs.Stats, []domain.Finding, error) {
+	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
+	user := load.VirtualUser{ID: "user"}
+	if len(spec.Users) > 0 {
+		user = spec.Users[0]
+	}
+	res, err := workload.New(runner).Run(ctx, workload.Options{
+		Graph:    spec.Graph,
+		Start:    spec.Start,
+		MaxSteps: spec.MaxSteps,
+		Model:    *spec.Workload,
+		User:     user,
+		Seed:     spec.Seed,
+		RunID:    rs.exec.ID,
+		Classify: obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5},
+	})
+	if err != nil {
+		return obs.Stats{}, nil, err
+	}
+	return res.Stats, res.Findings, nil
 }
 
 // executeLocal runs the experiment in-process via the load.Runner, recording
@@ -406,12 +518,13 @@ type Report struct {
 }
 
 // report assembles the report for a run (caller must not hold rs.mu).
-func (rs *runState) report(collector *obs.Collector) Report {
+func (rs *runState) report() Report {
 	rs.mu.Lock()
 	exec := rs.exec
 	findings := append([]domain.Finding(nil), rs.findings...)
+	workers := rs.workers
 	rs.mu.Unlock()
-	return Report{Run: exec, Stats: collector.Snapshot(), Findings: findings, Workers: rs.workers}
+	return Report{Run: exec, Stats: rs.stats(), Findings: findings, Workers: workers}
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
@@ -423,7 +536,7 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", id))
 		return
 	}
-	writeJSON(w, http.StatusOK, rs.report(rs.collector))
+	writeJSON(w, http.StatusOK, rs.report())
 }
 
 func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
@@ -448,7 +561,7 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	emit := func() {
 		status, reason := rs.snapshotStatus()
-		ev := map[string]any{"status": status, "reason": reason, "stats": rs.collector.Snapshot()}
+		ev := map[string]any{"status": status, "reason": reason, "stats": rs.stats()}
 		b, _ := json.Marshal(ev)
 		fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()

@@ -75,7 +75,7 @@ func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := json.Marshal(rs.report(rs.collector))
+	data, err := json.Marshal(rs.report())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return

@@ -10,6 +10,21 @@ export interface ExperimentForm {
   graphJSON: string
   templatesJSON: string
   workers: string // comma-separated gRPC worker addresses; blank = run locally
+  // Workload: 'closed' = fixed `users`; 'open' = arrival-rate sessions over time.
+  workloadKind: 'closed' | 'open'
+  arrivalRate: number // open: users arriving per second
+  durationSeconds: number // open: how long to keep users arriving
+  maxConcurrency: number // open: back-pressure cap (0 = uncapped)
+  thinkMinMs: number // pause between a user's steps (uniform [min,max])
+  thinkMaxMs: number
+}
+
+export interface WorkloadSpec {
+  kind: 'open'
+  arrival: { shape: 'constant'; startRate: number; peakRate: number }
+  durationSeconds: number
+  maxConcurrency: number
+  thinkTime: { minMs: number; maxMs: number }
 }
 
 export interface RunSpec {
@@ -22,6 +37,7 @@ export interface RunSpec {
   users: { id: string }[]
   seed: number
   workers?: string[]
+  workload?: WorkloadSpec
 }
 
 export interface Stats {
@@ -89,7 +105,42 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
   // Only attach workers when the operator named at least one address; an empty
   // list would otherwise signal a distributed run with no workers.
   if (workers.length > 0) spec.workers = workers
+  // Attach the open workload model when selected; otherwise the run uses the
+  // default closed (fixed-user) model.
+  if (form.workloadKind === 'open') {
+    spec.workload = {
+      kind: 'open',
+      arrival: { shape: 'constant', startRate: form.arrivalRate, peakRate: form.arrivalRate },
+      durationSeconds: form.durationSeconds,
+      maxConcurrency: form.maxConcurrency,
+      thinkTime: { minMs: form.thinkMinMs, maxMs: form.thinkMaxMs },
+    }
+  }
   return spec
+}
+
+export interface CapacityPlan {
+  arrivalPerSec: number
+  peakConcurrency: number
+  workersNeeded: number
+}
+
+// getCapacity asks the server to size a target population via Little's Law.
+export async function getCapacity(
+  totalUsers: number,
+  windowSeconds: number,
+  avgSessionSeconds: number,
+  perWorkerCap = 2000,
+): Promise<CapacityPlan> {
+  const q = new URLSearchParams({
+    totalUsers: String(totalUsers),
+    windowSeconds: String(windowSeconds),
+    avgSessionSeconds: String(avgSessionSeconds),
+    perWorkerCap: String(perWorkerCap),
+  })
+  const res = await fetch(`${API}/capacity?${q}`)
+  if (!res.ok) throw new Error(`capacity failed: ${res.status}`)
+  return (await res.json()) as CapacityPlan
 }
 
 export interface StreamFrame {
