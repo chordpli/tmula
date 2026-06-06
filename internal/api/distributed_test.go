@@ -93,6 +93,57 @@ func TestDistributedRunAcrossWorkers(t *testing.T) {
 	}
 }
 
+// TestDistributedSummaryRunAcrossWorkers exercises the worker-aggregated path:
+// the same two-worker fan-out but with AggregateWorkers set, so each worker
+// summarizes its shard and the master merges them. The merged run-wide stats
+// must still account for every request the SUT served.
+func TestDistributedSummaryRunAcrossWorkers(t *testing.T) {
+	var hits int32
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sut.Close()
+
+	w1, stop1 := startWorker(t)
+	defer stop1()
+	w2, stop2 := startWorker(t)
+	defer stop2()
+
+	cp, closeCP := newCP(t)
+	defer closeCP()
+
+	const users = 10
+	const nodes = 2
+	spec := specFor(sut.URL, users)
+	spec.Workers = []string{w1, w2}
+	spec.AggregateWorkers = true
+
+	resp := postJSON(t, cp.URL+"/experiments", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status = %d", resp.StatusCode)
+	}
+	var created struct{ ID string }
+	decode(t, resp, &created)
+
+	resp = postJSON(t, cp.URL+"/experiments/"+created.ID+"/run", nil)
+	var run struct {
+		RunID string `json:"runId"`
+	}
+	decode(t, resp, &run)
+
+	report := waitForStatus(t, cp.URL+"/runs/"+run.RunID+"/report", domain.RunCompleted, 5*time.Second)
+	if report.Stats.Total != users*nodes {
+		t.Errorf("merged stats.Total = %d, want %d", report.Stats.Total, users*nodes)
+	}
+	if report.Stats.Errors != 0 {
+		t.Errorf("merged stats.Errors = %d, want 0", report.Stats.Errors)
+	}
+	if got := atomic.LoadInt32(&hits); int(got) != users*nodes {
+		t.Errorf("SUT hits = %d, want %d", got, users*nodes)
+	}
+}
+
 // TestDistributedRunFailsOnUnreachableWorker asserts a dial/distribute failure
 // surfaces as a failed run with the error recorded, leaving the local path's
 // success semantics untouched.

@@ -51,6 +51,7 @@ const initialForm: ExperimentForm = {
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
   workers: '',
+  aggregateWorkers: false,
   workloadKind: 'closed',
   arrivalRate: 50,
   durationSeconds: 10,
@@ -160,6 +161,16 @@ function Operator() {
             style={inp}
           />
         </Field>
+        {form.workers.trim() && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#444' }}>
+            <input
+              type="checkbox"
+              checked={form.aggregateWorkers}
+              onChange={(e) => set('aggregateWorkers', e.target.checked)}
+            />
+            Aggregate on workers (one summary per shard) — scales to millions; findings are run-wide
+          </label>
+        )}
         <Field label="Workload model">
           <select
             value={form.workloadKind}

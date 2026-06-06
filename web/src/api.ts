@@ -10,6 +10,7 @@ export interface ExperimentForm {
   graphJSON: string
   templatesJSON: string
   workers: string // comma-separated gRPC worker addresses; blank = run locally
+  aggregateWorkers: boolean // distributed: workers summarize their shard instead of streaming
   // Workload: 'closed' = fixed `users`; 'open' = arrival-rate sessions over time.
   workloadKind: 'closed' | 'open'
   arrivalRate: number // open: users arriving per second
@@ -48,6 +49,7 @@ export interface RunSpec {
   users: { id: string }[]
   seed: number
   workers?: string[]
+  aggregateWorkers?: boolean
   workload?: WorkloadSpec
   segments?: Segment[]
 }
@@ -125,8 +127,12 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     seed: 1,
   }
   // Only attach workers when the operator named at least one address; an empty
-  // list would otherwise signal a distributed run with no workers.
-  if (workers.length > 0) spec.workers = workers
+  // list would otherwise signal a distributed run with no workers. Worker-side
+  // aggregation only makes sense for a distributed run, so gate it on workers.
+  if (workers.length > 0) {
+    spec.workers = workers
+    if (form.aggregateWorkers) spec.aggregateWorkers = true
+  }
   // Attach the open workload model when selected; otherwise the run uses the
   // default closed (fixed-user) model.
   if (form.workloadKind === 'open') {

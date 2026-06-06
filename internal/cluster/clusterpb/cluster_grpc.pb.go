@@ -23,8 +23,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ClusterService_RunShard_FullMethodName = "/cluster.v1.ClusterService/RunShard"
-	ClusterService_Ping_FullMethodName     = "/cluster.v1.ClusterService/Ping"
+	ClusterService_RunShard_FullMethodName        = "/cluster.v1.ClusterService/RunShard"
+	ClusterService_RunShardSummary_FullMethodName = "/cluster.v1.ClusterService/RunShardSummary"
+	ClusterService_Ping_FullMethodName            = "/cluster.v1.ClusterService/Ping"
 )
 
 // ClusterServiceClient is the client API for ClusterService service.
@@ -38,6 +39,13 @@ type ClusterServiceClient interface {
 	// stream one ShardResult per request the users make. The stream completes
 	// when the shard finishes (or the context is cancelled).
 	RunShard(ctx context.Context, in *RunShardRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ShardResult], error)
+	// RunShardSummary executes the same shard as RunShard but, instead of
+	// streaming one message per request, aggregates the whole shard on the worker
+	// and returns a single compact, mergeable summary. The master folds the
+	// per-worker summaries together, trading per-request fidelity for bounded
+	// network and memory at millions of requests — the same shard, summarized at
+	// the edge rather than streamed.
+	RunShardSummary(ctx context.Context, in *RunShardRequest, opts ...grpc.CallOption) (*ShardSummary, error)
 	// Ping is a liveness probe used to confirm a worker is reachable.
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingReply, error)
 }
@@ -69,6 +77,16 @@ func (c *clusterServiceClient) RunShard(ctx context.Context, in *RunShardRequest
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ClusterService_RunShardClient = grpc.ServerStreamingClient[ShardResult]
 
+func (c *clusterServiceClient) RunShardSummary(ctx context.Context, in *RunShardRequest, opts ...grpc.CallOption) (*ShardSummary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShardSummary)
+	err := c.cc.Invoke(ctx, ClusterService_RunShardSummary_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clusterServiceClient) Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PingReply)
@@ -90,6 +108,13 @@ type ClusterServiceServer interface {
 	// stream one ShardResult per request the users make. The stream completes
 	// when the shard finishes (or the context is cancelled).
 	RunShard(*RunShardRequest, grpc.ServerStreamingServer[ShardResult]) error
+	// RunShardSummary executes the same shard as RunShard but, instead of
+	// streaming one message per request, aggregates the whole shard on the worker
+	// and returns a single compact, mergeable summary. The master folds the
+	// per-worker summaries together, trading per-request fidelity for bounded
+	// network and memory at millions of requests — the same shard, summarized at
+	// the edge rather than streamed.
+	RunShardSummary(context.Context, *RunShardRequest) (*ShardSummary, error)
 	// Ping is a liveness probe used to confirm a worker is reachable.
 	Ping(context.Context, *PingRequest) (*PingReply, error)
 	mustEmbedUnimplementedClusterServiceServer()
@@ -104,6 +129,9 @@ type UnimplementedClusterServiceServer struct{}
 
 func (UnimplementedClusterServiceServer) RunShard(*RunShardRequest, grpc.ServerStreamingServer[ShardResult]) error {
 	return status.Error(codes.Unimplemented, "method RunShard not implemented")
+}
+func (UnimplementedClusterServiceServer) RunShardSummary(context.Context, *RunShardRequest) (*ShardSummary, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunShardSummary not implemented")
 }
 func (UnimplementedClusterServiceServer) Ping(context.Context, *PingRequest) (*PingReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method Ping not implemented")
@@ -140,6 +168,24 @@ func _ClusterService_RunShard_Handler(srv interface{}, stream grpc.ServerStream)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ClusterService_RunShardServer = grpc.ServerStreamingServer[ShardResult]
 
+func _ClusterService_RunShardSummary_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunShardRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClusterServiceServer).RunShardSummary(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClusterService_RunShardSummary_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClusterServiceServer).RunShardSummary(ctx, req.(*RunShardRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ClusterService_Ping_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PingRequest)
 	if err := dec(in); err != nil {
@@ -165,6 +211,10 @@ var ClusterService_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "cluster.v1.ClusterService",
 	HandlerType: (*ClusterServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RunShardSummary",
+			Handler:    _ClusterService_RunShardSummary_Handler,
+		},
 		{
 			MethodName: "Ping",
 			Handler:    _ClusterService_Ping_Handler,

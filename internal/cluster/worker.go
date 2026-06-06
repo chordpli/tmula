@@ -103,6 +103,75 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 	return nil
 }
 
+// RunShardSummary executes the same shard as RunShard but aggregates every
+// request into one obs.Summary on the worker and returns it as a single
+// ShardSummary, instead of streaming a message per request. The users, seeding
+// and partition are identical to RunShard — only the reporting differs — so the
+// master can fold per-worker summaries into run-wide stats at a fixed network and
+// memory cost regardless of request volume.
+func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunShardRequest) (*clusterpb.ShardSummary, error) {
+	spec, err := decodeSpec(req.GetSpecJson())
+	if err != nil {
+		return nil, err
+	}
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	summary := obs.NewSummary()
+	count := int(req.GetUserCount())
+	if count <= 0 {
+		return toShardSummary(summary), nil // empty shard: an empty (mergeable) summary
+	}
+	offset := int(req.GetUserOffset())
+	start := domain.ID(req.GetStartNode())
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates)
+	users := buildUsers(offset, count)
+
+	results, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset))
+	if err != nil {
+		return nil, fmt.Errorf("cluster: worker run shard summary: %w", err)
+	}
+	for i := range results {
+		summary.Add(toObservation(results[i]))
+	}
+	return toShardSummary(summary), nil
+}
+
+// toObservation maps a load step result onto the observation the Summary tallies,
+// deriving the error class exactly as the streaming path does. The cluster path
+// has no input mutation, so Mutated is always false; the Summary ignores TS.
+func toObservation(r load.StepResult) obs.RequestObservation {
+	return obs.RequestObservation{
+		APIID:      r.NodeID,
+		StatusCode: r.Resp.StatusCode,
+		LatencyMs:  r.Resp.LatencyMs,
+		ErrorClass: errorClass(r.Err),
+	}
+}
+
+// toShardSummary serializes a worker's Summary into its wire form, mapping the
+// obs maps onto the proto's keyed counts.
+func toShardSummary(s *obs.Summary) *clusterpb.ShardSummary {
+	d := s.Export()
+	status := make(map[int32]int64, len(d.StatusCounts))
+	for code, n := range d.StatusCounts {
+		status[int32(code)] = int64(n)
+	}
+	findings := make(map[string]int64, len(d.FindingCounts))
+	for cat, n := range d.FindingCounts {
+		findings[string(cat)] = int64(n)
+	}
+	return &clusterpb.ShardSummary{
+		Total:         int64(d.Total),
+		Errors:        int64(d.Errors),
+		Timeouts:      int64(d.Timeouts),
+		StatusCounts:  status,
+		FindingCounts: findings,
+		HistBuckets:   d.HistBuckets,
+		HistMax:       d.HistMax,
+	}
+}
+
 // buildUsers materializes the virtual users for a shard. IDs are globally
 // stable (user-<global index>) so aggregation and seeding are independent of how
 // users were split across workers.

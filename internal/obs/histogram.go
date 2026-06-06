@@ -1,6 +1,9 @@
 package obs
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // Histogram is a compact, mergeable latency histogram for millisecond values.
 //
@@ -183,6 +186,38 @@ func (h *Histogram) Count() int64 { return h.count }
 // Max returns the exact maximum observed sample (0 if empty). Unlike quantiles
 // this is tracked precisely and is not subject to bucketing error.
 func (h *Histogram) Max() float64 { return h.max }
+
+// NumBuckets is the fixed number of bucket counters every Histogram carries.
+// Callers serializing a histogram (e.g. across the cluster wire) use it to
+// validate the bucket slice length before LoadHistogram.
+func NumBuckets() int { return numBuckets }
+
+// Buckets returns a copy of the histogram's bucket counts in the fixed layout.
+// It is the serializable half of the wire bridge; LoadHistogram is its inverse.
+// The copy is independent, so the caller may retain or mutate it freely.
+func (h *Histogram) Buckets() []uint64 {
+	out := make([]uint64, len(h.buckets))
+	copy(out, h.buckets)
+	return out
+}
+
+// LoadHistogram rebuilds a Histogram from wire data: bucket counts in the fixed
+// layout plus the exact tracked max. The total count is recovered by summing the
+// buckets, so the result is Merge-compatible with any locally built Histogram.
+// It errors if the bucket slice does not match the fixed layout length.
+func LoadHistogram(buckets []uint64, max float64) (*Histogram, error) {
+	if len(buckets) != numBuckets {
+		return nil, fmt.Errorf("obs: histogram wire has %d buckets, want %d", len(buckets), numBuckets)
+	}
+	h := &Histogram{buckets: make([]uint64, numBuckets), max: max}
+	var count int64
+	for i, b := range buckets {
+		h.buckets[i] = b
+		count += int64(b)
+	}
+	h.count = count
+	return h, nil
+}
 
 // Quantile estimates the q-th quantile (q in [0,1]) in milliseconds using the
 // nearest-rank method over the bucket counts, returning the midpoint of the

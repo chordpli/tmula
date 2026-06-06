@@ -42,6 +42,13 @@ type RunSpec struct {
 	// their streamed results identically to the local path.
 	Workers []string `json:"workers,omitempty"`
 
+	// AggregateWorkers makes a distributed run aggregate on the workers: each
+	// worker folds its whole shard into a compact summary and the master merges
+	// those, instead of streaming every request. It trades per-endpoint and
+	// run-length finding fidelity for bounded network + memory at huge request
+	// volumes. Ignored unless Workers is set.
+	AggregateWorkers bool `json:"aggregateWorkers,omitempty"`
+
 	// Workload selects the user-generation model. Nil or a closed model runs a
 	// fixed set of users (the default); an open model generates sessions at an
 	// arrival rate over time so concurrency emerges organically.
@@ -357,6 +364,21 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 		return
 	}
 
+	// Worker-aggregated distributed run: each worker summarizes its shard and the
+	// master merges those into run-wide stats + findings directly (no per-request
+	// stream), the same shape the open path returns.
+	if len(spec.Workers) > 0 && spec.AggregateWorkers {
+		stats, findings, err := s.executeDistributedSummary(ctx, rs, spec)
+		if err == nil {
+			rs.mu.Lock()
+			rs.finalStats = &stats
+			rs.findings = findings
+			rs.mu.Unlock()
+		}
+		s.finalizeRun(ctx, rs, err)
+		return
+	}
+
 	// Closed model (local or distributed): feed the collector + aggregator, then
 	// classify.
 	agg := obs.NewAggregator()
@@ -447,21 +469,11 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 // the same collector + finding aggregator the local path uses, so findings are
 // produced identically regardless of topology.
 func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
-	conns := make([]grpc.ClientConnInterface, 0, len(spec.Workers))
-	closers := make([]func() error, 0, len(spec.Workers))
-	defer func() {
-		for _, c := range closers {
-			_ = c()
-		}
-	}()
-	for _, addr := range spec.Workers {
-		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			return fmt.Errorf("api: dial worker %q: %w", addr, err)
-		}
-		conns = append(conns, conn)
-		closers = append(closers, conn.Close)
+	conns, closeAll, err := dialWorkers(spec.Workers)
+	if err != nil {
+		return err
 	}
+	defer closeAll()
 
 	coord, err := cluster.NewCoordinator(conns...)
 	if err != nil {
@@ -485,6 +497,56 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 		})
 	}
 	return nil
+}
+
+// executeDistributedSummary runs a distributed experiment with worker-side
+// aggregation: each worker folds its whole shard into one summary and the master
+// merges them, so no per-request results cross the network. It returns run-wide
+// stats and findings derived from the merged summary — coarser than the
+// streaming path (run-wide, not per-endpoint, no run-length availability), which
+// is the documented trade for bounded cost at huge volumes.
+func (s *Server) executeDistributedSummary(ctx context.Context, rs *runState, spec RunSpec) (obs.Stats, []domain.Finding, error) {
+	conns, closeAll, err := dialWorkers(spec.Workers)
+	if err != nil {
+		return obs.Stats{}, nil, err
+	}
+	defer closeAll()
+
+	coord, err := cluster.NewCoordinator(conns...)
+	if err != nil {
+		return obs.Stats{}, nil, fmt.Errorf("api: build coordinator: %w", err)
+	}
+
+	summary, err := coord.DistributeSummary(ctx, shardSpecFor(spec), len(spec.Users))
+	if err != nil {
+		return obs.Stats{}, nil, fmt.Errorf("api: distribute summary: %w", err)
+	}
+	cfg := obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5}
+	return summary.Stats(), obs.FindingsFromSummary(rs.exec.ID, summary, cfg), nil
+}
+
+// dialWorkers opens an insecure gRPC client connection to each worker address
+// and returns the connections plus a single closer that shuts them all down. On
+// any dial failure it closes whatever it already opened and returns the error,
+// so callers never leak a half-open set.
+func dialWorkers(addrs []string) ([]grpc.ClientConnInterface, func(), error) {
+	conns := make([]grpc.ClientConnInterface, 0, len(addrs))
+	closers := make([]func() error, 0, len(addrs))
+	closeAll := func() {
+		for _, c := range closers {
+			_ = c()
+		}
+	}
+	for _, addr := range addrs {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("api: dial worker %q: %w", addr, err)
+		}
+		conns = append(conns, conn)
+		closers = append(closers, conn.Close)
+	}
+	return conns, closeAll, nil
 }
 
 // shardSpecFor maps a control-plane RunSpec onto the cluster.ShardSpec shipped

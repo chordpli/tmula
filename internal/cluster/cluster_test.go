@@ -150,6 +150,53 @@ func TestDistributeSingleWorker(t *testing.T) {
 	}
 }
 
+// TestDistributeSummaryAcrossWorkers covers the worker-aggregated path: two
+// bufconn workers each summarize their own shard and the master merges the two
+// summaries into run-wide stats — with no per-request stream — which must match
+// the full request volume with zero errors and the right status tally.
+func TestDistributeSummaryAcrossWorkers(t *testing.T) {
+	t.Parallel()
+
+	var hits int64
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(sut.Close)
+
+	const users = 10
+	const nodes = 2
+	adapter := load.NewRESTAdapter(5 * time.Second)
+	coord, err := NewCoordinator(
+		startWorker(t, WithWorkerID("w1"), WithAdapter(adapter)),
+		startWorker(t, WithWorkerID("w2"), WithAdapter(adapter)),
+	)
+	if err != nil {
+		t.Fatalf("new coordinator: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	summary, err := coord.DistributeSummary(ctx, linearSpec(sut.URL), users)
+	if err != nil {
+		t.Fatalf("distribute summary: %v", err)
+	}
+	stats := summary.Stats()
+	if want := users * nodes; stats.Total != want {
+		t.Fatalf("merged Total = %d, want %d", stats.Total, want)
+	}
+	if stats.Errors != 0 {
+		t.Fatalf("merged Errors = %d, want 0", stats.Errors)
+	}
+	if got := stats.StatusCounts[http.StatusOK]; got != users*nodes {
+		t.Fatalf("merged StatusCounts[200] = %d, want %d", got, users*nodes)
+	}
+	if got := atomic.LoadInt64(&hits); got != int64(users*nodes) {
+		t.Fatalf("SUT hits = %d, want %d", got, users*nodes)
+	}
+}
+
 // TestWorkerPing covers the health RPC over bufconn.
 func TestWorkerPing(t *testing.T) {
 	t.Parallel()

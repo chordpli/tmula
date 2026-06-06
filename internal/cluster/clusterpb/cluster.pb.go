@@ -205,6 +205,113 @@ func (x *ShardResult) GetErrorClass() string {
 	return ""
 }
 
+// ShardSummary is a worker's compact aggregate of its entire shard: running
+// counters, observed status codes, finding-signal tallies, and a serialized
+// latency histogram in the package's fixed bucket layout. It is mergeable — the
+// master sums the counters and maps and folds the histograms — so run-wide stats
+// (including percentiles) are recovered without the master seeing any individual
+// request.
+type ShardSummary struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// total, errors and timeouts are run-wide request counters.
+	Total    int64 `protobuf:"varint,1,opt,name=total,proto3" json:"total,omitempty"`
+	Errors   int64 `protobuf:"varint,2,opt,name=errors,proto3" json:"errors,omitempty"`
+	Timeouts int64 `protobuf:"varint,3,opt,name=timeouts,proto3" json:"timeouts,omitempty"`
+	// status_counts tallies observed HTTP status codes (status code -> count).
+	StatusCounts map[int32]int64 `protobuf:"bytes,4,rep,name=status_counts,json=statusCounts,proto3" json:"status_counts,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// finding_counts tallies finding-category signals (category string -> count),
+	// e.g. "contract" or "availability"; the master turns non-zero tallies into
+	// run-wide findings.
+	FindingCounts map[string]int64 `protobuf:"bytes,5,rep,name=finding_counts,json=findingCounts,proto3" json:"finding_counts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	// hist_buckets is the latency histogram's bucket counts in the fixed layout
+	// every Histogram shares, so the master merges by element-wise addition.
+	HistBuckets []uint64 `protobuf:"varint,6,rep,packed,name=hist_buckets,json=histBuckets,proto3" json:"hist_buckets,omitempty"`
+	// hist_max is the exact maximum latency (ms) the worker observed, tracked
+	// alongside the (lossy) buckets.
+	HistMax       float64 `protobuf:"fixed64,7,opt,name=hist_max,json=histMax,proto3" json:"hist_max,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShardSummary) Reset() {
+	*x = ShardSummary{}
+	mi := &file_cluster_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShardSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShardSummary) ProtoMessage() {}
+
+func (x *ShardSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_cluster_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShardSummary.ProtoReflect.Descriptor instead.
+func (*ShardSummary) Descriptor() ([]byte, []int) {
+	return file_cluster_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ShardSummary) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *ShardSummary) GetErrors() int64 {
+	if x != nil {
+		return x.Errors
+	}
+	return 0
+}
+
+func (x *ShardSummary) GetTimeouts() int64 {
+	if x != nil {
+		return x.Timeouts
+	}
+	return 0
+}
+
+func (x *ShardSummary) GetStatusCounts() map[int32]int64 {
+	if x != nil {
+		return x.StatusCounts
+	}
+	return nil
+}
+
+func (x *ShardSummary) GetFindingCounts() map[string]int64 {
+	if x != nil {
+		return x.FindingCounts
+	}
+	return nil
+}
+
+func (x *ShardSummary) GetHistBuckets() []uint64 {
+	if x != nil {
+		return x.HistBuckets
+	}
+	return nil
+}
+
+func (x *ShardSummary) GetHistMax() float64 {
+	if x != nil {
+		return x.HistMax
+	}
+	return 0
+}
+
 // PingRequest carries an optional caller-chosen nonce echoed back in the reply.
 type PingRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -215,7 +322,7 @@ type PingRequest struct {
 
 func (x *PingRequest) Reset() {
 	*x = PingRequest{}
-	mi := &file_cluster_proto_msgTypes[2]
+	mi := &file_cluster_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -227,7 +334,7 @@ func (x *PingRequest) String() string {
 func (*PingRequest) ProtoMessage() {}
 
 func (x *PingRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_cluster_proto_msgTypes[2]
+	mi := &file_cluster_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -240,7 +347,7 @@ func (x *PingRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingRequest.ProtoReflect.Descriptor instead.
 func (*PingRequest) Descriptor() ([]byte, []int) {
-	return file_cluster_proto_rawDescGZIP(), []int{2}
+	return file_cluster_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *PingRequest) GetNonce() string {
@@ -262,7 +369,7 @@ type PingReply struct {
 
 func (x *PingReply) Reset() {
 	*x = PingReply{}
-	mi := &file_cluster_proto_msgTypes[3]
+	mi := &file_cluster_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -274,7 +381,7 @@ func (x *PingReply) String() string {
 func (*PingReply) ProtoMessage() {}
 
 func (x *PingReply) ProtoReflect() protoreflect.Message {
-	mi := &file_cluster_proto_msgTypes[3]
+	mi := &file_cluster_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -287,7 +394,7 @@ func (x *PingReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PingReply.ProtoReflect.Descriptor instead.
 func (*PingReply) Descriptor() ([]byte, []int) {
-	return file_cluster_proto_rawDescGZIP(), []int{3}
+	return file_cluster_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PingReply) GetNonce() string {
@@ -328,14 +435,29 @@ const file_cluster_proto_rawDesc = "" +
 	"\n" +
 	"latency_ms\x18\x04 \x01(\x01R\tlatencyMs\x12\x1f\n" +
 	"\verror_class\x18\x05 \x01(\tR\n" +
-	"errorClass\"#\n" +
+	"errorClass\"\xbe\x03\n" +
+	"\fShardSummary\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x03R\x05total\x12\x16\n" +
+	"\x06errors\x18\x02 \x01(\x03R\x06errors\x12\x1a\n" +
+	"\btimeouts\x18\x03 \x01(\x03R\btimeouts\x12O\n" +
+	"\rstatus_counts\x18\x04 \x03(\v2*.cluster.v1.ShardSummary.StatusCountsEntryR\fstatusCounts\x12R\n" +
+	"\x0efinding_counts\x18\x05 \x03(\v2+.cluster.v1.ShardSummary.FindingCountsEntryR\rfindingCounts\x12!\n" +
+	"\fhist_buckets\x18\x06 \x03(\x04R\vhistBuckets\x12\x19\n" +
+	"\bhist_max\x18\a \x01(\x01R\ahistMax\x1a?\n" +
+	"\x11StatusCountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\x05R\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\x1a@\n" +
+	"\x12FindingCountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"#\n" +
 	"\vPingRequest\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\tR\x05nonce\">\n" +
 	"\tPingReply\x12\x14\n" +
 	"\x05nonce\x18\x01 \x01(\tR\x05nonce\x12\x1b\n" +
-	"\tworker_id\x18\x02 \x01(\tR\bworkerId2\x8c\x01\n" +
+	"\tworker_id\x18\x02 \x01(\tR\bworkerId2\xd6\x01\n" +
 	"\x0eClusterService\x12B\n" +
-	"\bRunShard\x12\x1b.cluster.v1.RunShardRequest\x1a\x17.cluster.v1.ShardResult0\x01\x126\n" +
+	"\bRunShard\x12\x1b.cluster.v1.RunShardRequest\x1a\x17.cluster.v1.ShardResult0\x01\x12H\n" +
+	"\x0fRunShardSummary\x12\x1b.cluster.v1.RunShardRequest\x1a\x18.cluster.v1.ShardSummary\x126\n" +
 	"\x04Ping\x12\x17.cluster.v1.PingRequest\x1a\x15.cluster.v1.PingReplyB6Z4github.com/chordpli/tmula/internal/cluster/clusterpbb\x06proto3"
 
 var (
@@ -350,23 +472,30 @@ func file_cluster_proto_rawDescGZIP() []byte {
 	return file_cluster_proto_rawDescData
 }
 
-var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_cluster_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_cluster_proto_goTypes = []any{
 	(*RunShardRequest)(nil), // 0: cluster.v1.RunShardRequest
 	(*ShardResult)(nil),     // 1: cluster.v1.ShardResult
-	(*PingRequest)(nil),     // 2: cluster.v1.PingRequest
-	(*PingReply)(nil),       // 3: cluster.v1.PingReply
+	(*ShardSummary)(nil),    // 2: cluster.v1.ShardSummary
+	(*PingRequest)(nil),     // 3: cluster.v1.PingRequest
+	(*PingReply)(nil),       // 4: cluster.v1.PingReply
+	nil,                     // 5: cluster.v1.ShardSummary.StatusCountsEntry
+	nil,                     // 6: cluster.v1.ShardSummary.FindingCountsEntry
 }
 var file_cluster_proto_depIdxs = []int32{
-	0, // 0: cluster.v1.ClusterService.RunShard:input_type -> cluster.v1.RunShardRequest
-	2, // 1: cluster.v1.ClusterService.Ping:input_type -> cluster.v1.PingRequest
-	1, // 2: cluster.v1.ClusterService.RunShard:output_type -> cluster.v1.ShardResult
-	3, // 3: cluster.v1.ClusterService.Ping:output_type -> cluster.v1.PingReply
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	5, // 0: cluster.v1.ShardSummary.status_counts:type_name -> cluster.v1.ShardSummary.StatusCountsEntry
+	6, // 1: cluster.v1.ShardSummary.finding_counts:type_name -> cluster.v1.ShardSummary.FindingCountsEntry
+	0, // 2: cluster.v1.ClusterService.RunShard:input_type -> cluster.v1.RunShardRequest
+	0, // 3: cluster.v1.ClusterService.RunShardSummary:input_type -> cluster.v1.RunShardRequest
+	3, // 4: cluster.v1.ClusterService.Ping:input_type -> cluster.v1.PingRequest
+	1, // 5: cluster.v1.ClusterService.RunShard:output_type -> cluster.v1.ShardResult
+	2, // 6: cluster.v1.ClusterService.RunShardSummary:output_type -> cluster.v1.ShardSummary
+	4, // 7: cluster.v1.ClusterService.Ping:output_type -> cluster.v1.PingReply
+	5, // [5:8] is the sub-list for method output_type
+	2, // [2:5] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_cluster_proto_init() }
@@ -380,7 +509,7 @@ func file_cluster_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cluster_proto_rawDesc), len(file_cluster_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -10,6 +10,7 @@ const form: ExperimentForm = {
   graphJSON: '{"id":"g","nodes":[{"id":"a"}],"edges":[]}',
   templatesJSON: '{"ta":{"method":"GET","path":"/a"}}',
   workers: '',
+  aggregateWorkers: false,
   workloadKind: 'closed',
   arrivalRate: 50,
   durationSeconds: 10,
@@ -40,6 +41,17 @@ describe('buildRunSpec', () => {
   it('includes trimmed worker addresses when provided', () => {
     const spec = buildRunSpec({ ...form, workers: ' 127.0.0.1:9101 , 127.0.0.1:9102 ' })
     expect(spec.workers).toEqual(['127.0.0.1:9101', '127.0.0.1:9102'])
+  })
+
+  it('attaches aggregateWorkers only with workers set', () => {
+    // No workers → flag never attaches even if requested.
+    expect(buildRunSpec({ ...form, aggregateWorkers: true }).aggregateWorkers).toBeUndefined()
+    // Workers + flag → attaches.
+    const spec = buildRunSpec({ ...form, workers: '127.0.0.1:9101', aggregateWorkers: true })
+    expect(spec.workers).toEqual(['127.0.0.1:9101'])
+    expect(spec.aggregateWorkers).toBe(true)
+    // Workers without the flag → omitted (default streaming path).
+    expect(buildRunSpec({ ...form, workers: '127.0.0.1:9101' }).aggregateWorkers).toBeUndefined()
   })
 
   it('omits workers when the field is blank or only separators', () => {
