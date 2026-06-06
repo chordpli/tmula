@@ -1,0 +1,6 @@
+{
+  "t_browse":   { "method": "GET",  "path": "/browse" },
+  "t_products": { "method": "GET",  "path": "/products" },
+  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p1\",\"qty\":1}" },
+  "t_checkout": { "method": "POST", "path": "/checkout", "payloadTemplate": "{\"total\":42}" }
+}

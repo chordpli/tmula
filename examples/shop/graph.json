@@ -1,0 +1,14 @@
+{
+  "id": "shop",
+  "nodes": [
+    { "id": "browse",   "apiTemplateId": "t_browse" },
+    { "id": "products", "apiTemplateId": "t_products" },
+    { "id": "cart",     "apiTemplateId": "t_cart" },
+    { "id": "checkout", "apiTemplateId": "t_checkout" }
+  ],
+  "edges": [
+    { "from": "browse",   "to": "products", "weight": 0.9, "dependency": false },
+    { "from": "products", "to": "cart",     "weight": 0.7, "dependency": false },
+    { "from": "cart",     "to": "checkout", "weight": 0.8, "dependency": true }
+  ]
+}
