@@ -17,6 +17,17 @@ export interface ExperimentForm {
   maxConcurrency: number // open: back-pressure cap (0 = uncapped)
   thinkMinMs: number // pause between a user's steps (uniform [min,max])
   thinkMaxMs: number
+  segmentsJSON: string // open: persona mix as a JSON array (blank/[] = homogeneous)
+}
+
+// Segment is one persona in an open run: a weighted share of arrivals with its
+// own entry node and pacing overrides.
+export interface Segment {
+  name: string
+  weight: number
+  start?: string
+  maxSteps?: number
+  thinkTime?: { minMs: number; maxMs: number }
 }
 
 export interface WorkloadSpec {
@@ -38,6 +49,17 @@ export interface RunSpec {
   seed: number
   workers?: string[]
   workload?: WorkloadSpec
+  segments?: Segment[]
+}
+
+// parseSegments reads the persona-mix JSON. A blank value means no personas
+// (homogeneous run); anything else must be a JSON array or it throws, so the
+// caller surfaces a clear error — same contract as the graph/templates fields.
+export function parseSegments(json: string): Segment[] {
+  if (!json.trim()) return []
+  const parsed = JSON.parse(json)
+  if (!Array.isArray(parsed)) throw new Error('segments must be a JSON array')
+  return parsed as Segment[]
 }
 
 export interface Stats {
@@ -115,6 +137,9 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
       maxConcurrency: form.maxConcurrency,
       thinkTime: { minMs: form.thinkMinMs, maxMs: form.thinkMaxMs },
     }
+    // Personas apply only to the open model; attach them only when provided.
+    const segments = parseSegments(form.segmentsJSON)
+    if (segments.length > 0) spec.segments = segments
   }
   return spec
 }

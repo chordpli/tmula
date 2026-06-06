@@ -47,6 +47,11 @@ type RunSpec struct {
 	// arrival rate over time so concurrency emerges organically.
 	Workload *domain.WorkloadModel `json:"workload,omitempty"`
 
+	// Segments is the persona mix for an open run: weighted behavioral profiles
+	// (entry node, step bound, think time) the arrivals are drawn from. It only
+	// applies to the open model; the closed path ignores it.
+	Segments []domain.Segment `json:"segments,omitempty"`
+
 	id domain.ID
 }
 
@@ -73,6 +78,25 @@ func (r RunSpec) Validate() error {
 	// needs no user list; every other path needs at least one user.
 	if !r.isOpen() && len(r.Users) == 0 {
 		return fmt.Errorf("api: at least one virtual user is required")
+	}
+	if len(r.Segments) > 0 {
+		if !r.isOpen() {
+			return fmt.Errorf("api: segments (personas) apply only to the open workload model")
+		}
+		if err := domain.ValidateSegments(r.Segments); err != nil {
+			return err
+		}
+		// A segment's entry node must exist in the graph, else its sessions would
+		// fail to walk at runtime; reject up front with a clear message.
+		nodes := make(map[domain.ID]bool, len(r.Graph.Nodes))
+		for _, n := range r.Graph.Nodes {
+			nodes[n.ID] = true
+		}
+		for _, seg := range r.Segments {
+			if seg.Start != "" && !nodes[seg.Start] {
+				return fmt.Errorf("api: segment %q start node %q is not in the graph", seg.Name, seg.Start)
+			}
+		}
 	}
 	return nil
 }
@@ -386,6 +410,11 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		Seed:     spec.Seed,
 		RunID:    rs.exec.ID,
 		Classify: obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5},
+		// Feed the run's own collector so the SSE stream reports live progress
+		// while the open run is still generating traffic, not just at the end.
+		Collector: rs.collector,
+		// Persona mix: drives a weighted blend of entry points and pacing.
+		Segments: spec.Segments,
 	})
 	if err != nil {
 		return obs.Stats{}, nil, err

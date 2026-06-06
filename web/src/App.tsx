@@ -57,7 +57,15 @@ const initialForm: ExperimentForm = {
   maxConcurrency: 500,
   thinkMinMs: 0,
   thinkMaxMs: 0,
+  segmentsJSON: '',
 }
+
+// segmentsPlaceholder shows the persona-mix shape without prefilling it, so an
+// open run stays homogeneous until the operator opts in.
+const segmentsPlaceholder = `[
+  { "name": "browser", "weight": 0.7, "start": "browse" },
+  { "name": "buyer", "weight": 0.3, "start": "cart", "thinkTime": { "minMs": 200, "maxMs": 800 } }
+]`
 
 // App routes to the read-only viewer when a ?share=<token> link is opened,
 // otherwise it shows the operator console.
@@ -163,7 +171,8 @@ function Operator() {
           </select>
         </Field>
         {form.workloadKind === 'open' && (
-          <div style={{ display: 'flex', gap: '1rem' }}>
+          <>
+            <div style={{ display: 'flex', gap: '1rem' }}>
             <Field label="Arrival rate (users/sec)">
               <input
                 type="number"
@@ -209,7 +218,17 @@ function Operator() {
                 />
               </div>
             </Field>
-          </div>
+            </div>
+            <Field label="Personas / segments (JSON array — optional, open model)">
+              <textarea
+                value={form.segmentsJSON}
+                onChange={(e) => set('segmentsJSON', e.target.value)}
+                rows={6}
+                placeholder={segmentsPlaceholder}
+                style={ta}
+              />
+            </Field>
+          </>
         )}
         <div style={{ display: 'flex', gap: '1rem' }}>
           <Field label="Virtual users">

@@ -46,6 +46,65 @@ func TestOpenModelRun(t *testing.T) {
 	}
 }
 
+// TestOpenModelWithSegments drives an open run with a two-persona mix and
+// asserts it executes end to end against a healthy SUT.
+func TestOpenModelWithSegments(t *testing.T) {
+	sut := sutOK()
+	defer sut.Close()
+	cp, closeCP := newCP(t)
+	defer closeCP()
+
+	spec := specFor(sut.URL, 1)
+	spec.Workload = &domain.WorkloadModel{
+		Kind:            domain.WorkloadOpen,
+		Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, StartRate: 40, PeakRate: 40},
+		DurationSeconds: 1,
+		MaxConcurrency:  200,
+	}
+	spec.Segments = []domain.Segment{
+		{Name: "browser", Weight: 0.7, Start: "a"},
+		{Name: "buyer", Weight: 0.3, Start: "b", ThinkTime: &domain.ThinkTime{MinMs: 1, MaxMs: 3}},
+	}
+
+	resp := postJSON(t, cp.URL+"/experiments", spec)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create segmented experiment = %d", resp.StatusCode)
+	}
+	var created struct{ ID string }
+	decode(t, resp, &created)
+
+	resp = postJSON(t, cp.URL+"/experiments/"+created.ID+"/run", nil)
+	var run struct {
+		RunID string `json:"runId"`
+	}
+	decode(t, resp, &run)
+
+	report := waitForStatus(t, cp.URL+"/runs/"+run.RunID+"/report", domain.RunCompleted, 5*time.Second)
+	if report.Stats.Total == 0 {
+		t.Fatal("segmented open run produced no requests")
+	}
+	if report.Stats.Errors != 0 {
+		t.Errorf("healthy SUT should yield no errors, got %d", report.Stats.Errors)
+	}
+}
+
+// TestSegmentsRejectedOnClosedModel ensures personas are refused on the closed
+// model rather than silently ignored.
+func TestSegmentsRejectedOnClosedModel(t *testing.T) {
+	cp, closeCP := newCP(t)
+	defer closeCP()
+	sut := sutOK()
+	defer sut.Close()
+
+	spec := specFor(sut.URL, 2) // closed model (no Workload)
+	spec.Segments = []domain.Segment{{Name: "x", Weight: 1}}
+	resp := postJSON(t, cp.URL+"/experiments", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("segments on closed model = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 func TestOpenModelRejectsInvalidWorkload(t *testing.T) {
 	cp, closeCP := newCP(t)
 	defer closeCP()
