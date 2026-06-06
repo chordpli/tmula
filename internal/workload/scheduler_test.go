@@ -397,6 +397,129 @@ func TestSetupErrorsFailRunLoudly(t *testing.T) {
 	}
 }
 
+// TestProvidedCollectorIsTheLiveSink verifies that a caller-supplied collector
+// receives every request (so the control plane can snapshot live progress while
+// the run is still in flight) and that its final tally matches the Result — i.e.
+// the open path records into the provided sink rather than a private one.
+func TestProvidedCollectorIsTheLiveSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g, tmpls := oneNodeGraph()
+	clock := newVirtualClock(time.Unix(0, 0))
+	s := newScheduler(t, srv.URL, tmpls, WithClock(clock))
+
+	sink := obs.NewCollector()
+	res, err := s.Run(context.Background(), Options{
+		Graph:    g,
+		Start:    "a",
+		MaxSteps: 2,
+		Model: domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 100},
+			DurationSeconds: 2,
+		},
+		Seed:      1,
+		RunID:     "run-sink",
+		Collector: sink,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Stats.Total == 0 {
+		t.Fatal("expected some requests")
+	}
+	if got := sink.Snapshot().Total; got != res.Stats.Total {
+		t.Errorf("provided collector total = %d, result total = %d, want equal", got, res.Stats.Total)
+	}
+}
+
+// TestSegmentsSplitTrafficByWeight verifies the persona mix: two segments with a
+// 3:1 weight and distinct entry nodes should send roughly 75% / 25% of arrivals
+// down their respective paths. Each segment's start node maps to its own
+// endpoint, so counting hits per path measures the realized split.
+func TestSegmentsSplitTrafficByWeight(t *testing.T) {
+	var aHits, bHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a":
+			aHits.Add(1)
+		case "/b":
+			bHits.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Two disconnected single-request nodes; a session enters at its segment's
+	// start node and issues exactly one request there.
+	g := domain.ScenarioGraph{
+		ID: "g",
+		Nodes: []domain.Node{
+			{ID: "a", APITemplateID: "ta"},
+			{ID: "b", APITemplateID: "tb"},
+		},
+	}
+	tmpls := map[domain.ID]domain.APITemplate{
+		"ta": {Method: "GET", Path: "/a"},
+		"tb": {Method: "GET", Path: "/b"},
+	}
+	clock := newVirtualClock(time.Unix(0, 0))
+	s := newScheduler(t, srv.URL, tmpls, WithClock(clock))
+
+	res, err := s.Run(context.Background(), Options{
+		Graph:    g,
+		Start:    "a", // run default; each segment overrides it
+		MaxSteps: 2,
+		Model: domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 400},
+			DurationSeconds: 4,
+		},
+		Seed:  7,
+		RunID: "run-segments",
+		Segments: []domain.Segment{
+			{Name: "heavy", Weight: 3, Start: "a"},
+			{Name: "light", Weight: 1, Start: "b"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	a, b := aHits.Load(), bHits.Load()
+	total := a + b
+	if total == 0 || int(total) != res.Stats.Total {
+		t.Fatalf("hits a=%d b=%d (sum %d) != stats total %d", a, b, total, res.Stats.Total)
+	}
+	// Expect ~75% to the heavy segment; allow a wide margin for sampling variance.
+	shareA := float64(a) / float64(total)
+	if shareA < 0.65 || shareA > 0.85 {
+		t.Errorf("heavy-segment share = %.2f, want ~0.75 (a=%d b=%d)", shareA, a, b)
+	}
+}
+
+// TestRunRejectsInvalidSegments verifies the scheduler validates the persona mix
+// up front rather than launching a broken run.
+func TestRunRejectsInvalidSegments(t *testing.T) {
+	g, tmpls := oneNodeGraph()
+	s := newScheduler(t, "http://x", tmpls)
+	_, err := s.Run(context.Background(), Options{
+		Graph: g, Start: "a", MaxSteps: 1,
+		Model: domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 10},
+			DurationSeconds: 1,
+		},
+		Segments: []domain.Segment{{Name: "a", Weight: 1}, {Name: "a", Weight: 1}}, // dup name
+	})
+	if err == nil {
+		t.Error("expected error for an invalid segment mix")
+	}
+}
+
 // --- helpers ---
 
 // closedFindingCategories runs a fixed pool of users through the closed runner

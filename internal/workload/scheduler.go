@@ -39,6 +39,17 @@ type Options struct {
 	// Classify tunes how observations become findings. It mirrors the closed
 	// path's configuration so findings are comparable across models.
 	Classify obs.ClassifyConfig
+	// Collector, when non-nil, is the sink every request is recorded into, so a
+	// caller (the control plane) can snapshot live stats while the run is still
+	// in flight. When nil the scheduler uses a private collector and the stats
+	// are only observable through the returned Result. Either way it must be
+	// safe for concurrent use; obs.Collector is.
+	Collector *obs.Collector
+	// Segments, when non-empty, is the persona mix the arrivals are drawn from:
+	// each arrival is assigned a segment in proportion to its weight and adopts
+	// that segment's start node, step bound and think-time overrides. Empty means
+	// one homogeneous persona using the Start/MaxSteps/Model.ThinkTime above.
+	Segments []domain.Segment
 }
 
 // Result is the aggregated outcome of an open-model run.
@@ -100,6 +111,13 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 	if err := opts.Model.Validate(); err != nil {
 		return Result{}, fmt.Errorf("workload: invalid model: %w", err)
 	}
+	var picker *segmentPicker
+	if len(opts.Segments) > 0 {
+		if err := domain.ValidateSegments(opts.Segments); err != nil {
+			return Result{}, fmt.Errorf("workload: invalid segments: %w", err)
+		}
+		picker = newSegmentPicker(opts.Segments)
+	}
 
 	rate, err := NewRateFunc(opts.Model.Arrival)
 	if err != nil {
@@ -108,7 +126,13 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 	lambdaMax := peakRate(opts.Model.Arrival)
 	duration := time.Duration(opts.Model.DurationSeconds) * time.Second
 
-	collector := obs.NewCollector()
+	// Record into the caller's collector when provided so live stats are visible
+	// mid-run; otherwise keep a private one. The final Result snapshots whichever
+	// collector was used, so the returned stats are identical regardless.
+	collector := opts.Collector
+	if collector == nil {
+		collector = obs.NewCollector()
+	}
 	agg := obs.NewAggregator()
 
 	var (
@@ -169,15 +193,36 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 		atomic.AddInt64(&live, 1)
 		atomic.AddInt64(&launched, 1)
 		sessionSeed := opts.Seed + atomic.AddInt64(&idx, 1)
-		user := opts.User
-		user.ID = sessionUserID(opts.User.ID, sessionSeed)
+
+		// Per-session profile: start from the run defaults, then let the segment
+		// (persona) this arrival is drawn from override entry node, step bound and
+		// think time. The segment is picked from the same loop-local rng, so the
+		// mix is reproducible for a given seed.
+		startNode := opts.Start
+		maxSteps := opts.MaxSteps
 		think := thinkFunc(opts.Model.ThinkTime, sessionSeed)
+		segName := ""
+		if picker != nil {
+			seg := picker.pick(rng)
+			segName = seg.Name
+			if seg.Start != "" {
+				startNode = seg.Start
+			}
+			if seg.MaxSteps > 0 {
+				maxSteps = seg.MaxSteps
+			}
+			if seg.ThinkTime != nil {
+				think = thinkFunc(*seg.ThinkTime, sessionSeed)
+			}
+		}
+		user := opts.User
+		user.ID = sessionUserID(opts.User.ID, segName, sessionSeed)
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer atomic.AddInt64(&live, -1)
-			results, err := s.runner.RunSession(ctx, opts.Graph, opts.Start, opts.MaxSteps, user, sessionSeed, think)
+			results, err := s.runner.RunSession(ctx, opts.Graph, startNode, maxSteps, user, sessionSeed, think)
 			if err != nil {
 				// The session could not start (e.g. the graph references an unknown
 				// API template). Setup is deterministic, so this fails every session
@@ -278,11 +323,49 @@ func errorClass(sr load.StepResult) string {
 }
 
 // sessionUserID derives a stable, unique id for one arrival from the base user
-// id and the session seed, so concurrent sessions of the same principal remain
-// distinguishable in observations.
-func sessionUserID(base string, seed int64) string {
+// id, the segment (persona) it was drawn from, and the session seed, so
+// concurrent sessions stay distinguishable and a session's persona is visible in
+// observations. The segment is omitted when the run has no persona mix.
+func sessionUserID(base, segment string, seed int64) string {
 	if base == "" {
 		base = "vu"
 	}
+	if segment != "" {
+		return fmt.Sprintf("%s-%s-s%d", base, segment, seed)
+	}
 	return fmt.Sprintf("%s-s%d", base, seed)
+}
+
+// segmentPicker draws a persona for each arrival in proportion to its weight,
+// using inverse-CDF sampling over the cumulative weights. It holds no state
+// beyond the precomputed table, so callers serialize draws through their own rng.
+type segmentPicker struct {
+	segs  []domain.Segment
+	cum   []float64 // cumulative weights; cum[i] = sum(weights[:i+1])
+	total float64
+}
+
+// newSegmentPicker precomputes the cumulative-weight table. Callers must pass a
+// non-empty, validated slice (weights > 0).
+func newSegmentPicker(segs []domain.Segment) *segmentPicker {
+	p := &segmentPicker{segs: segs, cum: make([]float64, len(segs))}
+	var sum float64
+	for i, s := range segs {
+		sum += s.Weight
+		p.cum[i] = sum
+	}
+	p.total = sum
+	return p
+}
+
+// pick returns a segment with probability weight/total. A draw in [0,total)
+// lands in the first cumulative bucket it does not exceed.
+func (p *segmentPicker) pick(rng *rand.Rand) domain.Segment {
+	x := rng.Float64() * p.total
+	for i, c := range p.cum {
+		if x < c {
+			return p.segs[i]
+		}
+	}
+	return p.segs[len(p.segs)-1] // float rounding guard: total is the last bucket
 }
