@@ -90,7 +90,7 @@ func writeHTML(w http.ResponseWriter, body []byte) {
 func writeHTMLError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>tmula</title>`+
+	_, _ = fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><title>tmula</title>`+
 		`<body style="font-family:system-ui,sans-serif;max-width:560px;margin:4rem auto;padding:0 1rem;color:#333">`+
 		`<h1 style="font-size:1.25rem">Report unavailable</h1><p>%s</p>`+
 		`<p style="color:#888;font-size:.9rem">Runs are held in memory, so a link can stop working after the engine restarts.</p>`+
