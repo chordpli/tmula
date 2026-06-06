@@ -50,6 +50,7 @@ const initialForm: ExperimentForm = {
   start: 'browse',
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
+  workers: '',
 }
 
 // App routes to the read-only viewer when a ?share=<token> link is opened,
@@ -62,6 +63,7 @@ export default function App() {
 function Operator() {
   const [form, setForm] = useState<ExperimentForm>(initialForm)
   const [runId, setRunId] = useState<string>('')
+  const [runMode, setRunMode] = useState<string>('')
   const [status, setStatus] = useState<string>('')
   const [stats, setStats] = useState<Stats | null>(null)
   const [report, setReport] = useState<Report | null>(null)
@@ -82,6 +84,8 @@ function Operator() {
     setStatus('starting')
     try {
       const spec = buildRunSpec(form)
+      const workerCount = spec.workers?.length ?? 0
+      setRunMode(workerCount > 0 ? `distributed (${workerCount} worker${workerCount === 1 ? '' : 's'})` : 'local')
       const expId = await createExperiment(spec)
       const id = await startRun(expId)
       setRunId(id)
@@ -133,6 +137,14 @@ function Operator() {
         </Field>
         <Field label="Allowlist (comma-separated hosts)">
           <input value={form.allowlist} onChange={(e) => set('allowlist', e.target.value)} style={inp} />
+        </Field>
+        <Field label="Worker addresses (comma-separated, blank = local)">
+          <input
+            value={form.workers}
+            onChange={(e) => set('workers', e.target.value)}
+            placeholder="e.g. 127.0.0.1:9101, 127.0.0.1:9102"
+            style={inp}
+          />
         </Field>
         <div style={{ display: 'flex', gap: '1rem' }}>
           <Field label="Virtual users">
@@ -193,6 +205,7 @@ function Operator() {
         <section style={{ marginTop: '1.5rem' }}>
           <h2>
             Run {runId} — <span>{status}</span>
+            {runMode && <span style={{ color: '#555', fontWeight: 400, fontSize: 14 }}> · {runMode}</span>}
           </h2>
           {stats && <StatsView stats={stats} />}
         </section>

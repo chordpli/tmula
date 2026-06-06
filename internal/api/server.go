@@ -13,6 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/chordpli/tmula/internal/cluster"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/mask"
@@ -30,6 +34,11 @@ type RunSpec struct {
 	MaxSteps   int                              `json:"maxSteps"`
 	Users      []load.VirtualUser               `json:"users"`
 	Seed       int64                            `json:"seed"`
+	// Workers lists gRPC worker addresses to distribute the run across. When
+	// empty the run executes locally in-process; when set, the control plane
+	// dials each worker, fans the virtual users out across them, and aggregates
+	// their streamed results identically to the local path.
+	Workers []string `json:"workers,omitempty"`
 
 	id domain.ID
 }
@@ -62,6 +71,9 @@ type runState struct {
 	cancel    context.CancelFunc
 	done      chan struct{}
 	findings  []domain.Finding
+	// workers is the number of remote workers a distributed run fanned out to
+	// (0 for a local run). It is fixed at run creation, so it needs no locking.
+	workers int
 }
 
 func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
@@ -73,20 +85,31 @@ func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
 // Server holds the in-memory registries and serves the control plane. The
 // store is intentionally in-memory; the persistent store (#14) plugs in later.
 type Server struct {
-	mu      sync.Mutex
-	specs   map[domain.ID]RunSpec
-	runs    map[domain.ID]*runState
-	shares  map[string]shareEntry
-	adapter load.Adapter
-	masker  *mask.Masker
-	seq     atomic.Int64
-	now     func() time.Time
-	mux     *http.ServeMux
+	mu             sync.Mutex
+	specs          map[domain.ID]RunSpec
+	runs           map[domain.ID]*runState
+	shares         map[string]shareEntry
+	adapter        load.Adapter
+	masker         *mask.Masker
+	defaultWorkers []string
+	seq            atomic.Int64
+	now            func() time.Time
+	mux            *http.ServeMux
+}
+
+// Option customizes a Server at construction.
+type Option func(*Server)
+
+// WithDefaultWorkers sets gRPC worker addresses applied to any experiment whose
+// own spec does not list workers. It is an operator convenience so a master can
+// be launched pointing at a fixed worker pool; per-experiment Workers always win.
+func WithDefaultWorkers(addrs []string) Option {
+	return func(s *Server) { s.defaultWorkers = addrs }
 }
 
 // NewServer builds a control-plane server using the given adapter to reach the
 // system under test.
-func NewServer(adapter load.Adapter) *Server {
+func NewServer(adapter load.Adapter, opts ...Option) *Server {
 	s := &Server{
 		specs:   make(map[domain.ID]RunSpec),
 		runs:    make(map[domain.ID]*runState),
@@ -95,6 +118,9 @@ func NewServer(adapter load.Adapter) *Server {
 		masker:  mask.New(mask.Config{}),
 		now:     time.Now,
 		mux:     http.NewServeMux(),
+	}
+	for _, opt := range opts {
+		opt(s)
 	}
 	s.routes()
 	return s
@@ -154,6 +180,9 @@ func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	if len(spec.Workers) == 0 && len(s.defaultWorkers) > 0 {
+		spec.Workers = append([]string(nil), s.defaultWorkers...)
+	}
 	id := s.nextID("exp")
 	spec.id = id
 	spec.Experiment.ID = id
@@ -195,17 +224,23 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mode := domain.RunLocal
+	if len(spec.Workers) > 0 {
+		mode = domain.RunDistributed
+	}
+
 	runID := s.nextID("run")
 	ctx, cancel := context.WithCancel(context.Background())
 	rs := &runState{
 		exec: domain.RunExecution{
-			ID: runID, ExperimentID: id, Mode: domain.RunLocal,
+			ID: runID, ExperimentID: id, Mode: mode,
 			Status: domain.RunRunning, StartedAt: s.now(),
 		},
 		collector: obs.NewCollector(),
 		guard:     guard,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		workers:   len(spec.Workers),
 	}
 	s.mu.Lock()
 	s.runs[runID] = rs
@@ -218,21 +253,15 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	defer close(rs.done)
-	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
-	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
-	end := s.now()
+
 	agg := obs.NewAggregator()
-	for _, res := range results {
-		cls := errorClass(res)
-		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, cls)
-		agg.Add(obs.RequestObservation{
-			APIID:      res.NodeID,
-			StatusCode: res.Resp.StatusCode,
-			LatencyMs:  res.Resp.LatencyMs,
-			ErrorClass: cls,
-			TS:         end,
-		})
+	var err error
+	if len(spec.Workers) > 0 {
+		err = s.executeDistributed(ctx, rs, spec, agg)
+	} else {
+		err = s.executeLocal(ctx, rs, spec, agg)
 	}
+	end := s.now()
 	findings := agg.Classify(rs.exec.ID, obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5})
 
 	rs.mu.Lock()
@@ -250,6 +279,85 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 		rs.exec.Status = domain.RunCompleted
 	}
 	rs.mu.Unlock()
+}
+
+// executeLocal runs the experiment in-process via the load.Runner, recording
+// each step into the run's collector and finding aggregator.
+func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
+	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
+	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
+	ts := s.now()
+	for _, res := range results {
+		cls := errorClass(res)
+		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, cls)
+		agg.Add(obs.RequestObservation{
+			APIID:      res.NodeID,
+			StatusCode: res.Resp.StatusCode,
+			LatencyMs:  res.Resp.LatencyMs,
+			ErrorClass: cls,
+			TS:         ts,
+		})
+	}
+	return err
+}
+
+// executeDistributed dials each worker, fans the run's virtual users out across
+// them via a cluster.Coordinator, and feeds the returned per-step results into
+// the same collector + finding aggregator the local path uses, so findings are
+// produced identically regardless of topology.
+func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
+	conns := make([]grpc.ClientConnInterface, 0, len(spec.Workers))
+	closers := make([]func() error, 0, len(spec.Workers))
+	defer func() {
+		for _, c := range closers {
+			_ = c()
+		}
+	}()
+	for _, addr := range spec.Workers {
+		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return fmt.Errorf("api: dial worker %q: %w", addr, err)
+		}
+		conns = append(conns, conn)
+		closers = append(closers, conn.Close)
+	}
+
+	coord, err := cluster.NewCoordinator(conns...)
+	if err != nil {
+		return fmt.Errorf("api: build coordinator: %w", err)
+	}
+
+	shardSpec := shardSpecFor(spec)
+	ts := s.now()
+	_, steps, err := coord.Distribute(ctx, shardSpec, len(spec.Users))
+	if err != nil {
+		return fmt.Errorf("api: distribute run: %w", err)
+	}
+	for _, st := range steps {
+		rs.collector.Record(st.StatusCode, st.LatencyMs, st.ErrorClass)
+		agg.Add(obs.RequestObservation{
+			APIID:      domain.ID(st.APIID),
+			StatusCode: st.StatusCode,
+			LatencyMs:  st.LatencyMs,
+			ErrorClass: st.ErrorClass,
+			TS:         ts,
+		})
+	}
+	return nil
+}
+
+// shardSpecFor maps a control-plane RunSpec onto the cluster.ShardSpec shipped
+// to each worker. The per-worker user partition is computed by the Coordinator,
+// so only the run-wide fields cross here.
+func shardSpecFor(spec RunSpec) cluster.ShardSpec {
+	return cluster.ShardSpec{
+		Graph:         spec.Graph,
+		Templates:     spec.Templates,
+		TargetBaseURL: spec.TargetEnv.BaseURL,
+		Start:         spec.Start,
+		MaxSteps:      spec.MaxSteps,
+		Seed:          spec.Seed,
+	}
 }
 
 func errorClass(res load.StepResult) string {
@@ -287,11 +395,14 @@ func (s *Server) killRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "killing"})
 }
 
-// Report is the operator-facing run report.
+// Report is the operator-facing run report. Run.Mode reports the execution
+// topology (local or distributed); Workers is the number of remote workers a
+// distributed run fanned out to (0 for a local run).
 type Report struct {
 	Run      domain.RunExecution `json:"run"`
 	Stats    obs.Stats           `json:"stats"`
 	Findings []domain.Finding    `json:"findings"`
+	Workers  int                 `json:"workers"`
 }
 
 // report assembles the report for a run (caller must not hold rs.mu).
@@ -300,7 +411,7 @@ func (rs *runState) report(collector *obs.Collector) Report {
 	exec := rs.exec
 	findings := append([]domain.Finding(nil), rs.findings...)
 	rs.mu.Unlock()
-	return Report{Run: exec, Stats: collector.Snapshot(), Findings: findings}
+	return Report{Run: exec, Stats: collector.Snapshot(), Findings: findings, Workers: rs.workers}
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {

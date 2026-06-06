@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -40,9 +41,10 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("tmula", flag.ContinueOnError)
 	var (
-		roleStr = fs.String("role", "local", "execution role: local | master | worker")
-		addr    = fs.String("addr", ":8080", "HTTP listen address (control plane + UI)")
-		showVer = fs.Bool("version", false, "print version and exit")
+		roleStr    = fs.String("role", "local", "execution role: local | master | worker")
+		addr       = fs.String("addr", ":8080", "HTTP listen address (control plane + UI)")
+		workersStr = fs.String("workers", "", "comma-separated gRPC worker addresses; experiments without their own workers are distributed across these (blank = run locally)")
+		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -70,8 +72,14 @@ func run(args []string) error {
 		fmt.Fprintf(w, `{"status":"ok","role":%q,"version":%q}`, role, version)
 	})
 
-	// Control plane under /api; the embedded UI under everything else.
-	apiSrv := api.NewServer(load.NewRESTAdapter(30 * time.Second))
+	// Control plane under /api; the embedded UI under everything else. A
+	// --workers list (if any) becomes the default worker pool for experiments
+	// that do not specify their own.
+	defaultWorkers := splitCSV(*workersStr)
+	if len(defaultWorkers) > 0 {
+		slog.Info("default worker pool configured", "workers", defaultWorkers)
+	}
+	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second), api.WithDefaultWorkers(defaultWorkers))
 	mux.Handle("/api/", http.StripPrefix("/api", apiSrv.Handler()))
 	mux.Handle("/", web.Handler())
 
@@ -130,4 +138,20 @@ func runWorker(addr string) error {
 	case err := <-errCh:
 		return fmt.Errorf("worker: serve: %w", err)
 	}
+}
+
+// splitCSV parses a comma-separated flag value into trimmed, non-empty entries.
+// A blank value yields nil, which the control plane treats as "run locally".
+func splitCSV(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

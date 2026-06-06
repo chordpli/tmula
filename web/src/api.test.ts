@@ -9,6 +9,7 @@ const form: ExperimentForm = {
   start: 'a',
   graphJSON: '{"id":"g","nodes":[{"id":"a"}],"edges":[]}',
   templatesJSON: '{"ta":{"method":"GET","path":"/a"}}',
+  workers: '',
 }
 
 describe('buildRunSpec', () => {
@@ -27,6 +28,17 @@ describe('buildRunSpec', () => {
 
   it('throws on invalid graph JSON', () => {
     expect(() => buildRunSpec({ ...form, graphJSON: 'not json' })).toThrow()
+  })
+
+  it('includes trimmed worker addresses when provided', () => {
+    const spec = buildRunSpec({ ...form, workers: ' 127.0.0.1:9101 , 127.0.0.1:9102 ' })
+    expect(spec.workers).toEqual(['127.0.0.1:9101', '127.0.0.1:9102'])
+  })
+
+  it('omits workers when the field is blank or only separators', () => {
+    expect(buildRunSpec({ ...form, workers: '' }).workers).toBeUndefined()
+    expect(buildRunSpec({ ...form, workers: '  ' }).workers).toBeUndefined()
+    expect(buildRunSpec({ ...form, workers: ' , , ' }).workers).toBeUndefined()
   })
 })
 
