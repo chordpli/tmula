@@ -30,6 +30,12 @@ go build -o ./bin/tmula ./cmd/engine
 
 # an organic, arrival-rate (open) load
 ./bin/tmula run examples/shop/scenario.yaml --open 200 --for 30
+
+# scaffold a scenario from an existing OpenAPI spec or HAR recording
+./bin/tmula init --from openapi.yaml --out scenario.yaml
+
+# gate CI on results (exit 2 if findings; --fail-on-severity critical to narrow)
+./bin/tmula run examples/shop/scenario.yaml --users 80 --fail-on-findings
 ```
 
 It boots an in-process engine, runs the experiment, and prints the findings.

@@ -75,6 +75,13 @@ Findings (4):
 `--json`(원시 리포트), `--engine http://host:8080`(실행 중 엔진에 보냄), `--timeout`.
 시나리오 파일 포맷은 Step 2~7에서, 직접 REST를 쓰려면 Step 4를 보세요.
 
+**CI 게이트** — findings가 있으면 비정상 종료시켜 파이프라인을 막을 수 있습니다:
+```bash
+tmula run scenario.yaml --users 80 --fail-on-findings           # findings 있으면 exit 2
+tmula run scenario.yaml --users 80 --fail-on-severity critical  # critical 만 게이트
+```
+종료코드: **0 정상 · 1 에러 · 2 findings**. 실패/킬된 런은 findings 무관 비정상 종료.
+
 ### 시나리오 파일 포맷 (한 장으로 graph+templates+target)
 ```yaml
 target: http://localhost:9000
