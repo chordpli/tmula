@@ -41,8 +41,13 @@ func main() {
 // from a scenario file (or flags) and prints the findings; every other
 // invocation starts the long-running engine (the back-compatible default).
 func run(args []string) error {
-	if len(args) > 0 && args[0] == "run" {
-		return runScenario(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "run":
+			return runScenario(args[1:])
+		case "init":
+			return initScenario(args[1:])
+		}
 	}
 	return serve(args)
 }
