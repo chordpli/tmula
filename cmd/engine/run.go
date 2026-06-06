@@ -41,6 +41,7 @@ func runScenario(args []string) error {
 		engine         = fs.String("engine", "", "run against an existing engine base URL instead of in-process")
 		asJSON         = fs.Bool("json", false, "print the raw report JSON instead of a summary")
 		failOnFindings = fs.Bool("fail-on-findings", false, "exit non-zero if any finding is detected (CI gate)")
+		failOnSeverity = fs.String("fail-on-severity", "", "gate only on findings at/above this severity: warning | critical")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
 	fs.Usage = func() {
@@ -73,6 +74,12 @@ func runScenario(args []string) error {
 	file := ""
 	if len(positional) == 1 {
 		file = positional[0]
+	}
+
+	switch strings.ToLower(*failOnSeverity) {
+	case "", "warning", "critical":
+	default:
+		return fmt.Errorf("--fail-on-severity must be warning or critical, got %q", *failOnSeverity)
 	}
 
 	sc, err := buildScenario(file, *target, *get, *post)
@@ -141,10 +148,28 @@ func runScenario(args []string) error {
 	if s := report.Run.Status; s == "failed" || s == "killed" {
 		return fmt.Errorf("run %s: %s", s, report.Run.KillReason)
 	}
-	if *failOnFindings && len(report.Findings) > 0 {
-		return fmt.Errorf("%w (%d)", errFindings, len(report.Findings))
+	if n := gatingFindings(report.Findings, *failOnFindings, strings.ToLower(*failOnSeverity)); n > 0 {
+		return fmt.Errorf("%w (%d)", errFindings, n)
 	}
 	return nil
+}
+
+// gatingFindings counts the findings that should fail the CI gate. The gate is
+// off (returns 0) unless failAny is set or minSev is non-empty. minSev
+// "warning" counts every finding (warning is the lowest level); "critical"
+// counts only criticals.
+func gatingFindings(findings []cliFinding, failAny bool, minSev string) int {
+	if !failAny && minSev == "" {
+		return 0
+	}
+	n := 0
+	for _, f := range findings {
+		if minSev == "critical" && strings.ToLower(f.Severity) != "critical" {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // buildScenario assembles the scenario from a file or, when none is given, from
@@ -263,13 +288,16 @@ type cliReport struct {
 		Max          float64        `json:"max"`
 		StatusCounts map[string]int `json:"statusCounts"`
 	} `json:"stats"`
-	Findings []struct {
-		Category    string `json:"category"`
-		Severity    string `json:"severity"`
-		Description string `json:"description"`
-		EvidenceRef string `json:"evidenceRef"`
-	} `json:"findings"`
-	Workers int `json:"workers"`
+	Findings []cliFinding `json:"findings"`
+	Workers  int          `json:"workers"`
+}
+
+// cliFinding is one finding as the CLI consumes it.
+type cliFinding struct {
+	Category    string `json:"category"`
+	Severity    string `json:"severity"`
+	Description string `json:"description"`
+	EvidenceRef string `json:"evidenceRef"`
 }
 
 // printReport renders a human-readable summary of the run and its findings.
