@@ -51,6 +51,12 @@ const initialForm: ExperimentForm = {
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
   workers: '',
+  workloadKind: 'closed',
+  arrivalRate: 50,
+  durationSeconds: 10,
+  maxConcurrency: 500,
+  thinkMinMs: 0,
+  thinkMaxMs: 0,
 }
 
 // App routes to the read-only viewer when a ?share=<token> link is opened,
@@ -146,6 +152,65 @@ function Operator() {
             style={inp}
           />
         </Field>
+        <Field label="Workload model">
+          <select
+            value={form.workloadKind}
+            onChange={(e) => set('workloadKind', e.target.value as 'closed' | 'open')}
+            style={inp}
+          >
+            <option value="closed">closed — fixed virtual users (loop)</option>
+            <option value="open">open — users arrive at a rate over time (organic)</option>
+          </select>
+        </Field>
+        {form.workloadKind === 'open' && (
+          <div style={{ display: 'flex', gap: '1rem' }}>
+            <Field label="Arrival rate (users/sec)">
+              <input
+                type="number"
+                min={1}
+                value={form.arrivalRate}
+                onChange={(e) => set('arrivalRate', Math.max(1, Number(e.target.value) || 1))}
+                style={inp}
+              />
+            </Field>
+            <Field label="Duration (sec)">
+              <input
+                type="number"
+                min={1}
+                value={form.durationSeconds}
+                onChange={(e) => set('durationSeconds', Math.max(1, Number(e.target.value) || 1))}
+                style={inp}
+              />
+            </Field>
+            <Field label="Max concurrency">
+              <input
+                type="number"
+                min={0}
+                value={form.maxConcurrency}
+                onChange={(e) => set('maxConcurrency', Math.max(0, Number(e.target.value) || 0))}
+                style={inp}
+              />
+            </Field>
+            <Field label="Think min/max (ms)">
+              <div style={{ display: 'flex', gap: 4 }}>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.thinkMinMs}
+                  onChange={(e) => set('thinkMinMs', Math.max(0, Number(e.target.value) || 0))}
+                  style={inp}
+                />
+                <input
+                  type="number"
+                  min={0}
+                  value={form.thinkMaxMs}
+                  onChange={(e) => set('thinkMaxMs', Math.max(0, Number(e.target.value) || 0))}
+                  style={inp}
+                />
+              </div>
+            </Field>
+          </div>
+        )}
         <div style={{ display: 'flex', gap: '1rem' }}>
           <Field label="Virtual users">
             <input
