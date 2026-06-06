@@ -105,6 +105,56 @@ func TestFromHAR(t *testing.T) {
 	}
 }
 
+func TestOpenAPIJourneyOrder(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://h
+paths:
+  /users/{id}:
+    get: {}
+  /users:
+    delete: {}
+    get: {}
+    post: {}
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	// Shallower path first; within /users reads before writes (GET, POST,
+	// DELETE); then the nested /users/{id}.
+	want := []string{"GET /users", "POST /users", "DELETE /users", "GET /users/{id}"}
+	if len(s.Flow) != len(want) {
+		t.Fatalf("flow = %d steps, want %d", len(s.Flow), len(want))
+	}
+	for i, w := range want {
+		if s.Flow[i].Request != w {
+			t.Errorf("step %d = %q, want %q", i, s.Flow[i].Request, w)
+		}
+	}
+}
+
+func TestHARStepIDIncludesQuery(t *testing.T) {
+	const har = `{"log":{"entries":[
+    {"request":{"method":"GET","url":"http://h/search?q=1"}},
+    {"request":{"method":"GET","url":"http://h/search?q=2"}}
+  ]}}`
+	s, err := FromHAR([]byte(har))
+	if err != nil {
+		t.Fatalf("FromHAR: %v", err)
+	}
+	if len(s.Flow) != 2 {
+		t.Fatalf("flow = %d, want 2", len(s.Flow))
+	}
+	if s.Flow[0].ID == s.Flow[1].ID {
+		t.Errorf("ids collided: both %q (query should distinguish them)", s.Flow[0].ID)
+	}
+	if !strings.Contains(s.Flow[0].ID, "1") || !strings.Contains(s.Flow[1].ID, "2") {
+		t.Errorf("ids %q / %q should reflect the query values", s.Flow[0].ID, s.Flow[1].ID)
+	}
+}
+
 func TestMarshalRoundtrip(t *testing.T) {
 	s, err := FromOpenAPI([]byte(openAPIv3))
 	if err != nil {

@@ -39,29 +39,84 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no paths")
 	}
 
-	flow := make([]scenariofile.Step, 0, len(doc.Paths))
+	ops := collectOperations(doc.Paths)
+	if len(ops) == 0 {
+		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no usable operations")
+	}
+	flow := make([]scenariofile.Step, 0, len(ops))
 	ids := newIDSet()
-	for _, path := range sortedKeys(doc.Paths) {
-		methods := doc.Paths[path]
-		for _, method := range sortedKeys(methods) {
+	for _, o := range ops {
+		flow = append(flow, scenariofile.Step{
+			ID:      ids.unique(stepID(o.op.OperationID, o.method, o.path)),
+			Request: strings.ToUpper(o.method) + " " + o.path,
+			Body:    bodyExample(o.op),
+		})
+	}
+
+	return scenariofile.Scenario{Target: openAPITarget(doc), Flow: flow}, nil
+}
+
+// apiOp is one OpenAPI operation flattened out of the path→method map.
+type apiOp struct {
+	path   string
+	method string
+	op     operation
+}
+
+// collectOperations flattens the path→method map into operations ordered for a
+// plausible first-pass journey: shallower paths before nested ones, then
+// alphabetical by path, then reads-before-writes within a path (GET, POST, PUT,
+// PATCH, DELETE). OpenAPI carries no sequencing, so this is only a scaffold
+// order the operator reorders to match the real flow.
+func collectOperations(paths map[string]map[string]json.RawMessage) []apiOp {
+	var ops []apiOp
+	for path, methods := range paths {
+		for method, raw := range methods {
 			if !httpMethods[strings.ToLower(method)] {
 				continue
 			}
 			var op operation
-			_ = json.Unmarshal(methods[method], &op) // best-effort; only operationId/body used
-			step := scenariofile.Step{
-				ID:      ids.unique(stepID(op.OperationID, method, path)),
-				Request: strings.ToUpper(method) + " " + path,
-				Body:    bodyExample(op),
-			}
-			flow = append(flow, step)
+			_ = json.Unmarshal(raw, &op) // best-effort; only operationId/body used
+			ops = append(ops, apiOp{path: path, method: strings.ToLower(method), op: op})
 		}
 	}
-	if len(flow) == 0 {
-		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no usable operations")
-	}
+	sort.Slice(ops, func(i, j int) bool {
+		if di, dj := pathDepth(ops[i].path), pathDepth(ops[j].path); di != dj {
+			return di < dj
+		}
+		if ops[i].path != ops[j].path {
+			return ops[i].path < ops[j].path
+		}
+		return methodOrder(ops[i].method) < methodOrder(ops[j].method)
+	})
+	return ops
+}
 
-	return scenariofile.Scenario{Target: openAPITarget(doc), Flow: flow}, nil
+// methodOrder ranks HTTP methods reads-before-writes, destructive last.
+func methodOrder(method string) int {
+	switch method {
+	case "get":
+		return 0
+	case "post":
+		return 1
+	case "put":
+		return 2
+	case "patch":
+		return 3
+	case "delete":
+		return 4
+	default:
+		return 5
+	}
+}
+
+// pathDepth counts a path's segments, so parent resources sort before children.
+func pathDepth(p string) int {
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return 0
+	}
+	return strings.Count(p, "/") + 1
 }
 
 // FromHAR builds a scenario from a recorded HAR file: each captured request
@@ -105,7 +160,9 @@ func FromHAR(data []byte) (scenariofile.Scenario, error) {
 			body = e.Request.PostData.Text
 		}
 		flow = append(flow, scenariofile.Step{
-			ID:      ids.unique(stepID("", method, u.Path)),
+			// Derive the id from path+query so two calls to the same path with
+			// different queries (/search?q=1 vs ?q=2) get distinct ids.
+			ID:      ids.unique(stepID("", method, path)),
 			Request: method + " " + path,
 			Body:    body,
 		})
@@ -266,13 +323,4 @@ func (s *idSet) unique(id string) string {
 		return fmt.Sprintf("%s_%d", id, n)
 	}
 	return id
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
