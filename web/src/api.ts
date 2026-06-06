@@ -9,6 +9,7 @@ export interface ExperimentForm {
   start: string
   graphJSON: string
   templatesJSON: string
+  workers: string // comma-separated gRPC worker addresses; blank = run locally
 }
 
 export interface RunSpec {
@@ -20,6 +21,7 @@ export interface RunSpec {
   maxSteps: number
   users: { id: string }[]
   seed: number
+  workers?: string[]
 }
 
 export interface Stats {
@@ -43,9 +45,10 @@ export interface Finding {
 }
 
 export interface Report {
-  run: { id: string; status: string; killReason?: string }
+  run: { id: string; status: string; killReason?: string; mode?: string }
   stats: Stats
   findings: Finding[]
+  workers?: number
 }
 
 // buildRunSpec turns the form into the RunSpec the API expects. It throws on
@@ -57,9 +60,13 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
+  const workers = form.workers
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
   const users = Array.from({ length: form.users }, (_, i) => ({ id: `u${i}` }))
 
-  return {
+  const spec: RunSpec = {
     experiment: {
       name: 'ui-run',
       targetEnvId: 'env',
@@ -79,6 +86,10 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     users,
     seed: 1,
   }
+  // Only attach workers when the operator named at least one address; an empty
+  // list would otherwise signal a distributed run with no workers.
+  if (workers.length > 0) spec.workers = workers
+  return spec
 }
 
 export interface StreamFrame {
