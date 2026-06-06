@@ -115,6 +115,51 @@ func TestRunFailOnFindings(t *testing.T) {
 	})
 }
 
+func TestGatingFindings(t *testing.T) {
+	fs := []cliFinding{{Severity: "warning"}, {Severity: "critical"}, {Severity: "critical"}}
+	cases := []struct {
+		failAny bool
+		minSev  string
+		want    int
+	}{
+		{false, "", 0},         // no gate requested
+		{true, "", 3},          // any finding
+		{false, "warning", 3},  // warning is the lowest level -> all
+		{false, "critical", 2}, // criticals only
+		{true, "critical", 2},  // severity refines the bool
+	}
+	for _, c := range cases {
+		if got := gatingFindings(fs, c.failAny, c.minSev); got != c.want {
+			t.Errorf("gatingFindings(failAny=%v, minSev=%q) = %d, want %d", c.failAny, c.minSev, got, c.want)
+		}
+	}
+}
+
+// TestFailOnSeverity uses a 400-only SUT (which yields a threshold WARNING
+// finding but no criticals) to check the severity gate end to end.
+func TestFailOnSeverity(t *testing.T) {
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer sut.Close()
+	args := func(extra ...string) []string {
+		return append([]string{"--target", sut.URL, "--get", "/", "--users", "5"}, extra...)
+	}
+
+	// critical-only gate: there are no criticals, so the run is not failed.
+	captureStdout(t, func() error { return runScenario(args("--fail-on-severity", "critical")) })
+
+	// warning gate: the threshold warning trips it.
+	if _, err := captureStdoutErr(t, func() error { return runScenario(args("--fail-on-severity", "warning")) }); !errors.Is(err, errFindings) {
+		t.Fatalf("warning gate err = %v, want errFindings", err)
+	}
+
+	// an invalid severity is rejected before the run starts.
+	if err := runScenario(args("--fail-on-severity", "bogus")); err == nil {
+		t.Error("invalid --fail-on-severity should error")
+	}
+}
+
 func TestRunScenarioArgErrors(t *testing.T) {
 	if err := runScenario([]string{}); err == nil {
 		t.Error("no scenario file and no flags should error")
