@@ -2,9 +2,11 @@ import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import {
   buildRunSpec,
+  compareURL,
   createExperiment,
   getReport,
   killRun,
+  reportHTMLURL,
   shareTokenFromQuery,
   startRun,
   streamURL,
@@ -83,6 +85,9 @@ function Operator() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
+  // history is the ids of completed runs, in order, so a finished run can be
+  // compared against the one before it.
+  const [history, setHistory] = useState<string[]>([])
   const esRef = useRef<EventSource | null>(null)
   const doneRef = useRef(false)
 
@@ -124,6 +129,7 @@ function Operator() {
         if (frame.status && frame.status !== 'running' && frame.status !== 'pending') {
           doneRef.current = true
           es.close()
+          setHistory((h) => (h.includes(id) ? h : [...h, id]))
           getReport(id).then(setReport).catch((e) => setError(String(e)))
         }
       } catch {
@@ -140,6 +146,8 @@ function Operator() {
       }
     }
   }
+
+  const prevRunId = report ? previousRunId(history, report.run.id) : undefined
 
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 880, margin: '2rem auto', padding: '0 1rem' }}>
@@ -308,6 +316,16 @@ function Operator() {
 
       {report && (
         <section style={{ marginTop: '1rem' }}>
+          <div style={{ display: 'flex', gap: 12, marginBottom: 8, fontSize: 14 }}>
+            <a href={reportHTMLURL(report.run.id)} target="_blank" rel="noreferrer" style={link}>
+              View HTML report ↗
+            </a>
+            {prevRunId && (
+              <a href={compareURL(prevRunId, report.run.id)} target="_blank" rel="noreferrer" style={link}>
+                Compare with previous run ↗
+              </a>
+            )}
+          </div>
           <ReportView report={report} />
         </section>
       )}
@@ -324,6 +342,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
+// previousRunId returns the completed run before id in history, if any, so a
+// finished run can be compared against the one immediately preceding it.
+function previousRunId(history: string[], id: string): string | undefined {
+  const idx = history.indexOf(id)
+  return idx > 0 ? history[idx - 1] : undefined
+}
+
 const inp: React.CSSProperties = { width: '100%', padding: '6px 8px', border: '1px solid #ccc', borderRadius: 6 }
 const ta: React.CSSProperties = { ...inp, fontFamily: 'ui-monospace, monospace', fontSize: 13 }
 const btn: React.CSSProperties = {
@@ -334,3 +359,4 @@ const btn: React.CSSProperties = {
   borderRadius: 6,
   cursor: 'pointer',
 }
+const link: React.CSSProperties = { color: '#1f6feb', textDecoration: 'none', fontWeight: 500 }
