@@ -47,7 +47,8 @@ func runScenario(args []string) error {
 		fmt.Fprint(os.Stderr, "usage: tmula run [scenario.yaml] [flags]\n\n"+
 			"  tmula run scenario.yaml --users 50\n"+
 			"  tmula run --target http://localhost:9000 --get /health --users 20\n"+
-			"  tmula run scenario.yaml --open 278 --for 3600\n\n")
+			"  tmula run scenario.yaml --open 278 --for 3600\n\n"+
+			"exit codes: 0 ok · 1 error · 2 findings (with --fail-on-findings)\n\n")
 		fs.PrintDefaults()
 	}
 	// Go's flag package stops at the first non-flag argument, so a natural
@@ -134,8 +135,11 @@ func runScenario(args []string) error {
 		printReport(report)
 	}
 
-	if report.Run.Status == "failed" {
-		return fmt.Errorf("run failed: %s", report.Run.KillReason)
+	// A run that did not complete cleanly (failed or killed — e.g. a timeout or
+	// circuit-breaker trip) is a non-zero exit regardless of findings, so it
+	// never silently passes a CI gate.
+	if s := report.Run.Status; s == "failed" || s == "killed" {
+		return fmt.Errorf("run %s: %s", s, report.Run.KillReason)
 	}
 	if *failOnFindings && len(report.Findings) > 0 {
 		return fmt.Errorf("%w (%d)", errFindings, len(report.Findings))
