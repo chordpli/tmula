@@ -52,6 +52,12 @@ type Result struct {
 	// Dropped is the number of arrivals shed by back-pressure (the cap was full).
 	// A non-zero value is the observable signal that demand exceeded capacity.
 	Dropped int
+	// SetupErrors is the number of admitted sessions that could not even start
+	// (the graph references an unknown API template). Setup is deterministic and
+	// identical for every session, so this is all-or-nothing: when it is non-zero
+	// the graph is misconfigured and Run returns an error rather than reporting a
+	// healthy-looking empty run.
+	SetupErrors int
 }
 
 // Scheduler runs an open workload: it launches sessions over time as a Poisson
@@ -82,9 +88,11 @@ func WithClock(c Clock) Option { return func(s *Scheduler) { s.clock = c } }
 // Run executes the open workload described by opts and blocks until the arrival
 // window closes (or ctx is cancelled), then until every in-flight session
 // finishes. Every step is recorded into a shared collector and finding
-// aggregator exactly as the closed path records them, so the returned findings
-// are identical for identical traffic. Cancelling ctx stops new arrivals
-// promptly and lets running sessions unwind (their own ctx is cancelled too).
+// aggregator exactly as the closed path records them, so the rate, contract and
+// mutation findings match the closed path for identical traffic. Availability is
+// run-length based, so under concurrency it additionally depends on the order
+// sessions complete. Cancelling ctx stops new arrivals promptly and lets running
+// sessions unwind (their own ctx is cancelled too).
 func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Model.Kind != domain.WorkloadOpen {
 		return Result{}, fmt.Errorf("workload: scheduler requires open model, got %q", opts.Model.Kind)
@@ -108,6 +116,14 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 		live     int64 // sessions currently running (back-pressure gauge)
 		launched int64
 		dropped  int64
+		setupErr int64 // sessions that failed to start (unknown template, etc.)
+	)
+	// firstSetupErr captures one representative setup failure so a misconfigured
+	// run fails with an actionable message. Written once under setupOnce inside
+	// session goroutines; read after wg.Wait, so the WaitGroup orders the access.
+	var (
+		setupOnce     sync.Once
+		firstSetupErr error
 	)
 	capLimit := opts.Model.MaxConcurrency // 0 means uncapped
 
@@ -163,9 +179,12 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 			defer atomic.AddInt64(&live, -1)
 			results, err := s.runner.RunSession(ctx, opts.Graph, opts.Start, opts.MaxSteps, user, sessionSeed, think)
 			if err != nil {
-				// A setup error (e.g. unknown template) is per-session here; record
-				// nothing and let it surface via the (absence of) findings. It is the
-				// same class of error Run would have returned.
+				// The session could not start (e.g. the graph references an unknown
+				// API template). Setup is deterministic, so this fails every session
+				// identically; count it and keep the first error so Run can fail
+				// loudly instead of reporting an empty run as healthy.
+				atomic.AddInt64(&setupErr, 1)
+				setupOnce.Do(func() { firstSetupErr = err })
 				return
 			}
 			record(collector, agg, results, s.clock.Now())
@@ -175,10 +194,17 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 	wg.Wait()
 
 	res := Result{
-		Stats:    collector.Snapshot(),
-		Findings: agg.Classify(opts.RunID, opts.Classify),
-		Launched: int(atomic.LoadInt64(&launched)),
-		Dropped:  int(atomic.LoadInt64(&dropped)),
+		Stats:       collector.Snapshot(),
+		Findings:    agg.Classify(opts.RunID, opts.Classify),
+		Launched:    int(atomic.LoadInt64(&launched)),
+		Dropped:     int(atomic.LoadInt64(&dropped)),
+		SetupErrors: int(atomic.LoadInt64(&setupErr)),
+	}
+	// Sessions were admitted but not one produced an observation because they all
+	// failed to start: the graph is misconfigured. Surface it as an error so the
+	// run is reported as failed rather than as a healthy, empty success.
+	if res.SetupErrors > 0 && res.Stats.Total == 0 {
+		return res, fmt.Errorf("workload: every launched session failed to start: %w", firstSetupErr)
 	}
 	return res, nil
 }
@@ -218,8 +244,9 @@ func thinkFunc(tt domain.ThinkTime, sessionSeed int64) load.ThinkFunc {
 // record feeds one session's step results into the shared collector and finding
 // aggregator using the SAME mapping as the closed path (internal/api executeLocal):
 // status/latency/class into the collector, and a RequestObservation keyed by the
-// visited node id into the aggregator. This is what makes findings identical
-// across the open and closed models.
+// visited node id into the aggregator. This is what makes the rate, contract and
+// mutation findings match across the open and closed models; availability, being
+// run-length based, also depends on the order sessions complete under concurrency.
 func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepResult, ts time.Time) {
 	for _, sr := range results {
 		cls := errorClass(sr)

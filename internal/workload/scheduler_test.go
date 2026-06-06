@@ -356,6 +356,47 @@ func TestRunRejectsClosedModel(t *testing.T) {
 	}
 }
 
+// TestSetupErrorsFailRunLoudly verifies that a misconfigured graph — a node
+// referencing an unknown API template — fails every session's setup, and that
+// Run surfaces it as an error with SetupErrors counted rather than reporting a
+// healthy, empty run (the failure mode the open path otherwise hides).
+func TestSetupErrorsFailRunLoudly(t *testing.T) {
+	// Node "a" references template "ta", but the runner is built with no
+	// templates, so resolveNodeTemplates fails identically for every session.
+	g := domain.ScenarioGraph{
+		ID:    "g",
+		Nodes: []domain.Node{{ID: "a", APITemplateID: "ta"}},
+	}
+	clock := newVirtualClock(time.Unix(0, 0))
+	s := newScheduler(t, "http://x", map[domain.ID]domain.APITemplate{}, WithClock(clock))
+
+	res, err := s.Run(context.Background(), Options{
+		Graph:    g,
+		Start:    "a",
+		MaxSteps: 2,
+		Model: domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 50},
+			DurationSeconds: 1,
+		},
+		Seed:  1,
+		RunID: "run-misconfig",
+	})
+
+	if err == nil {
+		t.Fatal("expected an error when every launched session fails to start")
+	}
+	if res.Launched == 0 {
+		t.Error("Launched = 0, want > 0 (sessions are admitted before failing setup)")
+	}
+	if res.SetupErrors == 0 {
+		t.Errorf("SetupErrors = 0, want > 0 (every session failed setup)")
+	}
+	if res.Stats.Total != 0 {
+		t.Errorf("Stats.Total = %d, want 0 (no session produced a request)", res.Stats.Total)
+	}
+}
+
 // --- helpers ---
 
 // closedFindingCategories runs a fixed pool of users through the closed runner
