@@ -37,8 +37,20 @@ func main() {
 	}
 }
 
-// run wires up the process so it stays unit-testable (no os.Exit inside).
+// run dispatches subcommands. `tmula run ...` executes a one-shot experiment
+// from a scenario file (or flags) and prints the findings; every other
+// invocation starts the long-running engine (the back-compatible default).
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "run" {
+		return runScenario(args[1:])
+	}
+	return serve(args)
+}
+
+// serve starts the long-running engine: the control-plane API + embedded UI
+// (local/master role) or the gRPC worker service (worker role). It stays
+// unit-testable (no os.Exit inside).
+func serve(args []string) error {
 	fs := flag.NewFlagSet("tmula", flag.ContinueOnError)
 	var (
 		roleStr    = fs.String("role", "local", "execution role: local | master | worker")

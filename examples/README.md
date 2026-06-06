@@ -8,10 +8,33 @@ recruiting real users**.
 
 | Path | What it is |
 |---|---|
+| [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** — REST API, open (arrival-rate) model, personas, distributed runs |
+| `shop/scenario.yaml` | A **compact scenario file** for the `tmula run` CLI (one doc → a full run) |
 | `sample-api/` | A tiny "shop" API (stdlib Go) with a few **deliberate bugs** to find |
 | `shop/graph.json` | The behavior graph: `browse → products → cart → checkout` (checkout *depends on* cart) |
 | `shop/templates.json` | The API request templates each node calls |
 | `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
+
+## Easiest: the `tmula run` CLI
+
+One binary, one command — no curl, no jq, no separately running server:
+
+```bash
+go build -o ./bin/tmula ./cmd/engine
+
+# a single endpoint
+./bin/tmula run --target http://127.0.0.1:9000 --get /browse --users 30
+
+# a whole scenario from one compact file (see shop/scenario.yaml)
+./bin/tmula run examples/shop/scenario.yaml --users 80
+
+# an organic, arrival-rate (open) load
+./bin/tmula run examples/shop/scenario.yaml --open 200 --for 30
+```
+
+It boots an in-process engine, runs the experiment, and prints the findings.
+`--json` emits the raw report; `--engine http://host:8080` targets a running
+engine instead. See [`USAGE.md`](USAGE.md) for the full guide.
 
 ## Quick start (one command)
 

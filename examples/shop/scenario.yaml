@@ -1,0 +1,35 @@
+# Compact tmula scenario — one document that expands into a full run.
+# Drive it with the CLI (no curl/jq, no separate server needed):
+#
+#   tmula run examples/shop/scenario.yaml --users 80
+#
+# `flow` steps run in order; consecutive steps are linked automatically and a
+# step's `dependsOn` marks that edge as a required (never-skipped) dependency.
+target: http://127.0.0.1:9000
+allow: [127.0.0.1]
+flow:
+  - id: browse
+    request: GET /browse
+  - id: products
+    request: GET /products
+  - id: cart
+    request: POST /cart
+    body: '{"productId":"p1","qty":1}'
+  - id: checkout
+    request: POST /checkout
+    body: '{"total":42}'
+    dependsOn: cart
+
+# Switch from fixed users to an organic, arrival-rate (open) load by adding:
+#
+# open:
+#   rate: 200            # arrivals/sec  (or use from/to + rampSeconds for a ramp)
+#   forSeconds: 30
+#   thinkMs: [200, 800]  # pause between a user's steps
+#   maxConcurrency: 2000
+#
+# and an optional persona mix (open model only):
+#
+# segments:
+#   - { name: browser, weight: 0.7, start: browse }
+#   - { name: buyer,   weight: 0.3, start: cart }
