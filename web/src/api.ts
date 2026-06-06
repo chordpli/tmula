@@ -226,6 +226,16 @@ export function streamURL(runId: string): string {
   return `${API}/runs/${runId}/stream`
 }
 
+// reportHTMLURL is the server-rendered, standalone HTML report for a run.
+export function reportHTMLURL(runId: string): string {
+  return `${API}/runs/${runId}/report.html`
+}
+
+// compareURL is the server-rendered HTML diff of two runs (regression view).
+export function compareURL(a: string, b: string): string {
+  return `${API}/runs/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`
+}
+
 export async function getSharedReport(token: string): Promise<Report> {
   const res = await fetch(`${API}/reports/shared/${token}`)
   if (res.status === 410) throw new Error('This shared report has expired.')

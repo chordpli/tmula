@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest'
-import { buildRunSpec, parseSSEData, shareTokenFromQuery, type ExperimentForm } from './api'
+import {
+  buildRunSpec,
+  compareURL,
+  parseSSEData,
+  reportHTMLURL,
+  shareTokenFromQuery,
+  type ExperimentForm,
+} from './api'
 
 const form: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
@@ -105,6 +112,15 @@ describe('buildRunSpec', () => {
   it('throws on invalid segments JSON', () => {
     expect(() => buildRunSpec({ ...form, workloadKind: 'open', segmentsJSON: 'not json' })).toThrow()
     expect(() => buildRunSpec({ ...form, workloadKind: 'open', segmentsJSON: '{"name":"a"}' })).toThrow()
+  })
+})
+
+describe('report URLs', () => {
+  it('builds the HTML report URL', () => {
+    expect(reportHTMLURL('run-1')).toBe('/api/runs/run-1/report.html')
+  })
+  it('builds the compare URL with encoded ids', () => {
+    expect(compareURL('run a', 'run-2')).toBe('/api/runs/compare?a=run%20a&b=run-2')
   })
 })
 
