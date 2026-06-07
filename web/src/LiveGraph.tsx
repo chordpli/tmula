@@ -1,13 +1,17 @@
 import type React from 'react'
 import { useEffect, useMemo, useReducer, useRef } from 'react'
 import {
+  classifyEdge,
   formatCount,
+  graphDepths,
   heatColor,
   heatmapURL,
   heatWidth,
   layoutGraph,
   parseHeatFrame,
   parseTraceFrame,
+  requestTotal,
+  terminalNodeIds,
   traceURL,
   type HeatEdge,
   type TraceEvent,
@@ -68,6 +72,28 @@ const NODE_STROKE = '#3d444d'
 const TEXT = '#c9d1d9'
 const MUTED = '#8b949e'
 
+// Terminal-node palette. A template-less endpoint is an outcome, not a step, so it
+// is colored by intent: 'done' reads as a calm completion (a desaturated teal-green
+// that is clearly positive without competing with the live OK_COLOR on edges),
+// 'exit' as a muted neutral drop-off (slate) so a user leaving doesn't look like an
+// error. Both are quieter than an active request node so endpoints settle the eye.
+const DONE_COLOR = '#2ea88a' // completion ring + check
+const DONE_FILL = '#11201d' // faint green-tinted disc
+const EXIT_COLOR = '#6e7681' // drop-off ring (neutral slate, never red)
+const EXIT_FILL = '#15191f' // faint neutral disc
+
+// Edge-emphasis multipliers keep the forward funnel dominant. Back/loop edges and
+// flows into terminals are drawn thinner and more transparent than forward edges so
+// the main left-to-right path stays the loudest thing on the canvas even when every
+// edge is busy. Widths are still derived from heatWidth; these only scale + fade.
+const FORWARD_OPACITY = 0.95
+const BACK_OPACITY = 0.4
+const TERMINAL_OPACITY = 0.5
+const BACK_WIDTH_SCALE = 0.55 // back/loop edges render at ~half their volume width
+const TERMINAL_WIDTH_SCALE = 0.6 // terminal inflow likewise recedes
+const IDLE_OPACITY = 0.45 // zero-traffic edges: a faint skeleton of the graph
+const ENTRY_HALO_MAX_W = 6 // cap the entry-volume node halo so the start node stays calm
+
 // A Dot is one in-flight request animation. For an entry request (from === "")
 // fromId is null and the dot pulses in place at the destination.
 interface Dot {
@@ -117,6 +143,10 @@ interface ModeProps {
 
 function EventsView({ graph, start, runId, active, positions, view }: ModeProps) {
   const { t } = useI18n()
+  // Terminal endpoints (done/exit). A dot whose destination is one of these is a
+  // user finishing/leaving rather than making a call, so we tint it as a completion
+  // (the trace wire has no 'terminal' flag — we infer it from the destination id).
+  const terminals = useMemo(() => terminalNodeIds(graph.nodes), [graph.nodes])
   // Live, mutable state lives in refs so the rAF loop and SSE handler can update
   // it without forcing a React render per event. A single forced render per
   // animation frame (via tick) reads these refs to paint.
@@ -160,11 +190,21 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
       // Only animate edges we can place; skip events that name unknown nodes.
       if (!positions[ev.to]) continue
       const fromId = ev.from && positions[ev.from] ? ev.from : null
+      // A successful dot landing on a terminal is a completion/drop-off: tint it
+      // calm-teal (done) or muted-slate (exit) so finishing reads differently from
+      // an in-flight request; a failed dot stays red regardless of destination.
+      const color = !ev.ok
+        ? ERR_COLOR
+        : terminals.has(ev.to)
+          ? terminalRole(ev.to) === 'dropoff'
+            ? EXIT_COLOR
+            : DONE_COLOR
+          : OK_COLOR
       dotsRef.current.push({
         id: seqRef.current++,
         fromId,
         toId: ev.to,
-        color: ev.ok ? OK_COLOR : ERR_COLOR,
+        color,
         start: performance.now(),
       })
     }
@@ -379,15 +419,22 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
     rafRef.current = requestAnimationFrame(step)
   }
 
+  // Terminal nodes (done/exit: no apiTemplateId) and per-node funnel depth are
+  // pure functions of the graph, so memoize them. They drive edge classification
+  // and which inflow counts as a request vs a completion/drop-off.
+  const terminals = useMemo(() => terminalNodeIds(graph.nodes), [graph.nodes])
+  const depths = useMemo(() => graphDepths(graph.nodes, graph.edges, start), [graph.nodes, graph.edges, start])
+
   function ingest(edges: HeatEdge[]) {
     const heat = heatRef.current
-    let total = 0
     for (const e of edges) {
       heat.set(edgeKey(e.from, e.to), e)
     }
-    // Counts are cumulative, so the total is just the sum of the current edges.
-    for (const e of heat.values()) total += e.requests
-    totalRef.current = total
+    // The "N requests" headline counts only real request edges (those into
+    // non-terminal nodes); completions/drop-offs into done/exit render as flow but
+    // never inflate the request total. Counts are cumulative, so summing the
+    // current edges gives the running total.
+    totalRef.current = requestTotal(Array.from(heat.values()), terminals)
     pulseRef.current = performance.now()
     ensurePulse.current()
   }
@@ -422,10 +469,22 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
 
   const heat = heatRef.current
 
-  // The busiest edge sets the scale so widths stay legible whether the peak is 12
-  // or 12 million requests (ln keeps a wide range readable in one frame).
+  // The busiest *request* edge sets the width scale so widths stay legible whether
+  // the peak is 12 or 12 million requests (ln keeps a wide range readable in one
+  // frame). Terminal inflow is excluded from the scale: a completion edge can carry
+  // every user that finished, and letting it set the ceiling would crush the actual
+  // funnel edges to hairlines. Terminal edges are then drawn against this same scale
+  // but capped, so they still read as flow without dominating.
   let maxRequests = 0
-  for (const e of heat.values()) if (e.requests > maxRequests) maxRequests = e.requests
+  for (const e of heat.values()) {
+    if (terminals.has(e.to)) continue
+    if (e.requests > maxRequests) maxRequests = e.requests
+  }
+  // Fall back to the overall peak when *every* lit edge is terminal (e.g. a
+  // health-check-style graph that is all endpoint), so widths still differentiate.
+  if (maxRequests === 0) {
+    for (const e of heat.values()) if (e.requests > maxRequests) maxRequests = e.requests
+  }
 
   // A short fade-in right after each frame, applied as a global opacity nudge so
   // the whole graph pulses on update. 1 when idle (no in-flight pulse).
@@ -437,6 +496,19 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
   const entryHeat = new Map<string, HeatEdge>()
   for (const e of heat.values()) {
     if (e.from === '' && positions[e.to]) entryHeat.set(e.to, e)
+  }
+
+  // Terminal inflow: how many users ended at each endpoint, summed across all edges
+  // into it (a completion/drop-off can be reached from several places). The node
+  // shows this as its outcome count rather than as "requests". Errors are summed too
+  // so a terminal that somehow logged failures still surfaces them.
+  const terminalInflow = new Map<string, { requests: number; errors: number }>()
+  for (const e of heat.values()) {
+    if (!terminals.has(e.to) || !positions[e.to]) continue
+    const cur = terminalInflow.get(e.to) ?? { requests: 0, errors: 0 }
+    cur.requests += e.requests
+    cur.errors += e.errors
+    terminalInflow.set(e.to, cur)
   }
 
   return (
@@ -464,8 +536,11 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
           <ArrowMarker />
         </defs>
 
-        {/* Edges, weighted by volume and tinted by error ratio. Idle edges keep
-            the faint base stroke so the graph's shape stays visible. */}
+        {/* Edges, weighted by volume and tinted by error ratio, but sorted into
+            classes so the forward funnel dominates: forward edges are boldest and
+            labeled; back/loop edges and flows into terminals recede (thinner, more
+            faded, soft arrowhead) so high-volume runs read as a funnel, not a
+            tangle. Idle edges keep a faint skeleton so the graph's shape shows. */}
         <g opacity={pulse}>
           {graph.edges.map((e, i) => {
             const a = positions[e.from]
@@ -473,10 +548,53 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
             if (!a || !b) return null
             const h = heat.get(edgeKey(e.from, e.to))
             const hot = h !== undefined && h.requests > 0
-            const w = hot ? heatWidth(h.requests, maxRequests) : 1.5
-            const color = hot ? heatColor(h.errors, h.requests) : EDGE
-            const { x1, y1, x2, y2 } = trimToRim(a, b, NODE_R + 2)
+            const kind = classifyEdge(e.from, e.to, terminals, depths)
+            const role = kind === 'terminal' ? terminalRole(e.to) : null
+            // Base width from volume, then class-scaled so back/terminal edges sit
+            // below forward edges of the same volume.
+            const baseW = hot ? heatWidth(h.requests, maxRequests) : 1.5
+            const w =
+              kind === 'back'
+                ? Math.max(1.2, baseW * BACK_WIDTH_SCALE)
+                : kind === 'terminal'
+                  ? Math.max(1.2, baseW * TERMINAL_WIDTH_SCALE)
+                  : baseW
+            // Terminal inflow is a neutral outcome unless it actually errored: a user
+            // simply finishing tints calm-green, leaving tints muted-slate, and only
+            // real errors pull it toward red. Forward/back edges keep the error tint.
+            const color = !hot
+              ? EDGE
+              : kind === 'terminal'
+                ? h.errors > 0
+                  ? heatColor(h.errors, h.requests)
+                  : role === 'dropoff'
+                    ? EXIT_COLOR
+                    : DONE_COLOR
+                : heatColor(h.errors, h.requests)
+            const edgeOpacity = !hot
+              ? IDLE_OPACITY
+              : kind === 'back'
+                ? BACK_OPACITY
+                : kind === 'terminal'
+                  ? TERMINAL_OPACITY
+                  : FORWARD_OPACITY
+            // Forward edges get the bright arrowhead; everything de-emphasized gets
+            // the soft one so the head matches the line's prominence.
+            const marker = kind === 'forward' && hot ? 'url(#lg-arrow)' : 'url(#lg-arrow-soft)'
+            // Stop the line further from the rim for thick strokes: a round-capped
+            // wide edge would otherwise bulge into the node. Half the stroke width is
+            // the cap's reach, so add it to the base gap (plus the constant arrowhead).
+            const { x1, y1, x2, y2 } = trimToRim(a, b, NODE_R + 4 + w / 2)
             const mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 }
+            // Offset the label perpendicular to the edge so it clears the stroke
+            // (which can be up to HEAT_MAX_W thick) and adjacent labels collide
+            // less. The offset grows with stroke width.
+            const off = labelOffset(x1, y1, x2, y2, w)
+            // Only forward edges carry a count label: back/loop edges are skipped to
+            // cut clutter, and terminal flow is summed under its endpoint node (as a
+            // completion/drop-off) rather than labeled twice on the edge. Never label
+            // zero traffic.
+            const showLabel = hot && kind === 'forward'
             return (
               <g key={`e${i}`}>
                 <line
@@ -488,22 +606,22 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
                   strokeWidth={w}
                   strokeLinecap="round"
                   strokeDasharray={e.dependency ? '6 5' : undefined}
-                  markerEnd="url(#lg-arrow)"
-                  opacity={hot ? 0.95 : 0.6}
+                  markerEnd={marker}
+                  opacity={edgeOpacity}
                 />
-                {hot && (
+                {showLabel && (
                   <text
-                    x={mid.x}
-                    y={mid.y - 6}
+                    x={mid.x + off.x}
+                    y={mid.y + off.y}
                     textAnchor="middle"
                     fontSize={11}
                     fontFamily="ui-monospace, monospace"
                     fill={TEXT}
                     style={labelHalo}
                   >
-                    {formatCount(h.requests)}
-                    {h.errors > 0 && (
-                      <tspan fill={ERR_COLOR}> · {formatCount(h.errors)} {t('graph.err')}</tspan>
+                    {formatCount(h!.requests)}
+                    {h!.errors > 0 && (
+                      <tspan fill={ERR_COLOR}> · {formatCount(h!.errors)} {t('graph.err')}</tspan>
                     )}
                   </text>
                 )}
@@ -512,11 +630,25 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
           })}
         </g>
 
-        {/* Nodes, with a colored halo for entry traffic (the "" -> node edge). */}
+        {/* Nodes. Request nodes keep the live disc with an entry halo; terminal
+            endpoints (done/exit) render distinctly as a completion ✓ or a muted
+            drop-off so they read as outcomes, not broken/idle nodes. */}
         <g opacity={pulse}>
           {graph.nodes.map((n) => {
             const p = positions[n.id]
             if (!p) return null
+            if (terminals.has(n.id)) {
+              return (
+                <TerminalNode
+                  key={n.id}
+                  id={n.id}
+                  x={p.x}
+                  y={p.y}
+                  inflow={terminalInflow.get(n.id)}
+                  t={t}
+                />
+              )
+            }
             const entry = entryHeat.get(n.id)
             const isStart = n.id === start
             return (
@@ -528,8 +660,12 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
                     r={NODE_R + 6}
                     fill="none"
                     stroke={heatColor(entry.errors, entry.requests)}
-                    strokeWidth={Math.max(2, heatWidth(entry.requests, maxRequests) - 2)}
-                    opacity={0.85}
+                    // The entry halo signals first-request volume, but it is a halo,
+                    // not a primary edge: cap it so a start node that receives every
+                    // user (entry >= the busiest forward edge) doesn't bloom into a
+                    // ring that overpowers the funnel.
+                    strokeWidth={Math.min(ENTRY_HALO_MAX_W, Math.max(2, heatWidth(entry.requests, maxRequests) - 2))}
+                    opacity={0.8}
                   />
                 )}
                 <circle
@@ -571,19 +707,119 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
 // Shared presentation.
 // ---------------------------------------------------------------------------
 
+// ArrowMarker defines the two arrowheads the edges reference. The critical detail
+// is markerUnits="userSpaceOnUse": without it a marker scales with the edge's stroke
+// width, so a HEAT_MAX_W (14) edge would render a ~14×-size triangle that swallows
+// the node. Pinning the units to user space makes every arrowhead a constant ~10 SVG
+// units regardless of edge thickness. refX is set near the tip (x≈9 of a 10-wide
+// head) so, combined with the rim gap trimToRim leaves, the point lands just outside
+// the destination circle. 'lg-arrow' is the bright forward head; 'lg-arrow-soft' is
+// the muted head for de-emphasized (back/terminal/idle) edges so the head's weight
+// matches its line.
+const ARROW_SIZE = 10 // arrowhead extent in SVG user units (constant at any stroke width)
+
 function ArrowMarker() {
+  const common = {
+    viewBox: '0 0 10 10',
+    refX: 9,
+    refY: 5,
+    markerWidth: ARROW_SIZE,
+    markerHeight: ARROW_SIZE,
+    markerUnits: 'userSpaceOnUse' as const,
+    orient: 'auto-start-reverse' as const,
+  }
   return (
-    <marker
-      id="lg-arrow"
-      viewBox="0 0 10 10"
-      refX="9"
-      refY="5"
-      markerWidth="7"
-      markerHeight="7"
-      orient="auto-start-reverse"
-    >
-      <path d="M0,0 L10,5 L0,10 z" fill={EDGE} />
-    </marker>
+    <>
+      <marker id="lg-arrow" {...common}>
+        <path d="M0,0 L10,5 L0,10 z" fill={MUTED} />
+      </marker>
+      <marker id="lg-arrow-soft" {...common}>
+        <path d="M0,0 L10,5 L0,10 z" fill={EDGE} />
+      </marker>
+    </>
+  )
+}
+
+// TerminalNode draws a journey endpoint (a template-less node: done/exit). It reads
+// as an outcome, not a step: 'done' is a calm completion (teal disc + ✓ + "completed
+// N"); 'exit' is a muted drop-off (neutral disc + dashed ring + "left N"). The
+// inflow count is the number of users that ended here — a completion/drop-off, never
+// summed into the run's request total.
+function TerminalNode({
+  id,
+  x,
+  y,
+  inflow,
+  t,
+}: {
+  id: string
+  x: number
+  y: number
+  inflow?: { requests: number; errors: number }
+  t: (key: string, vars?: Record<string, string | number>) => string
+}) {
+  const role = terminalRole(id)
+  const accent = role === 'dropoff' ? EXIT_COLOR : DONE_COLOR
+  const fill = role === 'dropoff' ? EXIT_FILL : DONE_FILL
+  const count = inflow?.requests ?? 0
+  const errors = inflow?.errors ?? 0
+  const lit = count > 0
+  // The outcome line: "completed N" / "left N" (localized), in the accent color so
+  // it visually ties to the node and reads as a result rather than a request count.
+  const label =
+    role === 'dropoff'
+      ? `${t('graph.left')} ${formatCount(count)}`
+      : `${t('graph.completed')} ${formatCount(count)}`
+  return (
+    <g>
+      {/* A soft outcome halo when users have arrived, sized gently (not by volume)
+          so endpoints stay calm even when most traffic ends here. */}
+      {lit && (
+        <circle cx={x} cy={y} r={NODE_R + 6} fill="none" stroke={accent} strokeWidth={2.5} opacity={0.5} />
+      )}
+      <circle
+        cx={x}
+        cy={y}
+        r={NODE_R}
+        fill={fill}
+        stroke={accent}
+        strokeWidth={lit ? 2.25 : 1.5}
+        strokeDasharray={role === 'dropoff' ? '4 4' : undefined}
+        opacity={lit ? 1 : 0.75}
+      />
+      {/* A ✓ marks completion; the drop-off leans on its dashed ring + muted tone. */}
+      {role === 'completion' && (
+        <text
+          x={x}
+          y={y - 6}
+          textAnchor="middle"
+          fontSize={15}
+          fontWeight={700}
+          fill={accent}
+          aria-hidden="true"
+        >
+          ✓
+        </text>
+      )}
+      <text
+        x={x}
+        y={role === 'completion' ? y + 13 : y + 4}
+        textAnchor="middle"
+        fontSize={role === 'completion' ? 11 : 13}
+        fontFamily="ui-monospace, monospace"
+        fill={lit ? TEXT : MUTED}
+      >
+        {id}
+      </text>
+      {lit && (
+        <text x={x} y={y + NODE_R + 16} textAnchor="middle" fontSize={11} fill={accent} style={labelHalo}>
+          {label}
+          {errors > 0 && (
+            <tspan fill={ERR_COLOR}> · {formatCount(errors)} {t('graph.err')}</tspan>
+          )}
+        </text>
+      )}
+    </g>
   )
 }
 
@@ -636,6 +872,41 @@ function trimToRim(
   const ux = dx / len
   const uy = dy / len
   return { x1: a.x + ux * r, y1: a.y + uy * r, x2: b.x - ux * r, y2: b.y - uy * r }
+}
+
+// terminalRole classifies a terminal node as a 'completion' or a 'dropoff' for
+// styling and copy. 'exit' is the drop-off (a user left); 'done' — and any other
+// template-less endpoint — reads as a completion (a user finished), so an unnamed
+// terminal defaults to the positive outcome rather than looking like a leak.
+type TerminalRole = 'completion' | 'dropoff'
+function terminalRole(id: string): TerminalRole {
+  return id === 'exit' ? 'dropoff' : 'completion'
+}
+
+// labelOffset returns a small perpendicular nudge for an edge's count label so it
+// sits just off the stroke instead of on top of it. The line's unit normal is
+// rotated 90° from its direction; the offset distance grows with the stroke width
+// (a thick HEAT_MAX_W edge needs more clearance) within a sensible range. It biases
+// to whichever side points "up" so labels don't dive under the edge.
+function labelOffset(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  width: number,
+): { x: number; y: number } {
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const len = Math.hypot(dx, dy) || 1
+  // Perpendicular unit vector; flip so it always has a negative y (points up).
+  let nx = -dy / len
+  let ny = dx / len
+  if (ny > 0) {
+    nx = -nx
+    ny = -ny
+  }
+  const dist = 8 + width / 2
+  return { x: nx * dist, y: ny * dist }
 }
 
 const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n)
