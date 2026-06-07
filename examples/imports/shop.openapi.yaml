@@ -1,0 +1,44 @@
+openapi: 3.0.0
+info:
+  title: Shop API
+  version: "1.0.0"
+  description: >
+    The demo "shop" API that the tmula examples target (examples/sample-api).
+    Import it from the web UI (Scenario card -> Import from OpenAPI / HAR) or with
+    `tmula init --from examples/imports/shop.openapi.yaml` to scaffold a runnable
+    scenario instead of hand-writing the graph + templates.
+servers:
+  - url: http://localhost:9000
+paths:
+  /browse:
+    get:
+      operationId: browse
+      summary: Landing page
+  /search:
+    get:
+      operationId: search
+      summary: Search products
+  /category:
+    get:
+      operationId: category
+      summary: Category listing
+  /product:
+    get:
+      operationId: product
+      summary: Product detail
+  /cart:
+    post:
+      operationId: addToCart
+      summary: Add an item to the cart
+      requestBody:
+        content:
+          application/json:
+            example: { productId: "p7", qty: 1 }
+  /checkout:
+    post:
+      operationId: checkout
+      summary: Place the order
+      requestBody:
+        content:
+          application/json:
+            example: { total: 42 }
