@@ -1,0 +1,7 @@
+{
+  "t_events": { "method": "GET",  "path": "/events" },
+  "t_event":  { "method": "GET",  "path": "/events/e7" },
+  "t_seats":  { "method": "GET",  "path": "/seats" },
+  "t_hold":   { "method": "POST", "path": "/hold", "payloadTemplate": "{\"eventId\":\"e7\",\"seat\":\"A12\"}" },
+  "t_pay":    { "method": "POST", "path": "/pay",  "payloadTemplate": "{\"total\":120}" }
+}

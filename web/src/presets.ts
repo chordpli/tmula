@@ -62,6 +62,43 @@ const shopTemplates = {
   t_checkout: { method: 'POST', path: '/checkout', payloadTemplate: '{"total":42}' },
 }
 
+// The ticketing preset is a second full domain (examples/ticketing-api): buying
+// concert seats. A buyer browses shows, opens one, checks seats, and a fraction
+// hold a seat then pay (hold -> pay is a dependency); exit edges drain seat-pickers
+// and holders who never pay. It points at the ticketing API's own port so picking
+// it switches the whole target, not just the graph.
+const ticketingGraph = {
+  id: 'ticketing',
+  nodes: [
+    { id: 'events', apiTemplateId: 't_events' },
+    { id: 'event', apiTemplateId: 't_event' },
+    { id: 'seats', apiTemplateId: 't_seats' },
+    { id: 'hold', apiTemplateId: 't_hold' },
+    { id: 'pay', apiTemplateId: 't_pay' },
+    { id: 'done' },
+    { id: 'exit' },
+  ],
+  edges: [
+    { from: 'events', to: 'event', weight: 0.75 },
+    { from: 'events', to: 'exit', weight: 0.25 },
+    { from: 'event', to: 'seats', weight: 0.8 },
+    { from: 'event', to: 'exit', weight: 0.2 },
+    { from: 'seats', to: 'hold', weight: 0.55 },
+    { from: 'seats', to: 'exit', weight: 0.45 },
+    { from: 'hold', to: 'pay', weight: 0.7, dependency: true },
+    { from: 'hold', to: 'exit', weight: 0.3 },
+    { from: 'pay', to: 'done', weight: 1.0 },
+  ],
+}
+
+const ticketingTemplates = {
+  t_events: { method: 'GET', path: '/events' },
+  t_event: { method: 'GET', path: '/events/e7' },
+  t_seats: { method: 'GET', path: '/seats' },
+  t_hold: { method: 'POST', path: '/hold', payloadTemplate: '{"eventId":"e7","seat":"A12"}' },
+  t_pay: { method: 'POST', path: '/pay', payloadTemplate: '{"total":120}' },
+}
+
 // The health preset is the smallest useful scenario: a single GET against /healthz
 // with no edges, so one click gives a non-dev an instant "is it up?" probe.
 const healthGraph = {
@@ -98,7 +135,8 @@ const apiflowTemplates = {
 }
 
 // presets is the ordered list rendered as chips in the Scenario card. Order is the
-// display order: the familiar shop demo first, then the two lightweight starters.
+// display order: the two full demos (shop, then ticketing) first, then the
+// lightweight starters (health, apiflow).
 export const presets: Preset[] = [
   {
     id: 'shop',
@@ -108,6 +146,16 @@ export const presets: Preset[] = [
     templates: shopTemplates,
     start: 'browse',
     maxSteps: 12,
+  },
+  {
+    id: 'ticketing',
+    nameKey: 'preset.ticketing',
+    descKey: 'preset.ticketing.desc',
+    graph: ticketingGraph,
+    templates: ticketingTemplates,
+    start: 'events',
+    maxSteps: 10,
+    baseUrl: 'http://localhost:9100',
   },
   {
     id: 'health',

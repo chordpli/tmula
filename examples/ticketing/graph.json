@@ -1,0 +1,23 @@
+{
+  "id": "ticketing",
+  "nodes": [
+    { "id": "events", "apiTemplateId": "t_events" },
+    { "id": "event",  "apiTemplateId": "t_event" },
+    { "id": "seats",  "apiTemplateId": "t_seats" },
+    { "id": "hold",   "apiTemplateId": "t_hold" },
+    { "id": "pay",    "apiTemplateId": "t_pay" },
+    { "id": "done" },
+    { "id": "exit" }
+  ],
+  "edges": [
+    { "from": "events", "to": "event", "weight": 0.75 },
+    { "from": "events", "to": "exit",  "weight": 0.25 },
+    { "from": "event",  "to": "seats", "weight": 0.8 },
+    { "from": "event",  "to": "exit",  "weight": 0.2 },
+    { "from": "seats",  "to": "hold",  "weight": 0.55 },
+    { "from": "seats",  "to": "exit",  "weight": 0.45 },
+    { "from": "hold",   "to": "pay",   "weight": 0.7, "dependency": true },
+    { "from": "hold",   "to": "exit",  "weight": 0.3 },
+    { "from": "pay",    "to": "done",  "weight": 1.0 }
+  ]
+}

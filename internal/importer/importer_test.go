@@ -31,6 +31,16 @@ func TestExampleImportFilesParse(t *testing.T) {
 	} else if len(sc.Flow) < 5 {
 		t.Errorf("har example flow = %d steps, want >= 5", len(sc.Flow))
 	}
+
+	tix, err := os.ReadFile("../../examples/imports/ticketing.openapi.yaml")
+	if err != nil {
+		t.Fatalf("read ticketing example: %v", err)
+	}
+	if sc, err := FromOpenAPI(tix); err != nil {
+		t.Fatalf("import ticketing example: %v", err)
+	} else if len(sc.Flow) < 5 {
+		t.Errorf("ticketing example flow = %d steps, want >= 5", len(sc.Flow))
+	}
 }
 
 const openAPIv3 = `

@@ -1,0 +1,26 @@
+# Compact tmula scenario — a concert-ticket purchase. Drive it with the CLI:
+#
+#   go run ./examples/ticketing-api        # another terminal (listens on :9100)
+#   tmula run examples/ticketing/scenario.yaml --users 80
+#
+# `flow` steps run in order; consecutive steps are linked automatically and a
+# step's `dependsOn` marks that edge as a required (never-skipped) dependency.
+# For the full branching journey (events → detail → seats → hold → pay, with
+# exit drop-offs at every stage), use ticketing/graph.json + ticketing/templates.json
+# directly via the REST API or the web UI ("Concert tickets" preset).
+target: http://127.0.0.1:9100
+allow: [127.0.0.1]
+flow:
+  - id: events
+    request: GET /events
+  - id: event
+    request: GET /events/e7
+  - id: seats
+    request: GET /seats
+  - id: hold
+    request: POST /hold
+    body: '{"eventId":"e7","seat":"A12"}'
+  - id: pay
+    request: POST /pay
+    body: '{"total":120}'
+    dependsOn: hold
