@@ -9,6 +9,17 @@ export default defineConfig({
   build: {
     outDir: 'dist',
   },
+  // `npm run dev` serves the UI with hot reload and proxies the API to a locally
+  // running engine (`tmula --role local`), so the front end can be developed
+  // without rebuilding/embedding. Override the target with VITE_API_TARGET.
+  server: {
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_TARGET || 'http://localhost:8080',
+        changeOrigin: true,
+      },
+    },
+  },
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
