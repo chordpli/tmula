@@ -75,6 +75,36 @@ describe('buildRunSpec', () => {
     expect(spec.maxSteps).toBe(5)
   })
 
+  it('does not materialize a user-per-user for the open model (bounded body)', () => {
+    // The open model generates sessions from the arrival rate, so a huge "virtual
+    // users" count must NOT balloon the request body with one object each (that was
+    // the "request body too large" bug at ~900k users).
+    const spec = buildRunSpec({ ...form, workloadKind: 'open', users: 899999 })
+    expect(spec.users).toHaveLength(1)
+    // The count is still recorded as metadata.
+    expect((spec.experiment as { params: { virtualUserCount: number } }).params.virtualUserCount).toBe(899999)
+  })
+
+  it('keeps the full user pool for the closed model', () => {
+    expect(buildRunSpec({ ...form, workloadKind: 'closed', users: 1000 }).users).toHaveLength(1000)
+  })
+
+  it('sizes the safety rate cap to the configured open load (no silent throttle)', () => {
+    const spec = buildRunSpec({ ...form, workloadKind: 'open', arrivalRate: 12000, maxConcurrency: 0 }) as {
+      targetEnv: { rateCap: { maxRps: number; maxConcurrency: number } }
+    }
+    // The cap must not throttle below the requested arrival rate...
+    expect(spec.targetEnv.rateCap.maxRps).toBeGreaterThanOrEqual(12000)
+    // ...and an uncapped (0) max-concurrency maps to a generous, > 0 ceiling.
+    expect(spec.targetEnv.rateCap.maxConcurrency).toBeGreaterThan(200)
+  })
+
+  it('floors the safety cap for small runs', () => {
+    const spec = buildRunSpec(form) as { targetEnv: { rateCap: { maxRps: number; maxConcurrency: number } } }
+    expect(spec.targetEnv.rateCap.maxRps).toBeGreaterThanOrEqual(1000)
+    expect(spec.targetEnv.rateCap.maxConcurrency).toBeGreaterThanOrEqual(200)
+  })
+
   it('trims and splits the allowlist', () => {
     const spec = buildRunSpec(form) as { targetEnv: { allowlist: string[] } }
     expect(spec.targetEnv.allowlist).toEqual(['localhost', '127.0.0.1'])
