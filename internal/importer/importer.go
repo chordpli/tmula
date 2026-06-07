@@ -112,9 +112,12 @@ func collectOperations(paths map[string]map[string]json.RawMessage) []apiOp {
 // journeyStage scores an operation by where it tends to fall in a user journey,
 // using well-known keywords in its operationId and path. OpenAPI carries no flow
 // information, so this turns an otherwise alphabetical dump into a sensible
-// default order (e.g. browse before cart before checkout); the user can still
-// reorder afterwards. Lower is earlier. Unknown operations get a neutral middle
-// stage so recognized anchors sort around them.
+// default order. The keywords span common domains (shopping, ticketing/booking,
+// travel) but the model is generic — sign in, then read/list, then view one,
+// then create/reserve, then pay — and any unrecognized operation falls to a
+// neutral middle stage and keeps the structural order, so non-matching APIs are
+// ordered reasonably too (and the user can always reorder afterwards). Lower is
+// earlier.
 func journeyStage(o apiOp) int {
 	t := strings.ToLower(o.op.OperationID + " " + o.path)
 	has := func(subs ...string) bool { return matchesAny(t, subs...) }
@@ -125,13 +128,14 @@ func journeyStage(o apiOp) int {
 	// confirmEmail) are not dragged to the end of an unrelated API.
 	case has("checkout", "payment", "/pay", "purchase", "placeorder", "place-order", "/charge", "fulfil", "/order"):
 		return 8 // pay / complete the journey last
-	case has("cart", "basket", "/bag", "wishlist", "add-to", "addto", "addtocart"):
-		return 6 // add to cart late, before checkout
+	case has("cart", "basket", "/bag", "wishlist", "add-to", "addto", "addtocart", "reserve", "reservation", "booking"):
+		return 6 // add to cart / reserve, just before paying
 	case has("browse", "home", "landing", "/index", "/root", "dashboard", "welcome"):
 		return 1 // land on an entry page first
-	case has("search", "list", "catalog", "catalogue", "categor", "explore", "feed", "menu", "products", "items", "gallery"):
+	case has("search", "list", "catalog", "catalogue", "categor", "explore", "feed", "menu",
+		"products", "items", "gallery", "event", "ticket", "flight", "hotel", "listing", "movie", "showtime", "trip", "room"):
 		return 2 // browse / search a collection
-	case has("detail", "view", "show", "/product", "/item", "{id}", "{slug}", "getone", "byid", "by-id"):
+	case has("detail", "view", "show", "/product", "/item", "{id}", "{slug}", "getone", "byid", "by-id", "seat", "availab", "slot"):
 		return 4 // view a specific resource
 	default:
 		return 3 // unknown: a neutral middle

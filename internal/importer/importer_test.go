@@ -203,6 +203,46 @@ paths:
 	}
 }
 
+func TestOpenAPITicketingJourneyOrder(t *testing.T) {
+	// A non-shopping (ticketing) API must also order into a sensible journey:
+	// sign in -> browse events -> view seats -> reserve -> pay.
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://tix
+paths:
+  /checkout:
+    post: { operationId: checkout }
+  /reservations:
+    post: { operationId: reserve }
+  /events/{id}/seats:
+    get: { operationId: seats }
+  /events:
+    get: { operationId: listEvents }
+  /login:
+    post: { operationId: login }
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	want := []string{
+		"POST /login",            // authenticate
+		"GET /events",            // browse the collection
+		"GET /events/{id}/seats", // same stage, deeper path sorts after
+		"POST /reservations",     // reserve
+		"POST /checkout",         // pay last
+	}
+	if len(s.Flow) != len(want) {
+		t.Fatalf("flow = %d steps, want %d", len(s.Flow), len(want))
+	}
+	for i, w := range want {
+		if s.Flow[i].Request != w {
+			t.Errorf("step %d = %q, want %q", i, s.Flow[i].Request, w)
+		}
+	}
+}
+
 func TestOpenAPIJourneyOrder(t *testing.T) {
 	const doc = `
 openapi: 3.0.0
