@@ -12,6 +12,7 @@ import {
   type HeatEdge,
   type TraceEvent,
 } from './api'
+import { useI18n } from './i18n'
 
 // LiveGraph visualizes a run's traffic over its scenario graph. It has two modes:
 //
@@ -115,6 +116,7 @@ interface ModeProps {
 // ---------------------------------------------------------------------------
 
 function EventsView({ graph, start, runId, active, positions, view }: ModeProps) {
+  const { t } = useI18n()
   // Live, mutable state lives in refs so the rAF loop and SSE handler can update
   // it without forcing a React render per event. A single forced render per
   // animation frame (via tick) reads these refs to paint.
@@ -214,18 +216,18 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
   return (
     <figure style={figure}>
       <figcaption style={caption}>
-        <span style={{ color: TEXT, fontWeight: 600 }}>Live traffic</span>
-        <span style={{ color: MUTED }}> — each dot is one request</span>
+        <span style={{ color: TEXT, fontWeight: 600 }}>{t('graph.events.title')}</span>
+        <span style={{ color: MUTED }}> {t('graph.events.sub')}</span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 14, alignItems: 'center' }}>
-          <Legend color={OK_COLOR} label="ok" />
-          <Legend color={ERR_COLOR} label="error" />
+          <Legend color={OK_COLOR} label={t('graph.legend.ok')} />
+          <Legend color={ERR_COLOR} label={t('graph.legend.error')} />
         </span>
       </figcaption>
       <svg
         viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
         width="100%"
         role="img"
-        aria-label="Live request traffic over the scenario graph"
+        aria-label={t('graph.aria.events')}
         style={canvas}
       >
         <defs>
@@ -288,7 +290,7 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
                 {c && (
                   <text x={p.x} y={p.y + NODE_R + 16} textAnchor="middle" fontSize={11} fill={MUTED}>
                     {c.total}
-                    {c.errors > 0 && <tspan fill={ERR_COLOR}> · {c.errors} err</tspan>}
+                    {c.errors > 0 && <tspan fill={ERR_COLOR}> · {c.errors} {t('graph.err')}</tspan>}
                   </text>
                 )}
               </g>
@@ -350,6 +352,7 @@ function edgeKey(from: string, to: string): string {
 }
 
 function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
+  const { t } = useI18n()
   // The latest per-edge aggregates, keyed by endpoints. Held in a ref so the SSE
   // handler can replace it without a render per frame; tick() repaints on update.
   const heatRef = useRef<Map<string, HeatEdge>>(new Map())
@@ -439,21 +442,22 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
   return (
     <figure style={figure}>
       <figcaption style={caption}>
-        <span style={{ color: TEXT, fontWeight: 600 }}>Traffic flow</span>
-        <span style={{ color: MUTED }}> — edge thickness is request volume</span>
+        <span style={{ color: TEXT, fontWeight: 600 }}>{t('graph.flow.title')}</span>
+        <span style={{ color: MUTED }}> {t('graph.flow.sub')}</span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 14, alignItems: 'center' }}>
           <span style={{ color: MUTED, fontSize: 12 }}>
-            <span style={{ color: TEXT, fontWeight: 600 }}>{formatCount(totalRef.current)}</span> requests
+            <span style={{ color: TEXT, fontWeight: 600 }}>{formatCount(totalRef.current)}</span>{' '}
+            {t('graph.flow.requests')}
           </span>
-          <Legend color={OK_COLOR} label="healthy" />
-          <Legend color={ERR_COLOR} label="errors" />
+          <Legend color={OK_COLOR} label={t('graph.legend.healthy')} />
+          <Legend color={ERR_COLOR} label={t('graph.legend.errors')} />
         </span>
       </figcaption>
       <svg
         viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
         width="100%"
         role="img"
-        aria-label="Aggregate request traffic flow over the scenario graph"
+        aria-label={t('graph.aria.flow')}
         style={canvas}
       >
         <defs>
@@ -498,7 +502,9 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
                     style={labelHalo}
                   >
                     {formatCount(h.requests)}
-                    {h.errors > 0 && <tspan fill={ERR_COLOR}> · {formatCount(h.errors)} err</tspan>}
+                    {h.errors > 0 && (
+                      <tspan fill={ERR_COLOR}> · {formatCount(h.errors)} {t('graph.err')}</tspan>
+                    )}
                   </text>
                 )}
               </g>
@@ -546,8 +552,10 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
                 </text>
                 {entry && entry.requests > 0 && (
                   <text x={p.x} y={p.y + NODE_R + 16} textAnchor="middle" fontSize={11} fill={MUTED}>
-                    {formatCount(entry.requests)} in
-                    {entry.errors > 0 && <tspan fill={ERR_COLOR}> · {formatCount(entry.errors)} err</tspan>}
+                    {formatCount(entry.requests)} {t('graph.in')}
+                    {entry.errors > 0 && (
+                      <tspan fill={ERR_COLOR}> · {formatCount(entry.errors)} {t('graph.err')}</tspan>
+                    )}
                   </text>
                 )}
               </g>

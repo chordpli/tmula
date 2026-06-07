@@ -908,6 +908,319 @@ a:hover {
   }
 }
 
+/* ----------------------------------------------------- Field label + help -- */
+/* The label row holds the field name and, optionally, a HelpTip badge inline. */
+.field__labelrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ------------------------------------------------------------- Help tooltip -- */
+/* A "?" badge that reveals a one-line explanation on hover and keyboard focus.
+   Pure CSS: the bubble is positioned absolutely and shown when the wrapper is
+   hovered or the badge is focused. Dark bubble on the light theme for contrast,
+   capped width and centered so it never runs off the viewport. */
+.helptip {
+  position: relative;
+  display: inline-flex;
+  /* So the absolutely-positioned bubble centers on the badge. */
+}
+.helptip__btn {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: help;
+  transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+.helptip__btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-soft-2);
+  background: var(--accent-soft);
+}
+.helptip__btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  color: var(--accent);
+}
+.helptip__bubble {
+  position: absolute;
+  bottom: calc(100% + 9px);
+  /* Anchor the bubble's left edge a little left of the badge and grow rightward,
+     so a wide bubble never clips off the left of the viewport (the help badges all
+     sit in the left/centre of the content column). --shift is set by HelpTip's JS
+     to pull the bubble back in when a right-column badge would overflow the right
+     edge; it is 0 by default. */
+  --shift: 0px;
+  left: -8px;
+  transform: translateX(var(--shift)) translateY(4px);
+  z-index: 20;
+  width: max-content;
+  max-width: min(300px, 76vw);
+  padding: 9px 11px;
+  border-radius: var(--r-sm);
+  background: #1c2230;
+  color: #eef1f8;
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 1.5;
+  letter-spacing: -0.003em;
+  text-align: left;
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s;
+}
+/* The little arrow under the bubble, pointing up at the badge. It stays aligned to
+   the badge by counter-shifting against --shift, so it keeps pointing at the "?"
+   even when the bubble is pulled left to avoid the viewport edge. */
+.helptip__bubble::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: calc(13px - var(--shift));
+  border: 5px solid transparent;
+  border-top-color: #1c2230;
+}
+.helptip:hover .helptip__bubble,
+.helptip__btn:focus-visible + .helptip__bubble {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(var(--shift)) translateY(0);
+}
+
+/* ---------------------------------------------------------------- Presets --- */
+/* "Start from a template": a labeled row of chips above the scenario fields. */
+.presets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.presets__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.presets__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: -0.005em;
+}
+.presets__hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.presets__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+/* A preset chip: a compact card with a name and a one-line description. */
+.chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease,
+    transform 0.06s ease;
+}
+.chip:hover {
+  border-color: var(--accent-soft-2);
+  background: var(--accent-soft);
+  box-shadow: var(--shadow-xs);
+}
+.chip:active {
+  transform: translateY(0.5px);
+}
+.chip:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.chip__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.chip__desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  letter-spacing: -0.005em;
+}
+.chip:hover .chip__name {
+  color: var(--accent-press);
+}
+/* The "Loaded template: …" confirmation under the chip row. */
+.presets__note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: #0f7a37;
+}
+.presets__note svg {
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- Import ---- */
+/* The OpenAPI / HAR importer sub-panel inside the Scenario card. */
+.import {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+.import__head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.import__title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.import__hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 64ch;
+}
+.import__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 200px);
+  gap: 14px;
+  align-items: start;
+}
+.import__file {
+  min-width: 0;
+}
+/* Native file input, themed to the dashboard. The button half reuses the ghost
+   button look via ::file-selector-button. */
+.filepick {
+  width: 100%;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.filepick::file-selector-button {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  padding: 8px 13px;
+  margin-right: 11px;
+  cursor: pointer;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+.filepick::file-selector-button:hover {
+  background: var(--surface-sunken);
+  border-color: #c2c6d4;
+}
+.import__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.import__ok {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: #0f7a37;
+}
+.import__ok svg {
+  flex: none;
+}
+.import__err {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-hover);
+}
+.import__err svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+@media (max-width: 560px) {
+  .import__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ------------------------------------------------------------ Lang toggle --- */
+/* A small segmented EN / 한국어 control in the masthead. */
+.langtoggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  flex: none;
+}
+.langtoggle__btn {
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-pill);
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: color 0.14s ease, background 0.14s ease;
+}
+.langtoggle__btn:hover {
+  color: var(--text-secondary);
+}
+.langtoggle__btn--on {
+  color: var(--accent-press);
+  background: var(--accent-soft);
+}
+.langtoggle__btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
 /* ------------------------------------------------------------- Utilities ---- */
 .sr-only {
   position: absolute;

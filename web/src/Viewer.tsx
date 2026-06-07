@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
-import { getSharedReport, type Report } from './api'
+import { getSharedReport, SharedReportError, type Report } from './api'
+import { useI18n } from './i18n'
 import ReportView from './ReportView'
 
 // Viewer is the read-only shared-report page. It has no run controls — a holder
-// of the share token can read the (PII-masked) report and nothing else.
+// of the share token can read the (PII-masked) report and nothing else. Errors
+// come back as a SharedReportError carrying a stable code, which is mapped to a
+// localized message here so the viewer is bilingual too.
 export default function Viewer({ token }: { token: string }) {
+  const { t } = useI18n()
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState('')
 
@@ -12,11 +16,20 @@ export default function Viewer({ token }: { token: string }) {
     let active = true
     getSharedReport(token)
       .then((r) => active && setReport(r))
-      .catch((e) => active && setError(String(e instanceof Error ? e.message : e)))
+      .catch((e) => {
+        if (!active) return
+        if (e instanceof SharedReportError) {
+          if (e.code === 'expired') setError(t('viewer.expired'))
+          else if (e.code === 'notFound') setError(t('viewer.notFound'))
+          else setError(t('viewer.unavailable', { status: e.status }))
+        } else {
+          setError(String(e instanceof Error ? e.message : e))
+        }
+      })
     return () => {
       active = false
     }
-  }, [token])
+  }, [token, t])
 
   return (
     <main className="app app--narrow">
@@ -27,24 +40,24 @@ export default function Viewer({ token }: { token: string }) {
           </span>
           <span>
             <h1 className="brand__name">tmula</h1>
-            <p className="brand__tag">Shared report</p>
+            <p className="brand__tag">{t('viewer.tagline')}</p>
           </span>
         </span>
       </header>
 
-      <p className="viewer-note">Read-only. Sensitive fields are redacted.</p>
+      <p className="viewer-note">{t('viewer.note')}</p>
 
       {error && (
         <div className="alert" role="alert">
           <span>{error}</span>
         </div>
       )}
-      {!error && !report && <p style={{ color: 'var(--text-muted)' }}>Loading…</p>}
+      {!error && !report && <p style={{ color: 'var(--text-muted)' }}>{t('viewer.loading')}</p>}
 
       {report && (
         <section className="card">
           <div className="runhead">
-            <h2 className="runhead__title">Run</h2>
+            <h2 className="runhead__title">{t('run.title')}</h2>
             <span className="runhead__id">{report.run.id}</span>
             <span className="runhead__mode">· {report.run.status}</span>
           </div>

@@ -5,6 +5,7 @@ import {
   compareURL,
   createExperiment,
   getReport,
+  importScenario,
   killRun,
   MAX_TRACE_USERS,
   reportHTMLURL,
@@ -17,62 +18,30 @@ import {
   type Report,
   type Stats,
 } from './api'
+import HelpTip from './HelpTip'
+import { LANGS, useI18n } from './i18n'
 import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
+import { presets, type Preset } from './presets'
 import ReportView, { StatsView } from './ReportView'
 import Viewer from './Viewer'
 
-// The default scenario is a small branching shop journey: a shopper browses, may
-// search or jump to a category, lands on a product, and a fraction add to cart and
-// check out (the cart -> checkout edge is a dependency). The exit edges drain the
-// rest so traffic spreads realistically across the graph the instant a run starts.
-const defaultGraph = JSON.stringify(
-  {
-    id: 'shop',
-    nodes: [
-      { id: 'browse', apiTemplateId: 't_browse' },
-      { id: 'search', apiTemplateId: 't_search' },
-      { id: 'category', apiTemplateId: 't_category' },
-      { id: 'product', apiTemplateId: 't_product' },
-      { id: 'cart', apiTemplateId: 't_cart' },
-      { id: 'checkout', apiTemplateId: 't_checkout' },
-      { id: 'done' },
-      { id: 'exit' },
-    ],
-    edges: [
-      { from: 'browse', to: 'search', weight: 0.4 },
-      { from: 'browse', to: 'category', weight: 0.4 },
-      { from: 'browse', to: 'exit', weight: 0.2 },
-      { from: 'search', to: 'product', weight: 0.65 },
-      { from: 'search', to: 'category', weight: 0.15 },
-      { from: 'search', to: 'exit', weight: 0.2 },
-      { from: 'category', to: 'product', weight: 0.7 },
-      { from: 'category', to: 'browse', weight: 0.15 },
-      { from: 'category', to: 'exit', weight: 0.15 },
-      { from: 'product', to: 'cart', weight: 0.45 },
-      { from: 'product', to: 'browse', weight: 0.25 },
-      { from: 'product', to: 'exit', weight: 0.3 },
-      { from: 'cart', to: 'checkout', weight: 0.6, dependency: true },
-      { from: 'cart', to: 'exit', weight: 0.4 },
-      { from: 'checkout', to: 'done', weight: 1.0 },
-    ],
-  },
-  null,
-  2,
-)
+// stringify renders a preset's graph/templates the same way the Scenario card's
+// textareas hold them — pretty-printed JSON — so applying a preset (or an import)
+// fills the fields with text the operator can read and tweak.
+function stringify(value: unknown): string {
+  return JSON.stringify(value, null, 2)
+}
 
-const defaultTemplates = JSON.stringify(
-  {
-    t_browse: { method: 'GET', path: '/browse' },
-    t_search: { method: 'GET', path: '/search' },
-    t_category: { method: 'GET', path: '/category' },
-    t_product: { method: 'GET', path: '/product' },
-    t_cart: { method: 'POST', path: '/cart', payloadTemplate: '{"productId":"p7","qty":1}' },
-    t_checkout: { method: 'POST', path: '/checkout', payloadTemplate: '{"total":42}' },
-  },
-  null,
-  2,
-)
+// The default scenario is the branching shop preset, kept in presets.ts as the
+// single source of truth so "Start from a template" and the initial form can never
+// drift apart. It is a small branching shop journey: a shopper browses, may search
+// or jump to a category, lands on a product, and a fraction add to cart and check
+// out (the cart -> checkout edge is a dependency). The exit edges drain the rest so
+// traffic spreads realistically across the graph the instant a run starts.
+const shopPreset = presets.find((p) => p.id === 'shop')!
+const defaultGraph = stringify(shopPreset.graph)
+const defaultTemplates = stringify(shopPreset.templates)
 
 // Defaults are tuned so a non-developer sees traffic the instant they click Run:
 // an open (organic) model that ramps real arrivals over 30s, tracing on, against a
@@ -81,8 +50,8 @@ const initialForm: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
   allowlist: 'localhost, 127.0.0.1',
   users: 20,
-  maxSteps: 12,
-  start: 'browse',
+  maxSteps: shopPreset.maxSteps,
+  start: shopPreset.start,
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
   workers: '',
@@ -112,6 +81,7 @@ export default function App() {
 }
 
 function Operator() {
+  const { t } = useI18n()
   const [form, setForm] = useState<ExperimentForm>(initialForm)
   const [runId, setRunId] = useState<string>('')
   const [runMode, setRunMode] = useState<string>('')
@@ -119,6 +89,10 @@ function Operator() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
+  // loadedPresetKey is the nameKey of the template just applied from a chip, kept
+  // (instead of a rendered string) so the "Loaded template" confirmation re-renders
+  // in the active language when the operator switches EN/한국어.
+  const [loadedPresetKey, setLoadedPresetKey] = useState<string>('')
   // history is the ids of completed runs, in order, so a finished run can be
   // compared against the one before it.
   const [history, setHistory] = useState<string[]>([])
@@ -131,6 +105,32 @@ function Operator() {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
+  // applyScenario fills the scenario fields from a loaded template or import,
+  // pretty-printing the graph/templates and carrying over start/maxSteps (and an
+  // optional baseUrl). It is the one place both presets and imports converge so
+  // the fields are written consistently.
+  function applyScenario(s: {
+    graph: unknown
+    templates: unknown
+    start: string
+    maxSteps: number
+    baseUrl?: string
+  }) {
+    setForm((f) => ({
+      ...f,
+      graphJSON: stringify(s.graph),
+      templatesJSON: stringify(s.templates),
+      start: s.start,
+      maxSteps: s.maxSteps,
+      ...(s.baseUrl ? { baseUrl: s.baseUrl } : {}),
+    }))
+  }
+
+  function applyPreset(p: Preset) {
+    applyScenario(p)
+    setLoadedPresetKey(p.nameKey)
+  }
+
   async function run() {
     setError('')
     setReport(null)
@@ -139,7 +139,11 @@ function Operator() {
     try {
       const spec = buildRunSpec(form)
       const workerCount = spec.workers?.length ?? 0
-      setRunMode(workerCount > 0 ? `distributed (${workerCount} worker${workerCount === 1 ? '' : 's'})` : 'local')
+      setRunMode(
+        workerCount > 0
+          ? t('mode.distributed', { count: workerCount, plural: workerCount === 1 ? '' : 's' })
+          : t('mode.local'),
+      )
       const expId = await createExperiment(spec)
       const id = await startRun(expId)
       setRunId(id)
@@ -176,7 +180,7 @@ function Operator() {
       // error if the run had not already reached a terminal state.
       if (!doneRef.current) {
         setStatus('')
-        setError('Connection lost while streaming progress.')
+        setError(t('run.connLost'))
       }
     }
   }
@@ -195,11 +199,11 @@ function Operator() {
   const openModel = form.workloadKind === 'open'
   const hasWorkers = form.workers.trim().length > 0
   const isRunning = status === 'running'
-  const sizeUnit = openModel ? 'max concurrency' : 'users'
+  const sizeUnit = openModel ? t('unit.maxConcurrency') : t('unit.users')
   const liveCopy =
     liveMode === 'events'
-      ? `animating each request (≤${MAX_TRACE_USERS} ${sizeUnit})`
-      : `aggregate flow map (>${MAX_TRACE_USERS} ${sizeUnit})`
+      ? t('live.events', { max: MAX_TRACE_USERS, unit: sizeUnit })
+      : t('live.flow', { max: MAX_TRACE_USERS, unit: sizeUnit })
 
   return (
     <main className="app">
@@ -210,7 +214,7 @@ function Operator() {
           </span>
           <span>
             <h1 className="brand__name">tmula</h1>
-            <p className="brand__tag">Real-user traffic simulator</p>
+            <p className="brand__tag">{t('brand.tagline')}</p>
           </span>
         </span>
         <span className="masthead__spacer" />
@@ -219,6 +223,7 @@ function Operator() {
             <StatusPill status={status} />
           </span>
         )}
+        <LangToggle />
       </header>
 
       <div className="stack">
@@ -226,14 +231,11 @@ function Operator() {
         <section className="card" aria-labelledby="card-target">
           <div className="card__head">
             <span className="card__step" aria-hidden="true">1</span>
-            <h2 className="card__title" id="card-target">Target</h2>
+            <h2 className="card__title" id="card-target">{t('card.target')}</h2>
           </div>
-          <p className="card__hint">
-            Where the simulated traffic goes, and the hosts it is allowed to reach. Add worker
-            addresses to fan the load out across machines.
-          </p>
+          <p className="card__hint">{t('card.target.hint')}</p>
           <div className="stack" style={{ gap: 16 }}>
-            <Field label="Base URL" help="The service under test, e.g. your staging or local server.">
+            <Field label={t('field.baseUrl')} help={t('help.baseUrl')}>
               <input
                 className="input"
                 value={form.baseUrl}
@@ -242,8 +244,9 @@ function Operator() {
               />
             </Field>
             <Field
-              label="Allowlist"
-              help="Comma-separated hosts traffic may hit — a guardrail so a run can never escape your target."
+              label={t('field.allowlist')}
+              help={t('help.allowlist')}
+              tip={<HelpTip label={t('field.allowlist')} text={t('help.allowlist.tip')} />}
             >
               <input
                 className="input"
@@ -252,10 +255,7 @@ function Operator() {
                 placeholder="localhost, 127.0.0.1"
               />
             </Field>
-            <Field
-              label="Workers"
-              help="Optional. Comma-separated worker addresses to distribute the load. Leave blank to run on this machine."
-            >
+            <Field label={t('field.workers')} help={t('help.workers')}>
               <input
                 className="input"
                 value={form.workers}
@@ -267,8 +267,8 @@ function Operator() {
               <Check
                 checked={form.aggregateWorkers}
                 onChange={(v) => set('aggregateWorkers', v)}
-                label="Aggregate on workers (one summary per shard)"
-                sub="Scales to millions of users — each worker summarizes its shard instead of streaming every request. Findings stay run-wide."
+                label={t('check.aggregate')}
+                sub={t('check.aggregate.sub')}
               />
             )}
           </div>
@@ -278,21 +278,22 @@ function Operator() {
         <section className="card" aria-labelledby="card-load">
           <div className="card__head">
             <span className="card__step" aria-hidden="true">2</span>
-            <h2 className="card__title" id="card-load">Load model</h2>
+            <h2 className="card__title" id="card-load">{t('card.load')}</h2>
           </div>
           <p className="card__hint">
-            How users hit your service. <strong>Open</strong> mimics organic traffic — users arrive
-            at a rate over time. <strong>Closed</strong> holds a fixed pool that loops.
+            {t('card.load.hintLead')} <strong>{t('card.load.hintOpen')}</strong>{' '}
+            {t('card.load.hintOpenRest')} <strong>{t('card.load.hintClosed')}</strong>{' '}
+            {t('card.load.hintClosedRest')}
           </p>
           <div className="stack" style={{ gap: 16 }}>
-            <Field label="Workload" help="Open is the most realistic for a public-facing service.">
+            <Field label={t('field.workload')} help={t('help.workload')}>
               <select
                 className="select"
                 value={form.workloadKind}
                 onChange={(e) => set('workloadKind', e.target.value as 'closed' | 'open')}
               >
-                <option value="open">Open — users arrive at a rate over time (organic)</option>
-                <option value="closed">Closed — a fixed pool of virtual users that loop</option>
+                <option value="open">{t('workload.open')}</option>
+                <option value="closed">{t('workload.closed')}</option>
               </select>
             </Field>
 
@@ -300,7 +301,11 @@ function Operator() {
               <>
                 <hr className="divider" />
                 <div className="field-row field-row--2">
-                  <Field label="Arrival rate" help="New users per second.">
+                  <Field
+                    label={t('field.arrivalRate')}
+                    help={t('help.arrivalRate')}
+                    tip={<HelpTip label={t('field.arrivalRate')} text={t('help.arrivalRate.tip')} />}
+                  >
                     <div className="input-suffix">
                       <input
                         className="input"
@@ -309,10 +314,10 @@ function Operator() {
                         value={form.arrivalRate}
                         onChange={(e) => set('arrivalRate', Math.max(1, Number(e.target.value) || 1))}
                       />
-                      <span className="input-suffix__unit">/ sec</span>
+                      <span className="input-suffix__unit">{t('unit.perSec')}</span>
                     </div>
                   </Field>
-                  <Field label="Duration" help="How long users keep arriving.">
+                  <Field label={t('field.duration')} help={t('help.duration')}>
                     <div className="input-suffix">
                       <input
                         className="input"
@@ -321,10 +326,16 @@ function Operator() {
                         value={form.durationSeconds}
                         onChange={(e) => set('durationSeconds', Math.max(1, Number(e.target.value) || 1))}
                       />
-                      <span className="input-suffix__unit">sec</span>
+                      <span className="input-suffix__unit">{t('unit.sec')}</span>
                     </div>
                   </Field>
-                  <Field label="Max concurrency" help="Back-pressure cap. 0 = uncapped.">
+                  <Field
+                    label={t('field.maxConcurrency')}
+                    help={t('help.maxConcurrency')}
+                    tip={
+                      <HelpTip label={t('field.maxConcurrency')} text={t('help.maxConcurrency.tip')} />
+                    }
+                  >
                     <input
                       className="input"
                       type="number"
@@ -333,13 +344,17 @@ function Operator() {
                       onChange={(e) => set('maxConcurrency', Math.max(0, Number(e.target.value) || 0))}
                     />
                   </Field>
-                  <Field label="Think time" help="Pause between a user's steps (ms, min–max).">
+                  <Field
+                    label={t('field.thinkTime')}
+                    help={t('help.thinkTime')}
+                    tip={<HelpTip label={t('field.thinkTime')} text={t('help.thinkTime.tip')} />}
+                  >
                     <div className="range-pair">
                       <input
                         className="input"
                         type="number"
                         min={0}
-                        aria-label="Think time minimum (ms)"
+                        aria-label={t('aria.thinkMin')}
                         value={form.thinkMinMs}
                         onChange={(e) => set('thinkMinMs', Math.max(0, Number(e.target.value) || 0))}
                       />
@@ -348,7 +363,7 @@ function Operator() {
                         className="input"
                         type="number"
                         min={0}
-                        aria-label="Think time maximum (ms)"
+                        aria-label={t('aria.thinkMax')}
                         value={form.thinkMaxMs}
                         onChange={(e) => set('thinkMaxMs', Math.max(0, Number(e.target.value) || 0))}
                       />
@@ -358,11 +373,12 @@ function Operator() {
                 <Field
                   label={
                     <>
-                      Personas
-                      <span className="field__badge">advanced</span>
+                      {t('field.personas')}
+                      <span className="field__badge">{t('badge.advanced')}</span>
                     </>
                   }
-                  help="Optional JSON mix of weighted user types, each with its own entry node and pacing. Leave blank for one uniform population."
+                  help={t('help.personas')}
+                  tip={<HelpTip label={t('field.personas')} text={t('help.personas.tip')} />}
                 >
                   <textarea
                     className="textarea"
@@ -382,18 +398,18 @@ function Operator() {
         <section className="card" aria-labelledby="card-scenario">
           <div className="card__head">
             <span className="card__step" aria-hidden="true">3</span>
-            <h2 className="card__title" id="card-scenario">Scenario</h2>
+            <h2 className="card__title" id="card-scenario">{t('card.scenario')}</h2>
           </div>
-          <p className="card__hint">
-            The journey users take. Each run starts at the start node and walks the graph for up to
-            the max steps; the JSON below defines the nodes, edges, and the API each node calls.
-          </p>
+          <p className="card__hint">{t('card.scenario.hint')}</p>
           <div className="stack" style={{ gap: 16 }}>
+            {/* Presets (Feature A): one-click starting points. */}
+            <PresetRow onPick={applyPreset} loadedKey={loadedPresetKey} />
+
             <div className="field-row">
-              <Field label="Start node" help="Where every user begins.">
+              <Field label={t('field.start')} help={t('help.start')}>
                 <input className="input" value={form.start} onChange={(e) => set('start', e.target.value)} />
               </Field>
-              <Field label="Max steps" help="Longest path a user may take before stopping.">
+              <Field label={t('field.maxSteps')} help={t('help.maxSteps')}>
                 <input
                   className="input"
                   type="number"
@@ -402,7 +418,7 @@ function Operator() {
                   onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
                 />
               </Field>
-              <Field label="Virtual users" help="Closed: the pool size. Open: a nominal upper bound.">
+              <Field label={t('field.users')} help={t('help.users')}>
                 <input
                   className="input"
                   type="number"
@@ -416,12 +432,8 @@ function Operator() {
             <Check
               checked={traceOn}
               onChange={(v) => set('traceEnabled', v)}
-              label="Show live traffic while the run streams"
-              sub={
-                traceOn
-                  ? `Per-request animation for small runs, an aggregate flow map for large ones · ${liveCopy}`
-                  : 'Per-request animation for small runs, an aggregate flow map for large ones'
-              }
+              label={t('check.trace')}
+              sub={traceOn ? t('check.trace.subWith', { mode: liveCopy }) : t('check.trace.sub')}
             />
 
             <hr className="divider" />
@@ -429,11 +441,12 @@ function Operator() {
             <Field
               label={
                 <>
-                  Scenario graph
-                  <span className="field__badge">JSON · advanced</span>
+                  {t('field.graph')}
+                  <span className="field__badge">{t('badge.jsonAdvanced')}</span>
                 </>
               }
-              help="Nodes and weighted edges. A dependency edge must complete before its target runs."
+              help={t('help.graph')}
+              tip={<HelpTip label={t('field.graph')} text={t('help.graph.tip')} />}
             >
               <textarea
                 className="textarea"
@@ -446,11 +459,12 @@ function Operator() {
             <Field
               label={
                 <>
-                  API templates
-                  <span className="field__badge">JSON · advanced</span>
+                  {t('field.templates')}
+                  <span className="field__badge">{t('badge.jsonAdvanced')}</span>
                 </>
               }
-              help="The request each node sends: method, path, and an optional payload template."
+              help={t('help.templates')}
+              tip={<HelpTip label={t('field.templates')} text={t('help.templates.tip')} />}
             >
               <textarea
                 className="textarea"
@@ -460,6 +474,11 @@ function Operator() {
                 spellCheck={false}
               />
             </Field>
+
+            <hr className="divider" />
+
+            {/* Import (Feature B): build a scenario from a spec or recording. */}
+            <ImportPanel onImported={applyScenario} />
           </div>
         </section>
 
@@ -472,7 +491,7 @@ function Operator() {
               disabled={runDisabled(status)}
             >
               <PlayIcon />
-              {runDisabled(status) ? 'Running…' : 'Run experiment'}
+              {runDisabled(status) ? t('run.running') : t('run.button')}
             </button>
             {runId && isRunning && (
               <button
@@ -480,19 +499,13 @@ function Operator() {
                 onClick={() => killRun(runId).catch((e) => setError(String(e)))}
               >
                 <StopIcon />
-                Kill run
+                {t('run.kill')}
               </button>
             )}
             <span className="actionbar__note">
-              {openModel ? (
-                <>
-                  ~<strong>{form.arrivalRate}</strong> users/sec for <strong>{form.durationSeconds}s</strong>
-                </>
-              ) : (
-                <>
-                  <strong>{form.users}</strong> virtual users · up to <strong>{form.maxSteps}</strong> steps
-                </>
-              )}
+              {openModel
+                ? renderNote(t('run.noteOpen', { rate: form.arrivalRate, duration: form.durationSeconds }))
+                : renderNote(t('run.noteClosed', { users: form.users, steps: form.maxSteps }))}
             </span>
           </div>
         </section>
@@ -510,7 +523,7 @@ function Operator() {
         {status && (
           <section className="card" aria-live="polite">
             <div className="runhead">
-              <h2 className="runhead__title">Run</h2>
+              <h2 className="runhead__title">{t('run.title')}</h2>
               <span className="runhead__id">{runId || '—'}</span>
               <StatusPill status={status} />
               {runMode && <span className="runhead__mode">· {runMode}</span>}
@@ -519,8 +532,8 @@ function Operator() {
             {traceOn && parsedGraph && runId && (
               <div className="viz">
                 <div className="viz__head">
-                  <h3 className="viz__title">Traffic flow</h3>
-                  <span className="viz__sub">where requests travel across your scenario</span>
+                  <h3 className="viz__title">{t('viz.flow.title')}</h3>
+                  <span className="viz__sub">{t('viz.flow.sub')}</span>
                 </div>
                 <LiveGraph
                   key={runId}
@@ -536,8 +549,8 @@ function Operator() {
             {traceOn && runId && (
               <div className="viz">
                 <div className="viz__head">
-                  <h3 className="viz__title">Latency heatmap</h3>
-                  <span className="viz__sub">request density by latency band over time</span>
+                  <h3 className="viz__title">{t('viz.latency.title')}</h3>
+                  <span className="viz__sub">{t('viz.latency.sub')}</span>
                 </div>
                 <LatencyHeatmap runId={runId} active={isRunning} />
               </div>
@@ -546,7 +559,7 @@ function Operator() {
             {stats && (
               <div className="viz">
                 <div className="viz__head">
-                  <h3 className="viz__title">Live metrics</h3>
+                  <h3 className="viz__title">{t('viz.metrics.title')}</h3>
                 </div>
                 <StatsView stats={stats} />
               </div>
@@ -559,12 +572,12 @@ function Operator() {
           <section className="card">
             <div className="reportlinks">
               <a className="reportlink" href={reportHTMLURL(report.run.id)} target="_blank" rel="noreferrer">
-                View full HTML report
+                {t('report.viewHtml')}
                 <ExternalIcon />
               </a>
               {prevRunId && (
                 <a className="reportlink" href={compareURL(prevRunId, report.run.id)} target="_blank" rel="noreferrer">
-                  Compare with previous run
+                  {t('report.compare')}
                   <ExternalIcon />
                 </a>
               )}
@@ -574,6 +587,205 @@ function Operator() {
         )}
       </div>
     </main>
+  )
+}
+
+// PresetRow renders the "Start from a template" chips above the scenario fields and
+// the brief "Loaded template" confirmation. Picking a chip fills the scenario via
+// the parent's applyPreset. Each chip carries the preset's one-line description as
+// its title so hovering explains what it loads. `loadedKey` is the nameKey of the
+// last-applied preset (or empty); the note is rendered from it here so it follows
+// the active language rather than freezing at the language it was clicked in.
+function PresetRow({ onPick, loadedKey }: { onPick: (p: Preset) => void; loadedKey: string }) {
+  const { t } = useI18n()
+  return (
+    <div className="presets">
+      <div className="presets__head">
+        <span className="presets__label">{t('presets.label')}</span>
+        <span className="presets__hint">{t('presets.hint')}</span>
+      </div>
+      <div className="presets__row">
+        {presets.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className="chip"
+            onClick={() => onPick(p)}
+            title={t(p.descKey)}
+          >
+            <span className="chip__name">{t(p.nameKey)}</span>
+            <span className="chip__desc">{t(p.descKey)}</span>
+          </button>
+        ))}
+      </div>
+      {loadedKey && (
+        <p className="presets__note" role="status">
+          <CheckMini />
+          {t('presets.loaded', { name: t(loadedKey) })}
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ImportPanel is the OpenAPI / HAR importer (Feature B). It accepts either an
+// uploaded file (read as text client-side) or pasted text, plus a format selector
+// (Auto / OpenAPI / HAR). On Import it calls the backend and, on success, fills the
+// scenario fields via the parent's onImported. It is deliberately forgiving: every
+// failure path catches the error and shows it inline, so nothing reaches the
+// console and the operator always sees a readable message.
+function ImportPanel({
+  onImported,
+}: {
+  onImported: (s: { graph: unknown; templates: unknown; start: string; maxSteps: number }) => void
+}) {
+  const { t } = useI18n()
+  const [text, setText] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [format, setFormat] = useState<'auto' | 'openapi' | 'har'>('auto')
+  const [busy, setBusy] = useState(false)
+  const [note, setNote] = useState('')
+  const [err, setErr] = useState('')
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    setErr('')
+    setNote('')
+    const file = e.target.files?.[0]
+    if (!file) return
+    setFileName(file.name)
+    try {
+      // Read the file client-side so the textarea reflects exactly what will be
+      // imported; the operator can still edit it before importing.
+      setText(await file.text())
+    } catch {
+      setErr(t('import.emptyError'))
+    }
+  }
+
+  async function doImport() {
+    const spec = text.trim()
+    setErr('')
+    setNote('')
+    if (!spec) {
+      setErr(t('import.emptyError'))
+      return
+    }
+    setBusy(true)
+    try {
+      const result = await importScenario(spec, format)
+      onImported(result)
+      setNote(t('import.success'))
+    } catch (e) {
+      // Surface the server's message (400 {error}); map the unavailable importer
+      // (501) onto a friendlier line. Never rethrow — keep it inline.
+      const msg = e instanceof Error ? e.message : String(e)
+      setErr(/501/.test(msg) ? t('import.unavailable') : msg || t('import.unavailable'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="import">
+      <div className="import__head">
+        <span className="import__title">{t('import.title')}</span>
+        <span className="import__hint">{t('import.hint')}</span>
+      </div>
+
+      <div className="import__grid">
+        <label className="field import__file">
+          <span className="field__label">{t('import.file')}</span>
+          <input
+            className="filepick"
+            type="file"
+            accept=".json,.yaml,.yml,.har"
+            onChange={onFile}
+          />
+          <span className="field__help">{fileName || t('import.fileHint')}</span>
+        </label>
+
+        <Field label={t('import.format')}>
+          <select
+            className="select"
+            value={format}
+            onChange={(e) => setFormat(e.target.value as 'auto' | 'openapi' | 'har')}
+          >
+            <option value="auto">{t('import.format.auto')}</option>
+            <option value="openapi">{t('import.format.openapi')}</option>
+            <option value="har">{t('import.format.har')}</option>
+          </select>
+        </Field>
+      </div>
+
+      <Field label={t('import.paste')}>
+        <textarea
+          className="textarea"
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value)
+            // Editing the pasted text means it is no longer tied to the picked file.
+            if (fileName) setFileName('')
+          }}
+          rows={5}
+          placeholder={t('import.pastePlaceholder')}
+          spellCheck={false}
+        />
+      </Field>
+
+      <div className="import__actions">
+        <button type="button" className="btn btn--ghost" onClick={doImport} disabled={busy}>
+          <ImportIcon />
+          {busy ? t('import.importing') : t('import.button')}
+        </button>
+        {note && (
+          <span className="import__ok" role="status">
+            <CheckMini />
+            {note}
+          </span>
+        )}
+      </div>
+
+      {err && (
+        <div className="import__err" role="alert">
+          <AlertIcon />
+          <span>{err}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// LangToggle is the header language switch (EN / 한국어): a small segmented control
+// bound to the i18n context. The active language is marked with aria-pressed so the
+// current choice is announced.
+function LangToggle() {
+  const { lang, setLang, t } = useI18n()
+  return (
+    <div className="langtoggle" role="group" aria-label={t('lang.label')}>
+      {LANGS.map((l) => (
+        <button
+          key={l.code}
+          type="button"
+          className={`langtoggle__btn${lang === l.code ? ' langtoggle__btn--on' : ''}`}
+          aria-pressed={lang === l.code}
+          onClick={() => setLang(l.code)}
+        >
+          {l.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// renderNote turns an interpolated note string into React, bolding the {strong}
+// segments the source marks with **…** — so a translated note like
+// "약 초당 **12**명씩 **30초** 동안" keeps the numbers emphasized in any language.
+// We use **…** in the dictionary instead of literal <strong> so the i18n strings
+// stay plain text (no embedded markup to mistranslate).
+function renderNote(text: string): React.ReactNode {
+  const parts = text.split(/\*\*(.+?)\*\*/g)
+  return parts.map((part, i) =>
+    i % 2 === 1 ? <strong key={i}>{part}</strong> : <span key={i}>{part}</span>,
   )
 }
 
@@ -598,20 +810,27 @@ function statusKind(status: string): 'running' | 'ok' | 'danger' | 'warn' | 'idl
   return 'warn'
 }
 
-// Field is a labeled form control with optional helper text. The label is a real
-// <label> wrapping the control so the association is automatic and accessible.
+// Field is a labeled form control with optional helper text and an optional inline
+// help affordance (a HelpTip badge rendered next to the label). The label is a real
+// <label> wrapping the control so the association is automatic and accessible; when
+// a tip is present the label and badge share a row.
 function Field({
   label,
   help,
+  tip,
   children,
 }: {
   label: React.ReactNode
   help?: string
+  tip?: React.ReactNode
   children: React.ReactNode
 }) {
   return (
     <label className="field">
-      <span className="field__label">{label}</span>
+      <span className="field__labelrow">
+        <span className="field__label">{label}</span>
+        {tip}
+      </span>
       {children}
       {help && <span className="field__help">{help}</span>}
     </label>
@@ -707,6 +926,35 @@ function ExternalIcon() {
         d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"
         stroke="currentColor"
         strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function ImportIcon() {
+  // A downward tray — "bring a spec in".
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 3v10m0 0l-4-4m4 4l4-4M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function CheckMini() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M5 12.5l4 4 10-10"
+        stroke="currentColor"
+        strokeWidth="2.4"
         strokeLinecap="round"
         strokeLinejoin="round"
       />

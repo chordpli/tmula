@@ -6,6 +6,7 @@ import {
   parseLatencyFrame,
   type LatencyFrame,
 } from './api'
+import { useI18n } from './i18n'
 
 // LatencyHeatmap is the canonical load-test heatmap: a grid where X is time (run
 // progress) and Y is a latency band, and each cell's COLOR encodes how many
@@ -41,6 +42,7 @@ const MIN_CELL_W = 6 // a column never renders thinner than this
 const ROW_GAP = 1 // hairline gap between cells (drawn via background grid)
 
 export default function LatencyHeatmap({ runId, active }: LatencyHeatmapProps) {
+  const { t } = useI18n()
   // Latest histogram frame, held in a ref; tick() forces a repaint on update.
   const frameRef = useRef<LatencyFrame | null>(null)
   const [, tick] = useReducer((n: number) => n + 1, 0)
@@ -80,11 +82,11 @@ export default function LatencyHeatmap({ runId, active }: LatencyHeatmapProps) {
   return (
     <figure className="latheat">
       <figcaption className="latheat__cap">
-        <span className="latheat__cap-main">Requests per latency × time bucket</span>
-        <span className="latheat__cap-sub">darker = more requests · high latency at top</span>
+        <span className="latheat__cap-main">{t('latheat.capMain')}</span>
+        <span className="latheat__cap-sub">{t('latheat.capSub')}</span>
         {frame && hasData && (
           <span className="latheat__cap-peak">
-            peak <strong>{formatCount(frame.maxCount)}</strong> / cell
+            {t('latheat.peak')} <strong>{formatCount(frame.maxCount)}</strong> {t('latheat.perCell')}
           </span>
         )}
       </figcaption>
@@ -92,11 +94,9 @@ export default function LatencyHeatmap({ runId, active }: LatencyHeatmapProps) {
       {hasData && frame ? (
         <Grid frame={frame} />
       ) : (
-        <div className="empty-viz" role="img" aria-label="Latency heatmap — waiting for the first requests">
-          <span className="empty-viz__title">Waiting for traffic…</span>
-          <span className="empty-viz__sub">
-            cells fill in as requests complete, building a map of latency over the run
-          </span>
+        <div className="empty-viz" role="img" aria-label={t('latheat.waitingAria')}>
+          <span className="empty-viz__title">{t('latheat.waiting')}</span>
+          <span className="empty-viz__sub">{t('latheat.waitingSub')}</span>
         </div>
       )}
     </figure>
@@ -108,6 +108,7 @@ export default function LatencyHeatmap({ runId, active }: LatencyHeatmapProps) {
 // axis is reversed on render). The viewBox is derived from the data extents so the
 // panel scales responsively at any column count.
 function Grid({ frame }: { frame: LatencyFrame }) {
+  const { t } = useI18n()
   const rows = frame.rows
   const nRows = rows.length
   const nCols = frame.cells[0]?.length ?? 0
@@ -132,7 +133,7 @@ function Grid({ frame }: { frame: LatencyFrame }) {
       viewBox={`0 0 ${width} ${height}`}
       width="100%"
       role="img"
-      aria-label={`Latency heatmap: ${nRows} latency bands over ${nCols} time buckets, color shows request density`}
+      aria-label={t('latheat.aria', { rows: nRows, cols: nCols })}
     >
       {/* Cells. */}
       <g>
@@ -148,8 +149,11 @@ function Grid({ frame }: { frame: LatencyFrame }) {
               fill={latencyCellColor(count, frame.maxCount)}
             >
               <title>
-                {rows[ri]?.label ?? `band ${ri}`} · {tickLabel(ci * frame.binWidthMs)} — {formatCount(count)}{' '}
-                request{count === 1 ? '' : 's'}
+                {t(count === 1 ? 'latheat.cellOne' : 'latheat.cellMany', {
+                  band: rows[ri]?.label ?? `band ${ri}`,
+                  time: tickLabel(ci * frame.binWidthMs),
+                  count: formatCount(count),
+                })}
               </title>
             </rect>
           )),
