@@ -38,6 +38,19 @@ web/                 React + Vite control-plane UI
 examples/            sample API, scenario, one-command demo, USAGE guide
 ```
 
+## Install
+
+One line — downloads a prebuilt single binary (web UI baked in) for macOS/Linux,
+or builds from source if you have Go + Node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+```
+
+Then run `tmula --role local --addr :8080` and open <http://localhost:8080>, or
+`tmula run scenario.yaml`. (Prebuilt binaries are published per release tag; see
+[`Build & run`](#build--run) to build it yourself.)
+
 ## Quick start — the `tmula run` CLI
 
 One binary, one command — no curl, no jq, no separately running server:

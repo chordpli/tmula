@@ -1,0 +1,49 @@
+name: Release
+
+# Push a tag like v0.1.0 to publish prebuilt single binaries (web UI embedded)
+# for macOS and Linux (amd64 + arm64), which install.sh then downloads.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build and embed the web UI
+        run: |
+          cd web && npm ci && npm run build && cd ..
+          rm -rf internal/web/static/assets
+          cp -R web/dist/. internal/web/static/
+
+      - name: Cross-compile
+        run: |
+          mkdir -p dist
+          version="${GITHUB_REF_NAME}"
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            echo "building tmula_${os}_${arch}"
+            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+              go build -ldflags "-X main.version=${version}" \
+              -o "dist/tmula_${os}_${arch}" ./cmd/engine
+          done
+          ( cd dist && shasum -a 256 tmula_* > checksums.txt )
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
