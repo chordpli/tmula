@@ -8,6 +8,11 @@
 </p>
 
 <p align="center">
+  📖 <b>User manual</b> — the full guide (concepts, every JSON field, CLI, findings, FAQ):
+  <a href="docs/guide.en.md">English</a> · <a href="docs/guide.ko.md">한국어</a>
+</p>
+
+<p align="center">
   <img src="docs/images/01-flow-map.png" width="840"
        alt="tmula traffic-flow map: virtual users walking a branching shop journey (browse → search / category → product → cart → checkout → done); edge thickness is request volume and red counts mark where the happy path broke">
   <br>
@@ -172,7 +177,9 @@ Two complete, runnable demos make it clear how to point tmula at your own API �
 | **ticketing** — `examples/ticketing-api` (`:9100`) | A concert-seat purchase: `events → detail → seats → hold → pay` | Seat-contention 409s, a payment gateway that buckles in the on-sale rush, sold-out 404s |
 
 Each ships a sample API server, a behavior graph + templates, and an importable **OpenAPI / HAR**
-([`examples/imports/`](examples/imports)). Full 0→100 guide: [`examples/USAGE.md`](examples/USAGE.md).
+([`examples/imports/`](examples/imports)). Full reference — the **User manual**
+([English](docs/guide.en.md) · [한국어](docs/guide.ko.md)); a hands-on 0→100 walkthrough:
+[`examples/USAGE.md`](examples/USAGE.md).
 
 ---
 

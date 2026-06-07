@@ -1,0 +1,800 @@
+# tmula User Manual
+
+Also available in: [한국어](guide.ko.md)
+
+**tmula** is a real-user traffic simulator. Instead of firing identical requests at one endpoint, it drives *virtual users* through an explicit **behavior graph** so they move like real people — they branch, hesitate, occasionally go off-script, and pile onto whatever endpoint is hot — and then it classifies what broke into **findings**. This guide is the deep companion to the [README](../README.md): it onboards you gently, then becomes a thorough reference, with special care for every JSON field (the part most newcomers find intimidating).
+
+You do not need to read this top to bottom. If you only want to *run something*, read [Get it running](#get-it-running) and [The web console, field by field](#the-web-console-field-by-field). When you hit the JSON editors and freeze, jump to [JSON formats — the complete reference](#json-formats--the-complete-reference). Everything here is grounded in the source — field names, defaults, and validation messages are quoted as they actually are.
+
+---
+
+## Table of contents
+
+1. [Who this guide is for / mental model](#who-this-guide-is-for--mental-model)
+2. [Get it running](#get-it-running)
+3. [The web console, field by field](#the-web-console-field-by-field)
+4. [JSON formats — the complete reference](#json-formats--the-complete-reference)
+   - [Scenario graph](#scenario-graph)
+   - [API templates](#api-templates)
+   - [Personas / segments](#personas--segments)
+   - [Workload](#workload-json)
+   - [The full RunSpec](#the-full-runspec)
+   - [Compressed scenario YAML](#compressed-scenario-yaml)
+5. [The CLI](#the-cli)
+6. [Findings explained](#findings-explained)
+7. [Reading the results](#reading-the-results)
+8. [Importing OpenAPI / HAR](#importing-openapi--har)
+9. [Authenticated runs](#authenticated-runs)
+10. [Distributed mode](#distributed-mode)
+11. [Safety](#safety)
+12. [The example domains](#the-example-domains)
+13. [Troubleshooting & FAQ](#troubleshooting--faq)
+
+---
+
+## Who this guide is for / mental model
+
+This guide is for anyone who wants to find the bugs real users would hit — without recruiting real users. You might be a developer wiring tmula into CI, or a PM/QA who never touches a terminal and lives in the web console. Both paths are covered. No prior load-testing background is assumed; terms of art are defined on first use.
+
+### The behavior graph
+
+The single most important concept is the **behavior graph** (also called the *scenario graph*). It is a directed graph that describes the journey users take through your API:
+
+- **Nodes** are states. Most nodes are bound to an **API template** (one HTTP call) by an `apiTemplateId`. Reaching such a node means "make this request."
+- **Terminal nodes** have *no* `apiTemplateId`. By convention these are named `done` and `exit`. Reaching one means the user *finished the journey* (`done`) or *left it* (`exit`) rather than making another call. They fire no request.
+- **Edges** are transitions between nodes. Each edge has a **weight** — the relative likelihood a user takes it. From a node, the engine picks an outgoing edge in proportion to weights.
+- **Dependency edges** (`dependency: true`) are hard preconditions: the target *requires* this predecessor and a user's random deviation may **never** skip it. (In the shop demo, `cart → checkout` is a dependency: you cannot check out without a cart.)
+
+Here is the shop demo graph as a text diagram (this is exactly the `examples/shop` graph and the web "Branching shop" preset):
+
+```
+                 0.4
+        ┌──────────────────► search ──0.65──► product ──0.45──► cart ══0.6══► checkout ──1.0──► done
+        │                      │ 0.15           │ 0.25          ║ (dependency)
+ browse ┤ 0.4                  ▼                ▼               ║
+        ├──────────────────► category ─0.7──► product          └──0.4──► exit
+        │  0.2                 │ 0.15
+        └──────────► exit ◄────┘ 0.15  (every stage also drops a share into `exit`)
+
+   ══►  dependency edge: never skipped       ──►  weighted transition
+   done / exit are terminal nodes (no request) — done = completed, exit = left
+```
+
+A user starts at the **start node** (`browse`), walks the graph edge by edge up to **max steps** transitions, and stops when it reaches a terminal node or runs out of steps.
+
+### Virtual users
+
+A **virtual user** is one simulated visitor walking the graph. How virtual users are *generated over time* is the **workload model**, and there are two:
+
+- **Closed model** — a fixed pool of `N` concurrent users that loop. Simple, but the concurrency is exactly what you set. Think "50 users, always 50 in flight."
+- **Open model** — user *sessions* arrive at a **rate** over time (e.g. 200 new users/second). The concurrent user count *emerges* from rate × session duration (Little's Law) — exactly how organic public traffic behaves. This is the realistic default for a public-facing service.
+
+Between steps a user pauses for a **think time** (a random delay, because real people read and decide between actions). In the open model you can also split arrivals into **personas** (segments) — weighted user types, each with its own entry node and pacing — so you simulate "70% slow first-time browsers, 30% fast power users" instead of one homogeneous robot.
+
+### The three modes
+
+tmula surfaces issues in three overlapping ways:
+
+- **Scenario-following** — does the happy path hold up under realistic, branching traffic?
+- **Deviation** — probabilistic skips, step reordering, and payload mutation (never violating a dependency edge) shake out off-script bugs.
+- **Load-concentration** — funnel virtual users onto one API and watch where it degrades or saturates.
+
+### What "findings" are
+
+A **finding** is a classified problem tmula detected from the *client side* (status codes, latency, error patterns) — no server instrumentation required. There are four categories: `contract`, `availability`, `threshold`, and `mutation`, each with a severity. They are the whole point: a run's output is "here is what real traffic would have broken." See [Findings explained](#findings-explained) for exactly how each is computed.
+
+### Why this differs from a plain load tool
+
+A plain load tool hammers one URL with identical requests and tells you a throughput number. It cannot tell you that *checkout 500s only when a cart exists and concurrency is high*, because it never models the journey or the dependency. tmula walks the real funnel, honors preconditions, deviates within the rules, and classifies the failures by *kind* — so you get bugs, not just a number.
+
+---
+
+## Get it running
+
+This section is intentionally brief; the [README Quickstart](../README.md#quickstart) is the canonical source. Pick whichever fits you.
+
+**Docker (no toolchain).** One command brings up the console (real UI baked in) plus both example APIs:
+
+```bash
+git clone https://github.com/chordpli/tmula.git && cd tmula
+docker compose up
+```
+
+Open <http://localhost:8080>. Inside the Compose network the engine reaches the example APIs by **service name**, so use `http://sample-api:9000` / `http://ticketing-api:9100` — not `localhost`. See the [FAQ](#troubleshooting--faq) for why.
+
+**Install script (prebuilt binary, UI baked in).**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+tmula --role local --addr :8080      # open http://localhost:8080
+```
+
+**Build from source** (needs Go 1.25+ and Node 20+):
+
+```bash
+make demo    # UI + engine + both example APIs, all locally (presets target localhost:9000/:9100)
+make web     # build the React UI, embed it, serve the console on :8080
+make build   # Go binary only — fast, but the UI is a placeholder page
+```
+
+> **Important — placeholder UI vs real UI.** A plain `make build` / `go build` embeds only a *placeholder* page that says "run `make web`". That is expected: the CLI needs no UI build. To get the real browser console you must embed the UI with `make web` (or use the Docker image / prebuilt binary, which already embed it). If the console looks empty and tells you to run `make web`, that is why.
+
+---
+
+## The web console, field by field
+
+The console (<http://localhost:8080> after `make web`) has three configuration cards — **Target**, **Load model**, **Scenario** — then a **Run** button and a live view. The help text quoted below is the actual UI copy from `web/src/i18n.ts`. Every `?` Help tooltip is reproduced where relevant.
+
+The fastest start: in the **Scenario** card click **Start from a template** and pick **Branching shop**, **Concert tickets**, **Health check**, or **API read flow**. That fills the graph, templates, start node, and max steps for you (the ticketing preset also switches the Base URL to `http://localhost:9100`). Then tweak and Run.
+
+### Card: Target
+
+> *"Where the simulated traffic goes, and the hosts it is allowed to reach. Add worker addresses to fan the load out across machines."*
+
+| Field | What it is | Sensible values | Gotcha |
+|-------|------------|-----------------|--------|
+| **Base URL** | The service under test (your staging or local server). | `http://localhost:9000`, `http://sample-api:9000` (Docker) | Must include scheme + host (+ port). |
+| **Allowlist** | Comma-separated hosts traffic may reach — a guardrail so a run can never escape your target. | `localhost`, or `sample-api` under Docker | **The console does *not* auto-add the Base URL host.** You must put the target host in *both* Base URL and Allowlist, or every request is blocked (see below). |
+| **Workers** | Optional. Comma-separated gRPC worker addresses to distribute the load. Blank = run on this machine. | blank, or `10.0.0.5:8080,10.0.0.6:8080` | See [Distributed mode](#distributed-mode). |
+| **Aggregate on workers** | Checkbox. Each worker summarizes its shard instead of streaming every request; scales to millions of users. | off for most runs | Trades per-endpoint / run-length finding fidelity for bounded memory. Only meaningful with Workers set. |
+
+> **The allowlist gotcha (the #1 first-timer trap).** In the code, `buildRunSpec` (`web/src/api.ts`) builds the allowlist by *only* trimming and splitting the Allowlist field — it does **not** add the Base URL host for you. The safety guard then blocks any request whose host is not on that list. So if you set Base URL to `http://sample-api:9000` but leave the Allowlist empty (or pointing elsewhere), **every request fails** and the run reads as "all errors." Always put the target host in both fields. (The compact scenario *file* path and the CLI *do* default the allowlist to the target's host — but the web console does not.)
+
+### Card: Load model
+
+> *"How users hit your service. **Open** mimics organic traffic — users arrive at a rate over time. **Closed** holds a fixed pool that loops."*
+
+| Field | What it is | Sensible values | Gotcha |
+|-------|------------|-----------------|--------|
+| **Workload** | `Open` (arrival rate, realistic) or `Closed` (fixed looping pool). | Open for public-facing services | Open is in-process only — no distributed workers (see RunSpec validation). |
+| **Arrival rate** | Open only. New users per second. | 50–500 to start | Combined with session length this *is* your concurrency (Little's Law). |
+| **Duration** | Open only. How long users keep arriving (seconds). | 30–3600 | Must be > 0 for an open run. |
+| **Max concurrency** | Open only. Back-pressure cap; `0` = uncapped. | Set it on one box! (see FAQ) | `0` (uncapped) lets a heavy open run saturate your own machine. Also: ≤ 200 enables per-request live animation. |
+| **Think time** | Pause between a user's steps, in ms, as min–max. | `200`–`800` | Requires `0 ≤ min ≤ max`. Zero means no pause (robotic). |
+| **Personas** | Open only, advanced. JSON array of weighted user types, each with its own entry node and pacing. Blank = one uniform population. | blank to start | See [Personas / segments](#personas--segments). |
+
+### Card: Scenario
+
+> *"The journey users take. Each run starts at the start node and walks the graph for up to the max steps; the JSON below defines the nodes, edges, and the API each node calls."*
+
+| Field | What it is | Sensible values | Gotcha |
+|-------|------------|-----------------|--------|
+| **Start node** | The node id where every user begins. | `browse` (shop) | Must be an id that exists in the graph. |
+| **Max steps** | The longest path (number of transitions) a user may take before stopping. | 10–12 for the shop | Too low and users never reach `checkout`. |
+| **Virtual users** | Closed: the pool size. Open: a nominal upper bound. | 50 closed; any positive number open | In the open run this is *nominal* — sessions come from the arrival rate. It still must be > 0 (the experiment validation rejects 0). |
+| **Show live traffic** | Checkbox: visualize the run while it streams. | on for small runs | Per-request animation when small (≤ 200 users / max-concurrency), an aggregate flow map above that. |
+| **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
+| **API templates** (JSON) | The request each node sends: method, path, optional payload. *Advanced.* | use a preset | See [API templates](#api-templates). |
+| **Import** | Turn an OpenAPI spec or a HAR recording into the graph + templates. | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
+
+When you press **Run**, the console assembles a [RunSpec](#the-full-runspec) and POSTs it. Note two things it does automatically: it sends `users: []` plus a `userCount` for closed runs (so a huge run is a tiny request body — the server synthesizes `u0..uN-1`), and it sizes the safety `rateCap` to your configured load. You never write those by hand in the UI.
+
+---
+
+## JSON formats — the complete reference
+
+This is the heart of the guide. If the JSON editors intimidate you, read this section once and they will stop being scary — each format is small and regular. Every field below lists its **type**, **meaning**, and an **example**, followed by a full worked example and the validation rules (with the exact error messages the server returns).
+
+> **Tip:** you rarely write all of this by hand. The web **presets** and **Import** fill the graph + templates for you; the [compact scenario YAML](#compressed-scenario-yaml) is the friendliest authoring path for the CLI. The raw RunSpec is for power users and scripting.
+
+### Scenario graph
+
+The graph the console's "Scenario graph" editor holds, and the `graph` field of a RunSpec.
+
+```json
+{
+  "id": "shop",
+  "nodes": [
+    { "id": "browse",   "apiTemplateId": "t_browse" },
+    { "id": "checkout", "apiTemplateId": "t_checkout" },
+    { "id": "done" }
+  ],
+  "edges": [
+    { "from": "browse",   "to": "checkout", "weight": 0.6, "dependency": true },
+    { "from": "checkout", "to": "done",     "weight": 1.0 }
+  ]
+}
+```
+
+**Top level**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | A label for the graph (e.g. `"shop"`). |
+| `nodes` | array of Node | The states. At least one is required. |
+| `edges` | array of Edge | The transitions. May be empty (a single-node probe). |
+
+**Node**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Unique node id. Required; must be non-empty and not duplicated. |
+| `apiTemplateId` | string | The API template this node calls. **Omit it to make the node terminal** (`done` / `exit`) — a terminal node fires no request and marks completion or drop-off. |
+
+**Edge**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `from` | string | Source node id (must exist in `nodes`). |
+| `to` | string | Destination node id (must exist in `nodes`). |
+| `weight` | number | Relative likelihood of taking this edge. Must be `>= 0` and finite. From a node, the engine picks an outgoing edge in proportion to weights. |
+| `dependency` | bool | When `true`, the edge is a hard precondition: deviation never skips it. Default `false`. |
+
+**Weight semantics.** Within a node, outgoing weights are relative — the engine normalizes them. In the shop graph `browse → search (0.4)`, `browse → category (0.4)`, `browse → exit (0.2)` means roughly 40% / 40% / 20%. (The compact-scenario path applies the stricter rule that a node's outgoing transition weights sum to ≤ 1; a hand-written RunSpec graph only requires each weight to be `>= 0` and finite.)
+
+**Dependency edges** carry the precondition independently of weight. A dependency edge can even have `weight: 0`: the walker records the requirement from `dependency: true`, and skips weight-0 edges as ordinary transitions — so a `weight: 0, dependency: true` edge enforces "you must have done X first" *without* adding a traversable shortcut.
+
+**Validation rules** (from `domain.ScenarioGraph.Validate`):
+
+- `scenario graph: at least one node is required`
+- `scenario graph: node id must not be empty`
+- `scenario graph: duplicate node id "<id>"`
+- `scenario graph: edge "<from>"->"<to>" references unknown node`
+- `scenario graph: edge "<from>"->"<to>" has invalid weight <v>` — fires for negative, `NaN`, or `+Inf` weights.
+
+### API templates
+
+A **map** keyed by template id, in the console's "API templates" editor and the RunSpec `templates` field. Each value is one callable endpoint.
+
+```json
+{
+  "t_browse":   { "method": "GET",  "path": "/browse" },
+  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p7\",\"qty\":1}" },
+  "t_checkout": { "method": "POST", "path": "/checkout", "payloadTemplate": "{\"total\":42}",
+                  "headers": { "Authorization": "Bearer {{.token}}" } }
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `method` | string | HTTP method: `GET`, `POST`, `PUT`, … Required. |
+| `path` | string | Request path appended to the Base URL. Required. **Must be a rooted path** — see path-safety below. |
+| `payloadTemplate` | string | Optional request body, as a string. Supports variable interpolation (below). |
+| `headers` | object (string→string) | Optional static request headers. Values support interpolation. |
+
+> The full domain `APITemplate` also has `id` and `protocol` fields, but in the templates *map* the key is the id and the protocol defaults to `rest`; the compact map form above (`{ method, path, payloadTemplate?, headers? }`) is what the presets, importer, and UI all use.
+
+**Variable interpolation.** Bodies and header values are templates rendered per request with Go's `text/template` syntax `{{.name}}`:
+
+- `{{.var}}` — a value from a virtual user's own `vars` map (when you supply per-user objects in a RunSpec).
+- `{{.token}}` — the credential secret assigned to this user/session (only present on an [authenticated run](#authenticated-runs)).
+- `{{.subject}}` — the credential's non-sensitive subject (e.g. a username).
+
+A common authenticated header is `"Authorization": "Bearer {{.token}}"`.
+
+**Path-safety rules** (from `runspec.validateTemplatePath`) — a `path` must:
+
+- start with a single `/` (a rooted path) — else `must be a rooted path starting with /`;
+- not start with `//` — else `must not start with // (protocol-relative authority)`;
+- contain no `://` — else `must not contain a scheme`;
+- contain no `\r`, `\n`, or `\t` — else `must not contain control characters`.
+
+These rules exist so a template path can never redirect a request off your target host. (A variable that *renders into* the path is additionally caught at request time by the allowlist guard.) Also: `api: template "<id>": method is required` if `method` is empty.
+
+### Personas / segments
+
+**Open-model only.** The console's "Personas" editor and the RunSpec `segments` field: a JSON array of weighted behavioral profiles drawn from the arrivals. Each override is optional — a segment that sets only `name` and `weight` behaves like the run default but is tallied under its own identity.
+
+```json
+[
+  { "name": "browser", "weight": 0.7, "start": "browse" },
+  { "name": "buyer",   "weight": 0.3, "start": "cart",
+    "maxSteps": 4, "thinkTime": { "minMs": 100, "maxMs": 300 } }
+]
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `name` | string | Labels the persona and tags its sessions. **Required and unique** within a run. |
+| `weight` | number | The segment's relative share of arrivals. Must be `> 0`. Weights need not sum to 1; each segment's probability is its weight over the total. |
+| `start` | string | Optional. Overrides the run's start node for this persona. Empty = run default. Must be a node in the graph. |
+| `maxSteps` | int | Optional. Overrides the step bound. `0` = run default. Must be `>= 0`. |
+| `thinkTime` | object | Optional. `{ "minMs": int, "maxMs": int }` overriding the run's think time. Must satisfy `0 <= minMs <= maxMs`. |
+
+**Validation rules** (`domain.ValidateSegments` + RunSpec checks):
+
+- `segment <i>: name is required`
+- `segment "<name>": duplicate name`
+- `segment "<name>": weight must be > 0 (got <v>)`
+- `segment "<name>": maxSteps must be >= 0 (got <n>)`
+- `api: segments (personas) apply only to the open workload model` — segments on a closed run are rejected.
+- `api: segment "<name>" start node "<id>" is not in the graph`
+
+### Workload (JSON)
+
+The `workload` field of a RunSpec selects how users are generated. Omit it (or use a closed model) for the default fixed-pool behavior.
+
+**Open model**
+
+```json
+{
+  "kind": "open",
+  "arrival": {
+    "shape": "ramp",
+    "startRate": 50,
+    "peakRate": 500,
+    "rampSeconds": 60,
+    "holdSeconds": 600
+  },
+  "durationSeconds": 700,
+  "maxConcurrency": 2000,
+  "thinkTime": { "minMs": 200, "maxMs": 800 }
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `kind` | string | `"open"` or `"closed"`. |
+| `arrival.shape` | string | `constant` \| `ramp` \| `spike` \| `soak`. How the arrival rate moves over time. |
+| `arrival.startRate` | number | Arrivals/sec at t=0 (the ramp/spike base). |
+| `arrival.peakRate` | number | Arrivals/sec at the peak. |
+| `arrival.rampSeconds` | int | Seconds spent climbing toward the peak. |
+| `arrival.holdSeconds` | int | Seconds held at the peak. |
+| `durationSeconds` | int | How long to keep arriving. Must be `> 0`. |
+| `maxConcurrency` | int | Back-pressure cap on in-flight requests. `0` = uncapped. Must be `>= 0`. |
+| `thinkTime` | object | `{ "minMs": int, "maxMs": int }`, the pause between a user's steps. |
+
+**Shapes.** `constant` holds one rate; `ramp` climbs from `startRate` toward `peakRate`; `spike` jumps to a peak; `soak` is a long steady run. For `ramp` and `spike`, `peakRate` **must be > 0** (they are defined by their peak — `constant`/`soak` fall back to `startRate`, ramp/spike do not).
+
+**Closed model**
+
+```json
+{ "kind": "closed", "concurrency": 50, "thinkTime": { "minMs": 0, "maxMs": 0 } }
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `kind` | string | `"closed"`. |
+| `concurrency` | int | The fixed number of looping users. Must be `> 0`. |
+| `thinkTime` | object | Same as above. |
+
+**Validation rules** (`domain.WorkloadModel.Validate`):
+
+- `workload: invalid kind "<k>"`
+- `think time: require 0 <= minMs <= maxMs (got <a>..<b>)`
+- closed: `workload: closed model needs concurrency > 0`
+- open: `workload: invalid arrival shape "<s>"`; `workload: arrival rates must be finite`; `workload: arrival rates must be non-negative`; `workload: open model needs a positive arrival rate`; `workload: ramp arrival needs peakRate > 0` (and `spike`); `workload: open model needs durationSeconds > 0`; `workload: maxConcurrency must be >= 0`.
+
+### The full RunSpec
+
+The complete, self-contained run definition — the raw body of `POST /api/experiments`. You only need this for scripting or advanced control; the console and the scenario file both produce one for you. This is the *real* shape (from `runspec.RunSpec` and what `web/src/api.ts` posts):
+
+```json
+{
+  "experiment": {
+    "name": "ui-run",
+    "targetEnvId": "env",
+    "scenarioGraphId": "graph",
+    "params": { "virtualUserCount": 50, "deviationRate": 0, "authStrategy": "pool" }
+  },
+  "targetEnv": {
+    "id": "env",
+    "baseUrl": "http://localhost:9000",
+    "allowlist": ["localhost"],
+    "rateCap": { "maxRps": 1000, "maxConcurrency": 200 },
+    "envClass": "dev"
+  },
+  "graph": { "...": "see Scenario graph" },
+  "templates": { "...": "see API templates" },
+  "start": "browse",
+  "maxSteps": 12,
+  "users": [],
+  "userCount": 50,
+  "seed": 1,
+  "workload": { "...": "optional; see Workload" },
+  "segments": [],
+  "trace": true,
+  "workers": [],
+  "aggregateWorkers": false,
+  "credentialPool": null
+}
+```
+
+**Top-level fields**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `experiment` | object | Names the run and its run-time params. `name` required; `params.virtualUserCount` must be `> 0`; `params.deviationRate` in `[0,1]`; `params.authStrategy` is `pool` or `bootstrap-signup`. |
+| `targetEnv` | object | The system under test + safety constraints. `baseUrl` required; `allowlist` non-empty; `rateCap.maxRps` and `rateCap.maxConcurrency` both `> 0`; `envClass` is `dev`, `staging`, or `prod-locked`. |
+| `graph` | object | The [scenario graph](#scenario-graph). |
+| `templates` | object | The [API templates](#api-templates) map. |
+| `start` | string | The start node id. Required. |
+| `maxSteps` | int | Max transitions per user. |
+| `users` | array | Explicit virtual-user pool (closed). Usually empty — let the server synthesize. |
+| `userCount` | int | Sizes the closed pool when `users` is empty: the server synthesizes `u0..u{userCount-1}` at run time, so a huge run is a small request body. An explicit `users` list wins; the open model ignores this. |
+| `seed` | int64 | Random seed for reproducibility (the scenario file defaults this to `1`). |
+| `workload` | object | Optional [workload model](#workload-json). Nil/closed = fixed pool (default). |
+| `segments` | array | The [persona mix](#personas--segments) (open only). |
+| `trace` | bool | Opt a small run into live per-request streaming for the traffic graph. Larger runs ignore it. |
+| `workers` | array of string | gRPC worker addresses to distribute across. Empty = run locally. |
+| `aggregateWorkers` | bool | Workers fold their shard into a compact summary instead of streaming every request. Ignored unless `workers` is set. |
+| `credentialPool` | object | Optional [auth pool](#authenticated-runs). Nil = unauthenticated. |
+
+> **`virtualUserCount` must be > 0 even for open runs.** This trips people up. `experiment.params.virtualUserCount` is validated `> 0` regardless of workload model (`experiment: virtualUserCount must be > 0`). In an open run it is a *nominal* field — the actual users come from the arrival rate — but you still must set a positive number. The scenario-file path sets it to `1` automatically for open runs.
+
+**Key RunSpec-level validation rules** (`runspec.RunSpec.Validate`):
+
+- `api: start node is required`
+- `api: at least one virtual user is required` — every non-open path needs `len(users) > 0` *or* `userCount > 0`.
+- `api: distributed workers are not supported with the open workload model` — the open model is in-process only.
+- `api: a credential pool is not yet supported with distributed workers`.
+
+### Compressed scenario YAML
+
+The friendliest authoring path. `tmula run scenario.yaml` reads this compact document and `Expand`s it into a full RunSpec, filling everything else with sensible defaults. It is YAML *or* JSON (both parse, and field names match the json tags). Here is a complete example exercising every block:
+
+```yaml
+target: http://127.0.0.1:9000     # the system under test (required)
+allow: [127.0.0.1]                # hosts the run may reach (defaults to the target's host)
+users: 80                         # closed-model pool size (default 20; ignored when `open:` is set)
+maxSteps: 10                      # default: the flow length
+seed: 1                           # default 1
+
+flow:                             # the ordered journey (required, >= 1 step)
+  - id: browse
+    request: GET /browse          # "METHOD /path" shorthand
+  - id: search
+    request: GET /search
+    weight: 0.7                   # probability of the edge to the next step (default 1)
+  - id: cart
+    request: POST /cart
+    body: '{"productId":"p7","qty":1}'
+    headers: { X-Client: tmula }
+  - id: checkout
+    request: POST /checkout
+    body: '{"total":42}'
+    dependsOn: cart               # marks the edge into checkout as a never-skipped dependency
+
+# Switch to an organic (open) arrival-rate load instead of a fixed pool:
+open:
+  rate: 200                       # constant arrivals/sec  (or from/to + rampSeconds for a ramp)
+  forSeconds: 30                  # required for an open run
+  thinkMs: [200, 800]             # [min, max] pause between a user's steps
+  maxConcurrency: 2000            # back-pressure cap (0 = uncapped)
+
+# Optional persona mix (open model only):
+segments:
+  - { name: browser, weight: 0.7, start: browse }
+  - { name: buyer,   weight: 0.3, start: cart }
+
+# Optional auth — see "Authenticated runs":
+auth:
+  strategy: pool                  # only "pool" is supported here today
+  users:
+    - { subject: alice, token: jwt-aaa }
+    - { subject: bob,   token: jwt-bbb }
+```
+
+**Scenario fields**
+
+| Field | Type | Meaning / default |
+|-------|------|-------------------|
+| `target` | string | Base URL. Required. |
+| `allow` | array | Allowed hosts. **Default: the target's host** (the file path *does* derive it for you, unlike the web console). |
+| `flow` | array of Step | The journey. Required, ≥ 1 step. |
+| `users` | int | Closed pool size. Default `20`. Ignored when `open` is set. |
+| `maxSteps` | int | Walk bound. Default: the flow length. |
+| `seed` | int64 | Reproducibility. Default `1`. |
+| `open` | object | Switches to the open model (below). |
+| `segments` | array | Persona mix; requires `open` (else `scenariofile: segments require an open workload`). |
+| `auth` | object | Credentials (below). |
+
+**Step fields**
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | Unique node/template id. Required. |
+| `request` | string | `"METHOD /path"` shorthand. Empty makes a pure state node (no request). |
+| `body` | string | Request payload template. |
+| `headers` | object | Static request headers. |
+| `dependsOn` | string | An earlier step's id this one requires; the edge into this step becomes a never-skipped dependency. |
+| `weight` | number | Probability of the edge to the *next* step. Default `1`. |
+
+**`open` fields** (maps onto the [workload](#workload-json) model)
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `rate` | number | Constant arrivals/sec. |
+| `from` / `to` | number | Ramp start / peak rate. |
+| `rampSeconds` / `holdSeconds` | int | Ramp / hold durations. |
+| `shape` | string | Override: `constant`\|`ramp`\|`spike`\|`soak`. Defaults to `ramp` if `from`/`to` given, else `constant`. |
+| `forSeconds` | int | **Required.** How long to keep arriving (`scenariofile: open.forSeconds must be > 0`). |
+| `thinkMs` | `[min, max]` | Think-time range (must be exactly two ints, else `open.thinkMs must be [min, max]`). |
+| `maxConcurrency` | int | Back-pressure cap. |
+
+**`auth` fields** — see [Authenticated runs](#authenticated-runs). `strategy` defaults to `pool` (only `pool` is accepted here); `users` is a list of `{ subject, token }` (`token` is the secret, exposed to templates as `{{.token}}`).
+
+How `Expand` defaults things, worth knowing: it derives the graph and templates from `flow` (each request-bearing step becomes a template `t_<id>`), links consecutive steps with weighted edges, sets a generous `rateCap` of `{ maxRps: 10000, maxConcurrency: 1000 }`, `envClass: dev`, and `start` to the first step. The compact graph is validated with the stricter scenario rules (transition weights in `[0,1]`, per-node outgoing sum ≤ 1, dependency edges form a DAG).
+
+---
+
+## The CLI
+
+The `tmula` binary is one command with subcommands. With no recognized subcommand it starts the long-running engine (`serve`).
+
+### `tmula run` — run a scenario and print findings
+
+Builds a RunSpec from a scenario file (or single-endpoint flags), executes it — in-process by default, or against a running `--engine` — and prints the findings.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--target <url>` | (from file) | Target base URL; overrides the scenario file's target. |
+| `--get <path>` | — | Single-endpoint mode: GET this path (no scenario file). |
+| `--post <path>` | — | Single-endpoint mode: POST this path. |
+| `--users <n>` | 0 | Closed-model virtual user count. |
+| `--open <rate>` | 0 | Open model: arrivals per second. |
+| `--for <s>` | 0 | Open model: how long to keep arriving (seconds). |
+| `--ramp-to <rate>` | 0 | Open model: ramp peak rate (uses `--open` as the start). |
+| `--seed <n>` | 1 | Random seed. |
+| `--engine <url>` | — | Run against an existing engine over HTTP instead of in-process. |
+| `--json` | false | Print the raw report JSON instead of a summary. |
+| `--fail-on-findings` | false | Exit non-zero if any finding is detected (CI gate). |
+| `--fail-on-severity <s>` | — | Gate only on findings at/above `warning` or `critical`. |
+| `--timeout <dur>` | 2m | Max time to wait for the run to finish. |
+
+**Worked examples:**
+
+```bash
+# A scenario file with a fixed pool of 50 users
+tmula run examples/shop/scenario.yaml --users 50
+
+# Single endpoint, no file — a quick "is it healthy under 20 users?" probe
+tmula run --target http://localhost:9000 --get /health --users 20
+
+# Organic open load: 278 arrivals/sec for one hour
+tmula run examples/shop/scenario.yaml --open 278 --for 3600
+
+# A ramp: start at 50/sec, climb to 500/sec, over the run
+tmula run examples/shop/scenario.yaml --open 50 --ramp-to 500 --for 600
+
+# CI gate: exit 2 if anything broke
+tmula run examples/shop/scenario.yaml --users 50 --fail-on-findings
+
+# CI gate, criticals only
+tmula run examples/shop/scenario.yaml --users 50 --fail-on-severity critical
+```
+
+**Exit codes:** `0` ok · `1` error (or a failed/killed run) · `2` findings detected under a gate. The gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals. A run that did not complete cleanly (failed or killed — e.g. a timeout or a kill-switch trip) exits non-zero **regardless** of findings, so it never silently passes CI.
+
+The flag parser collects positionals in a loop, so `tmula run scenario.yaml --users 50` and `tmula run --users 50 scenario.yaml` both work.
+
+### `tmula bench` — capacity probe
+
+Drives the bench harness at a target concurrency against a SUT and prints capacity metrics (achieved RPS, latency percentiles, tracking error). It uses the bench harness directly, not the control plane.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--target` / `--get` / `--post` | — | Same scenario / single-endpoint forms as `run`. |
+| `--users <n>` | 50 | Target concurrency. |
+| `--max-steps <n>` | flow length | Max transitions per user. |
+| `--timeout <dur>` | 10s | Per-request transport timeout. |
+| `--seed <n>` | 1 | Seed. |
+| `--json` | false | Raw result JSON. |
+
+```bash
+tmula bench examples/shop/scenario.yaml --users 100
+tmula bench --target http://localhost:9000 --get /health --users 50
+```
+
+### `tmula init` — scaffold a scenario from a spec
+
+Turns an existing API description (OpenAPI or HAR) into a compact scenario file so you start from your real endpoints, not a blank page.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--from <file>` | — | **Required.** OpenAPI or HAR file. |
+| `--format <f>` | auto | `auto` \| `openapi` \| `har`. |
+| `--out <file>` | stdout | Where to write the scenario. |
+| `--target <url>` | — | Override the target base URL. |
+
+```bash
+tmula init --from examples/imports/shop.openapi.yaml --out scenario.yaml
+tmula run scenario.yaml --users 50
+```
+
+### `serve` (default) and roles
+
+Any invocation without `run` / `bench` / `init` starts the long-running engine.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--role <r>` | local | `local` \| `master` \| `worker`. |
+| `--addr <addr>` | :8080 | HTTP listen address (control plane + UI); for a worker, the gRPC listen address. |
+| `--workers <csv>` | — | Comma-separated worker addresses; experiments without their own workers distribute across these. |
+| `--store <file>` | — | local role: JSON snapshot file, loaded on start and written on graceful shutdown, so run history survives a restart. |
+| `--db-dsn <dsn>` | — | master role: Postgres DSN for the durable store (falls back to in-memory when blank; env `TMULA_DB_DSN` is used if unset). |
+| `--version` | — | Print version and exit. |
+
+```bash
+tmula --role local  --addr :8080                                  # engine + API + embedded UI
+tmula --role worker --addr :9101                                  # a distributed worker (gRPC)
+tmula --role local  --addr :8080 --workers 127.0.0.1:9101,127.0.0.1:9102   # a master with a worker pool
+```
+
+Health check: `GET /healthz` returns `{"status":"ok","role":...,"version":...}`.
+
+---
+
+## Findings explained
+
+A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }`. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category — *one* bad endpoint yields *one* finding, not hundreds — in the order mutation → contract → availability → threshold. Here is exactly how each is computed (`internal/obs/finding.go`). First, two predicates used throughout:
+
+- A request **failed** when `statusCode >= 400` **or** it carries an `errorClass` (e.g. `"timeout"`, `"transport"`, `"assertion"`).
+- A request is **unavailable** when `statusCode >= 500` **or** `errorClass == "timeout"` **or** `errorClass == "transport"`.
+
+| Category | Severity | Exactly how it's computed |
+|----------|----------|---------------------------|
+| **contract** | critical | A **non-mutated** request that returned a **5xx** or failed an **assertion** (`contractSignal`). This is "the happy path produced an error a developer likely missed." One finding per API: *"N contract violation(s) on `<api>` (unexpected error on the happy path)."* |
+| **mutation** | warning | A **mutated** input that **failed** (`mutationSignal`). Mutation testing fails inputs on purpose, so this is informational. One finding per API: *"mutated input surfaced N error(s) on `<api>`."* |
+| **availability** | critical | An API that suffered **`AvailabilityRun` or more consecutive `unavailable()` results**. The streak is evaluated per endpoint in timestamp order (so it is robust to the order results stream back). Disabled when `AvailabilityRun <= 0`. One finding per API: *"N consecutive failures on `<api>` (saturation or downtime)."* |
+| **threshold** | warning | Run-wide, excluding mutated requests. Two possible findings: error rate (`failed / total`) **>** `ErrorRateThreshold` → *"error rate X exceeded threshold Y"*; and p95 latency **>** `P95LatencyMs` (when that gate is `> 0`) → *"p95 latency Xms exceeded threshold Yms."* |
+
+### Tuning `ClassifyConfig`
+
+The thresholds live in `ClassifyConfig`:
+
+| Field | Meaning |
+|-------|---------|
+| `ErrorRateThreshold` | Overall error rate above this → a threshold finding. `0` disables the error-rate gate. |
+| `P95LatencyMs` | Overall p95 latency above this → a threshold finding. `0` disables the p95 gate. |
+| `AvailabilityRun` | This many consecutive failures on one API → an availability finding. `0` disables availability detection. |
+
+> **Note on the distributed/aggregated path.** When workers aggregate their shards (`aggregateWorkers`), findings come from a merged `Summary` (`FindingsFromSummary`), which keeps only per-category tallies — no per-API breakdown and no ordering. So it produces at most *one* finding per tripped category for the whole run, deliberately coarser than the per-endpoint single-node findings. That is the fidelity-for-scale trade you opt into. (A subtle detail: the Summary's threshold error-rate/p95 count *all* observations including mutated ones, whereas the single-node classifier excludes mutated requests — latent today because the distributed path never carries mutated observations.)
+
+---
+
+## Reading the results
+
+When **Show live traffic** is on, the console streams a live view; afterward you get a report with links.
+
+**Traffic-flow map.** Requests enter on the left and fan toward an outcome on the right (a funnel). Edge **thickness is request volume** (a logarithmic scale, so a 12-request edge and a 12-million-request edge stay legible together), and edge **color tints from green to red by error ratio**. Edges into terminal nodes are rendered as outcomes: inflow to `done` reads as **completed**, inflow to `exit` as **left** — these are journey outcomes, not requests, so they are excluded from the "N requests" headline. For small runs (≤ 200 users, or ≤ 200 max-concurrency in the open model) the view **animates each request as a dot** (green = ok, red = error); above that cap it falls back to the aggregate flow map (per-edge counts), which scales to any run size because the payload is bounded by the edge count, not the request count.
+
+**Latency heatmap.** A 2-D histogram: rows are latency bands (low → high; the top band is unbounded, e.g. "5s+"), columns are time buckets since the run started, and each cell's color is the request count in that band × time (darker = denser). This is the canonical "where did latency go" view — a thin hot tail at the top means a slow minority.
+
+**Live metrics.** Running counters: requests, error rate, p50 / p95 / p99 / max latency, timeouts, and a status-code tally (e.g. `200:313 500:8`).
+
+**HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions.
+
+**Share links.** You can mint a read-only **viewer** share link for a report. The viewer is told *"Read-only. Sensitive fields are redacted."* — notably the run's `killReason` is scrubbed on a shared report, so an internal kill reason never leaks to an external viewer. Shared links can carry an expiry; an expired or unknown token yields a localized "expired"/"not found" message.
+
+---
+
+## Importing OpenAPI / HAR
+
+You rarely need to hand-author the graph + templates. The importer turns an **OpenAPI** spec or a **HAR** recording into a ready-to-edit scenario (graph + templates + start + maxSteps).
+
+- **Web console:** Scenario card → **Import from OpenAPI / HAR** → upload a file or paste the text → **Import**. The graph and templates fields fill in; review and Run. (The endpoint is `POST /api/import?format=auto|openapi|har`.)
+- **CLI:** `tmula init --from <openapi.yaml|session.har> --out scenario.yaml`.
+
+**Format detection** is structural, not just by extension (`detectFormat`): a `.har` name forces HAR; otherwise the document is parsed and its keys inspected — OpenAPI markers (`openapi` / `swagger` / `paths`) are checked first, then a HAR's `log.entries`. This makes a real browser HAR import correctly even without its `.har` name.
+
+**Journey-ordering heuristic.** The OpenAPI importer orders the imported steps into a plausible user journey (e.g. list before detail, reads before writes) rather than spec order, so the resulting flow reads like a real path through the API. Review the generated steps — fill in path parameters and request bodies — then run.
+
+Ready-made examples live in [`examples/imports/`](../examples/imports): `shop.openapi.yaml`, `shop.openapi`'s HAR sibling `shop-session.har`, and `ticketing.openapi.yaml`. They target `http://localhost:9000`, lining up with the bundled `examples/sample-api`.
+
+---
+
+## Authenticated runs
+
+To make simulated traffic carry real auth material, attach a **credential pool**. Each closed virtual user (by **user index**) or open session (by **session/arrival index**) is assigned a credential, wrapping around when there are more users than entries. Reference it from a template header — `"Authorization": "Bearer {{.token}}"` — or use `{{.subject}}` for the non-sensitive principal.
+
+The friendliest way is the scenario file's `auth:` block:
+
+```yaml
+auth:
+  strategy: pool          # only "pool" (pre-supplied entries) is supported on this path
+  users:
+    - { subject: alice, token: jwt-aaa }
+    - { subject: bob,   token: jwt-bbb }
+```
+
+```bash
+tmula run examples/shop/scenario.yaml --users 50   # with the auth: block above
+```
+
+**Why secrets stay in-process.** The domain `Credential.Secret` field carries `json:"-"`, so the secret is **never serialized** — it cannot cross the HTTP/SSE/store wire and is never persisted (its `String()` also redacts it in logs). Concretely:
+
+- `tmula run` with an `auth:` block runs the control plane **in-process** (through its Go API) precisely so the secret never has to be marshaled. The unauthenticated path still boots a real loopback engine over HTTP for parity.
+- A `users[].cred` you try to POST over HTTP is **silently ignored** — the secret is stripped by `json:"-"`, so HTTP submission cannot carry auth.
+- A remote `--engine` **refuses** an authenticated run: `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`.
+
+**Constraints** (from validation): only the pre-supplied `pool` strategy works on the run path today — `bootstrap-signup` is refused with a clear "not yet supported via this run path (follow-up)" message. A credential pool **cannot** be combined with distributed workers (the worker fan-out synthesizes its own unauthenticated users).
+
+---
+
+## Distributed mode
+
+For very large runs you can fan out across machines. One process is the **master** (serves the control plane + UI); others are **workers** (serve a gRPC service). The master dials each worker, splits the virtual users into shards, and aggregates their streamed results identically to the local path.
+
+```bash
+# on each worker box
+tmula --role worker --addr :9101
+
+# on the master, naming the worker pool
+tmula --role master --addr :8080 --workers 10.0.0.5:9101,10.0.0.6:9101
+```
+
+You can also set workers per-experiment via the RunSpec `workers` field (or the console's **Workers** field).
+
+**`aggregateWorkers` and the fidelity trade-off.** By default each worker streams every request back, and the master classifies findings per endpoint with run-length availability detection (full fidelity). With `aggregateWorkers: true`, each worker folds its whole shard into a compact mergeable **Summary** (counters + a bounded-memory latency histogram) and the master merges those — bounded network and memory even at millions of requests, but findings become **run-wide per category** (one finding per tripped category, no per-endpoint breakdown, no consecutive-failure streaks). Use it when the request volume would overwhelm streaming; keep it off when you want per-endpoint, run-length findings.
+
+**When to use distributed mode at all:** only when a single box cannot generate (and the SUT cannot serve) the load you need. Note the open workload model is **in-process only** — distributed workers are rejected for open runs (`api: distributed workers are not supported with the open workload model`), and a credential pool is rejected with workers too.
+
+---
+
+## Safety
+
+Because tmula deliberately concentrates traffic, a misfire would be a self-inflicted outage. Three guards (`internal/safety`) make that hard to do by accident; every outbound request passes all three.
+
+- **Allowlist.** A host allowlist (`TargetEnv.Allowlist`) — the only hosts a run may reach. A request whose host is not on the list is blocked (`safety: host "<h>" not in allowlist`). Patterns are exact, or a leading `*.` wildcard (`*.example.com`). The allowlist must be non-empty — there is no "reach anything" mode.
+- **Rate cap.** A hard ceiling: `rateCap.maxRps` (a token bucket, burst capped at one second of rate) and `rateCap.maxConcurrency` (in-flight ceiling). Both must be `> 0`. Exceeding either yields a `LimitError` for that request rather than overrunning the target.
+- **Kill switch.** Always-on **manual** stop (the console's **Kill run** button), plus an opt-in **automatic** trip: when a *rolling* error rate over the most recent N outcomes exceeds a threshold, the guard trips itself (`auto: rolling error rate X over last N exceeded threshold Y`). The automatic trip is **disabled by default** so saturation can actually be observed.
+- **Environment class.** `envClass` is `dev`, `staging`, or `prod-locked`. A `prod-locked` target is refused unless explicitly unlocked (`safety: target env is prod-locked; explicit unlock required (policy §1)`).
+
+Together these mean a run cannot reach a host you did not list, cannot exceed the rate/concurrency you set, can always be stopped, and cannot accidentally hit production.
+
+---
+
+## The example domains
+
+Two complete, runnable demos double as a catalog of *deliberately planted bugs*, so you know what findings to expect when you point tmula at them. Pick one as a web **preset** (it fills the scenario *and* the target) or run it from the CLI.
+
+### shop — `examples/sample-api` (`:9000`)
+
+Journey: `browse → search / category → product → cart → checkout → done`. Planted bugs:
+
+| Endpoint | Planted behavior | Expected finding |
+|----------|------------------|------------------|
+| `GET /browse` | Healthy, ~3 ms | none |
+| `GET /search` | ~5% of responses sleep ~180 ms — a latency tail | shows up in **p95/p99** (threshold if gated) |
+| `GET /category` | Healthy, ~5 ms | none |
+| `GET /product` | ~2% return **404** — a rare broken product link | **contract** |
+| `POST /cart` | ~8% return **500** — an intermittent "cart hiccup" | **contract** |
+| `POST /checkout` | ~8% baseline failures that **climb with concurrent load**, capped at 40% (503) — degraded under pressure, never fully down, recovers when load eases | **contract** + elevated **threshold** error rate under load |
+
+### ticketing — `examples/ticketing-api` (`:9100`)
+
+Journey: `events → detail → seats → hold → pay → done`. Planted bugs:
+
+| Endpoint | Planted behavior | Expected finding |
+|----------|------------------|------------------|
+| `GET /events` | Healthy, fast | none |
+| `GET /events/{id}` | ~3% return **404** (sold out / removed) | **contract** |
+| `GET /seats` | ~6% slow (~150 ms) — a popular show's latency tail | **p95/p99** |
+| `POST /hold` | ~18% return **409** — seat contention (another buyer grabbed it first) | **contract** |
+| `POST /pay` | Degrades under the on-sale rush; failure climbs with concurrent load, capped at 40% (503) | **contract** + elevated **threshold** error rate |
+
+The `409`s on `hold` and the `503`s on `pay` concentrate on those specific endpoints — exactly the pattern of a real planted bug (see the FAQ on endpoint-concentrated errors).
+
+A full hands-on "0 to 100" walkthrough (in Korean) lives at [`examples/USAGE.md`](../examples/USAGE.md); it is a companion to this reference, not a duplicate.
+
+---
+
+## Troubleshooting & FAQ
+
+**Q: The console is empty / shows a "run `make web`" placeholder page.**
+You built without embedding the UI. A plain `make build` / `go build` ships a placeholder. Run `make web` (or use the Docker image / prebuilt binary, which already embed the real console) and reload <http://localhost:8080>.
+
+**Q: My run is "all errors" — every request failed.**
+The target host is not in the **Allowlist**. The web console does **not** auto-add the Base URL host to the allowlist (`buildRunSpec` just trims/splits the field), and the safety guard blocks anything off the list. Put the target host in *both* the Base URL and the Allowlist. (The scenario-file and CLI paths default the allowlist to the target host; only the web console makes you type it twice.)
+
+**Q: Under Docker, the run still fails to reach the API.**
+Inside the Compose network the engine reaches the SUTs by **service name**, not `localhost`. Set the Base URL to `http://sample-api:9000` (shop) or `http://ticketing-api:9100` (ticketing) and put `sample-api` / `ticketing-api` in the Allowlist. `localhost` inside the engine container points at the engine itself, not the SUT.
+
+**Q: I get `decode: http: request body too large`.**
+You shipped one object per virtual user for a huge run, and the request body overflowed the server's size limit. Don't materialize per-user objects: for a closed run send an empty `users: []` plus a `userCount` (the server synthesizes `u0..uN-1`), or use the open model (it generates its own sessions from the arrival rate). The web console already does this for you.
+
+**Q: `virtualUserCount must be > 0` on an open run — but the open model doesn't use a user count?**
+Correct, it's a *nominal* field, but it's still validated `> 0` regardless of workload model. Set any positive number (the scenario-file path sets it to `1` automatically). It does not change open-model behavior.
+
+**Q: Huge error rates, a bimodal latency (p50 ≈ 0, p95 in seconds), and lots of timeouts. Is the machine broken?**
+No — that's the signature of **overload / saturation**, usually because you are *generating* the load and *serving* the SUT on the **same box with no concurrency cap**. The fast successes give p50 ≈ 0 while the saturated tail pushes p95 into seconds, and the timeouts pile up. Fix it by setting **Max concurrency** (open model) and/or lowering the **Arrival rate**, or by moving the system under test onto a separate machine. This is a measurement artifact of your harness, not a bug in the SUT.
+
+**Q: The errors concentrate on a few specific endpoints.**
+That is usually a *real* bug in the system under test — and in the example domains, a deliberately planted one. The ticketing `POST /hold` 409s (seat contention) and `POST /pay` 503s (payment under rush), or the shop `POST /cart` 500s and `POST /checkout` degradation, are exactly the kind of endpoint-concentrated failure tmula is built to surface. Endpoint-concentrated errors → look at that endpoint; run-wide errors with saturation symptoms → look at your harness (previous question).
+
+**Q: A CI run exited 2 even though I expected a pass.**
+`--fail-on-findings` (or `--fail-on-severity`) intentionally exits `2` when findings are detected — that's the gate working. A `1` instead means an actual error or a failed/killed run (e.g. a timeout or kill-switch trip), which always exits non-zero regardless of findings. `0` means clean.
+
+**Q: My authenticated run "works" against a remote `--engine` but carries no token.**
+It can't — and the run path refuses it: a credential pool against a remote `--engine` is rejected because the secret cannot cross the wire (`json:"-"`). Run in-process (`tmula run` with an `auth:` block, no `--engine`) to authenticate.

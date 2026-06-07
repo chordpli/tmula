@@ -3,11 +3,11 @@
 #   docker compose up        # build (first run) + start, then open http://localhost:8080
 #
 # Three services share one network. The control plane reaches the example SUTs by
-# their service name, so in the web console set the target Base URL to:
-#   shop       ->  http://sample-api:9000
-#   ticketing  ->  http://ticketing-api:9100
-# (The allowlist auto-derives from the target host, so no extra setup.) The
-# presets' default localhost URLs are for `make demo`; in Docker use the names above.
+# their service name, so in the web console set BOTH the Base URL and the
+# Allowlist to that name (the UI does not auto-derive the host):
+#   shop       ->  Base URL http://sample-api:9000      · Allowlist  sample-api
+#   ticketing  ->  Base URL http://ticketing-api:9100   · Allowlist  ticketing-api
+# The presets' default localhost URLs are for `make demo`; in Docker use the names above.
 name: tmula-demo
 
 services:
