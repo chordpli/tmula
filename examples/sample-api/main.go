@@ -7,9 +7,9 @@
 //	GET  /category  healthy, ~5 ms
 //	GET  /product   ~2% return 404 — a rare broken product link (CONTRACT finding)
 //	POST /cart      ~8% return 500 — intermittent "cart hiccup" (CONTRACT finding)
-//	POST /checkout  load-proportional failure that RECOVERS when load drops —
-//	                saturation under heavy traffic, not a permanent outage
-//	                (AVAILABILITY/CONTRACT finding under load)
+//	POST /checkout  the flakiest path: ~8% baseline failures that climb with
+//	                concurrent load and are capped at 40% — visibly degraded and
+//	                worse under traffic, but never fully down (CONTRACT/threshold)
 //
 // Run it:  go run ./examples/sample-api   (listens on :9000)
 package main
@@ -81,19 +81,27 @@ func main() {
 		writeJSON(w, http.StatusOK, `{"cart":"ok"}`)
 	})
 
-	// BUG: checkout saturates under concurrent load but RECOVERS when traffic
-	// drops — unlike a permanent outage. Failure probability climbs with the
-	// number of in-flight checkout calls and falls when load eases, so the
-	// simulator flags AVAILABILITY/CONTRACT under heavy traffic but the endpoint
-	// returns to health once the concurrency subsides.
+	// BUG: checkout DEGRADES under concurrent load but never fully falls over, and
+	// RECOVERS when traffic eases — a realistic "flaky under pressure" payment path,
+	// not a permanent outage. Failure probability rises gently with the number of
+	// in-flight checkout calls and is capped well below 100%, so most checkouts
+	// still succeed even at peak; the simulator flags the elevated error rate and
+	// contract misses under load, and the endpoint returns to full health once
+	// concurrency subsides.
 	mux.HandleFunc("POST /checkout", func(w http.ResponseWriter, _ *http.Request) {
 		n := checkoutInflight.Add(1)
 		defer checkoutInflight.Add(-1)
-		time.Sleep(25 * time.Millisecond)
-		// n<=6 ≈ healthy; n>=20 ≈ always fails; scales linearly between.
-		failProb := (float64(n) - 6) / 14.0
-		if failProb > 0 && rand.Float64() < failProb {
-			writeJSON(w, http.StatusServiceUnavailable, `{"error":"payment downstream saturated"}`)
+		time.Sleep(15 * time.Millisecond)
+		// Checkout is the flakiest path: a ~8% baseline failure that climbs with
+		// concurrent load (+2% per in-flight call) and is capped at 40%. So it
+		// always shows up as the problem area and visibly worsens under traffic,
+		// but never reads as fully down — degraded, not an outage.
+		failProb := 0.08 + float64(n)*0.02
+		if failProb > 0.4 {
+			failProb = 0.4
+		}
+		if rand.Float64() < failProb {
+			writeJSON(w, http.StatusServiceUnavailable, `{"error":"payment downstream slow"}`)
 			return
 		}
 		writeJSON(w, http.StatusOK, `{"order":"placed"}`)
