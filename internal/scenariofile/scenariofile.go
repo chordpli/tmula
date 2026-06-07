@@ -55,6 +55,39 @@ type Scenario struct {
 	Open *Open `json:"open,omitempty"`
 	// Segments is an optional persona mix (open model only).
 	Segments []domain.Segment `json:"segments,omitempty"`
+	// Auth, when set, authenticates the run: each virtual user (closed) or session
+	// (open) is assigned a credential by index so the simulated traffic carries
+	// real auth material. Omit it to run unauthenticated (the default).
+	Auth *Auth `json:"auth,omitempty"`
+}
+
+// Auth supplies the run's credentials in the compact file. It carries the secret
+// in its own Token field (domain.Credential's secret is json:"-" and would never
+// round-trip through YAML), and Expand maps it onto a domain.CredentialPool — so
+// the file can hand-author tokens while the domain type keeps masking the secret
+// at rest. Only the pre-supplied "pool" strategy is supported here; bootstrap
+// signup is a follow-up that needs a signup transport this path does not wire.
+type Auth struct {
+	// Strategy selects how users obtain credentials; it defaults to "pool". Only
+	// "pool" is accepted on this path (bootstrap-signup is a follow-up).
+	Strategy string `json:"strategy,omitempty"`
+	// Users is the pool of pre-supplied credentials, assigned to virtual users by
+	// index (wrapping around when there are more users than entries).
+	Users []Credential `json:"users,omitempty"`
+}
+
+// Credential is one pre-supplied principal in the compact file: a non-sensitive
+// subject and its secret token. It is distinct from domain.Credential precisely
+// so the token can be authored in the file (the domain type hides its secret from
+// serialization); Expand copies Token into the domain credential's secret.
+type Credential struct {
+	// Subject is the non-sensitive principal id (e.g. a username), exposed to
+	// templates as {{.subject}}.
+	Subject string `json:"subject,omitempty"`
+	// Token is the secret auth material (e.g. a JWT), exposed to templates as
+	// {{.token}}. It lives only in the authored file; the domain credential it
+	// maps to never serializes its secret.
+	Token string `json:"token,omitempty"`
 }
 
 // Step is one node in the flow: an id, the request it makes, and how it links to
@@ -185,7 +218,39 @@ func Expand(s Scenario) (api.RunSpec, error) {
 		spec.Users = makeUsers(n)
 		spec.Experiment.Params.VirtualUserCount = n
 	}
+
+	if s.Auth != nil {
+		pool, err := buildCredentialPool(*s.Auth)
+		if err != nil {
+			return api.RunSpec{}, err
+		}
+		spec.CredentialPool = &pool
+		spec.Experiment.Params.AuthStrategy = pool.Strategy
+	}
 	return spec, nil
+}
+
+// buildCredentialPool maps the compact Auth block onto a domain.CredentialPool.
+// The strategy defaults to "pool" and only "pool" is accepted here (bootstrap
+// signup is a follow-up that needs a signup transport this path does not wire);
+// each authored Token is copied into a domain credential's secret, which the
+// domain type then keeps out of any serialization.
+func buildCredentialPool(a Auth) (domain.CredentialPool, error) {
+	strategy := domain.CredentialStrategy(a.Strategy)
+	if a.Strategy == "" {
+		strategy = domain.CredPool
+	}
+	if strategy != domain.CredPool {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users)", strategy, domain.CredPool)
+	}
+	if len(a.Users) == 0 {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.users must list at least one credential for the %q strategy", domain.CredPool)
+	}
+	entries := make([]domain.Credential, len(a.Users))
+	for i, c := range a.Users {
+		entries[i] = domain.Credential{Subject: c.Subject, Secret: c.Token}
+	}
+	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
 }
 
 // buildTemplates maps each request-bearing step to an API template keyed t_<id>.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -114,6 +115,59 @@ func TestRunScenarioFileInProcess(t *testing.T) {
 	}
 	if rep.Run.Status != "completed" || rep.Stats.Total != 4 {
 		t.Errorf("got status=%q total=%d, want completed/4", rep.Run.Status, rep.Stats.Total)
+	}
+}
+
+// TestRunScenarioFileAuthInProcess drives `tmula run scenario.yaml` where the
+// scenario carries an auth block, and asserts the in-process run actually sends
+// the pool's bearer tokens to the SUT — the end-to-end proof that a credential
+// secret survives to the runtime (it cannot cross the wire, json:"-"), so the CLI
+// authenticates without the web UI.
+func TestRunScenarioFileAuthInProcess(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]int{}
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("Authorization")]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sut.Close()
+
+	file := filepath.Join(t.TempDir(), "scenario.yaml")
+	doc := "target: " + sut.URL + "\n" +
+		"users: 2\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"    headers:\n" +
+		"      Authorization: \"Bearer {{.token}}\"\n" +
+		"auth:\n" +
+		"  users:\n" +
+		"    - subject: alice\n" +
+		"      token: tok-alice\n" +
+		"    - subject: bob\n" +
+		"      token: tok-bob\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	out := captureStdout(t, func() error {
+		return runScenario([]string{file, "--json"})
+	})
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if rep.Run.Status != "completed" || rep.Stats.Total != 2 {
+		t.Fatalf("got status=%q total=%d, want completed/2", rep.Run.Status, rep.Stats.Total)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Two users, two pool entries: user 0 -> tok-alice, user 1 -> tok-bob.
+	if seen["Bearer tok-alice"] != 1 || seen["Bearer tok-bob"] != 1 {
+		t.Errorf("auth headers seen = %v, want one each of tok-alice and tok-bob", seen)
 	}
 }
 

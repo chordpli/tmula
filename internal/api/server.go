@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/chordpli/tmula/internal/auth"
 	"github.com/chordpli/tmula/internal/cluster"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
@@ -74,6 +75,16 @@ type RunSpec struct {
 	// streaming for the traffic graph (GET /runs/{id}/trace). Larger runs ignore
 	// it — it is an inspect view, not a millions-scale feature.
 	Trace bool `json:"trace,omitempty"`
+
+	// CredentialPool, when set, authenticates the run: each virtual user (closed)
+	// or session (open) is assigned a credential by index from the pool, so the
+	// simulated traffic carries real auth material instead of running anonymously.
+	// The pool strategy must be "pool" (pre-supplied entries) on this path;
+	// bootstrap-signup is a documented follow-up (it needs a signup transport this
+	// path does not yet wire). The credential secret carries json:"-" (domain), so
+	// a persisted or streamed spec never leaks it. Nil leaves the run
+	// unauthenticated, exactly as before.
+	CredentialPool *domain.CredentialPool `json:"credentialPool,omitempty"`
 
 	id domain.ID
 }
@@ -138,7 +149,45 @@ func (r RunSpec) Validate() error {
 			}
 		}
 	}
+	if err := r.validateCredentialPool(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateCredentialPool checks an optional credential pool is usable on this
+// path. A nil pool is fine (the run is unauthenticated). The domain validation
+// rejects an unknown strategy and an empty "pool" strategy; on top of that, the
+// run path supports only the pre-supplied "pool" strategy today, so a
+// bootstrap-signup request fails loudly rather than silently running
+// unauthenticated, and a credential pool combined with distributed workers is
+// refused because the worker fan-out synthesizes its own (unauthenticated) users.
+func (r RunSpec) validateCredentialPool() error {
+	if r.CredentialPool == nil {
+		return nil
+	}
+	if err := r.CredentialPool.Validate(); err != nil {
+		return fmt.Errorf("api: %w", err)
+	}
+	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
+		// Follow-up: the bootstrap provider exists but needs a signup transport this
+		// run path does not yet wire. Refuse rather than run unauthenticated.
+		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
+	}
+	if len(r.Workers) > 0 || r.AggregateWorkers {
+		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
+	}
+	return nil
+}
+
+// credentialProvider builds the auth provider for a run from its credential pool,
+// or returns (nil, nil) when the run is unauthenticated. Validate has already
+// confirmed the pool is a usable "pool" strategy, so no signup function is needed.
+func (r RunSpec) credentialProvider() (auth.Provider, error) {
+	if r.CredentialPool == nil {
+		return nil, nil
+	}
+	return auth.NewProvider(*r.CredentialPool, nil)
 }
 
 // isOpen reports whether the spec uses the open (arrival-rate) workload model.
@@ -457,9 +506,23 @@ func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("decode: %w", err))
 		return
 	}
-	if err := spec.Validate(); err != nil {
+	id, err := s.CreateExperiment(spec)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": string(id)})
+}
+
+// CreateExperiment validates and registers a run spec in-process, returning the
+// assigned experiment id. It is the Go-level entry point the HTTP create handler
+// is built on, and the path an in-process caller (the `tmula run` CLI) uses to
+// submit a spec WITHOUT a JSON round-trip — which matters because a credential
+// secret carries json:"-" and so would be stripped crossing the wire; keeping the
+// spec in-process preserves it. The error is a bad-request-class validation error.
+func (s *Server) CreateExperiment(spec RunSpec) (domain.ID, error) {
+	if err := spec.Validate(); err != nil {
+		return "", err
 	}
 	if len(spec.Workers) == 0 && len(s.defaultWorkers) > 0 {
 		spec.Workers = append([]string(nil), s.defaultWorkers...)
@@ -468,8 +531,7 @@ func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 	// pool locally, so bound it — checked after default workers are applied, so a
 	// run that will distribute (the path built for huge pools) is exempt.
 	if len(spec.Workers) == 0 && !spec.isOpen() && spec.poolSize() > maxLocalPoolUsers {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("api: closed pool of %d exceeds the in-process limit of %d; distribute across workers to run larger", spec.poolSize(), maxLocalPoolUsers))
-		return
+		return "", fmt.Errorf("api: closed pool of %d exceeds the in-process limit of %d; distribute across workers to run larger", spec.poolSize(), maxLocalPoolUsers)
 	}
 	id := s.nextID("exp")
 	spec.id = id
@@ -477,7 +539,7 @@ func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.specs[id] = spec
 	s.mu.Unlock()
-	writeJSON(w, http.StatusCreated, map[string]string{"id": string(id)})
+	return id, nil
 }
 
 func (s *Server) getExperiment(w http.ResponseWriter, r *http.Request) {
@@ -494,22 +556,52 @@ func (s *Server) getExperiment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(r.PathValue("id"))
+	runID, err := s.StartRun(id)
+	if err != nil {
+		var ge *guardError
+		switch {
+		case errors.Is(err, errExperimentNotFound):
+			writeErr(w, http.StatusNotFound, err)
+		case errors.As(err, &ge):
+			writeErr(w, http.StatusForbidden, ge.err)
+		default:
+			writeErr(w, http.StatusInternalServerError, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"runId": string(runID)})
+}
+
+// errExperimentNotFound is returned by StartRun when the experiment id is unknown,
+// so the HTTP handler can map it to 404 without string-matching.
+var errExperimentNotFound = errors.New("experiment not found")
+
+// guardError wraps a safety-guard rejection (an unsafe target) so the HTTP
+// handler maps it to 403 while in-process callers see the underlying cause.
+type guardError struct{ err error }
+
+func (e *guardError) Error() string { return e.err.Error() }
+func (e *guardError) Unwrap() error { return e.err }
+
+// StartRun launches the experiment identified by id and returns the new run id.
+// It is the Go-level entry point the HTTP run handler is built on, and the path
+// the in-process `tmula run` CLI uses so a spec carrying credential secrets never
+// has to cross the wire. A missing experiment yields errExperimentNotFound; an
+// unsafe target yields a *guardError; both let the handler pick the right status.
+func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 	s.mu.Lock()
 	spec, ok := s.specs[id]
 	s.mu.Unlock()
 	if !ok {
-		writeErr(w, http.StatusNotFound, fmt.Errorf("experiment %q not found", id))
-		return
+		return "", fmt.Errorf("%w: %q", errExperimentNotFound, id)
 	}
 
 	guard, err := safety.NewGuardForEnv(spec.TargetEnv, nil, false)
 	if err != nil {
-		writeErr(w, http.StatusForbidden, err)
-		return
+		return "", &guardError{err: err}
 	}
 	if err := guard.AllowHost(spec.TargetEnv.BaseURL); err != nil {
-		writeErr(w, http.StatusForbidden, err)
-		return
+		return "", &guardError{err: err}
 	}
 
 	mode := domain.RunLocal
@@ -550,7 +642,7 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 
 	go s.execute(ctx, rs, spec)
 
-	writeJSON(w, http.StatusAccepted, map[string]string{"runId": string(runID)})
+	return runID, nil
 }
 
 func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
@@ -664,6 +756,12 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 	if len(spec.Users) > 0 {
 		user = spec.Users[0]
 	}
+	// When a credential pool is set, the scheduler assigns each arrival a
+	// credential by its global session index; nil leaves sessions unauthenticated.
+	provider, err := spec.credentialProvider()
+	if err != nil {
+		return obs.Stats{}, nil, err
+	}
 	res, err := workload.New(runner).Run(ctx, workload.Options{
 		Graph:    spec.Graph,
 		Start:    spec.Start,
@@ -678,6 +776,9 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		Collector: rs.collector,
 		// Persona mix: drives a weighted blend of entry points and pacing.
 		Segments: spec.Segments,
+		// Auth, when non-nil, makes each session authenticate as a distinct
+		// principal keyed by its arrival index (a pool wraps around its entries).
+		Auth: provider,
 	})
 	if err != nil {
 		return obs.Stats{}, nil, err
@@ -736,9 +837,39 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 	// collector + aggregator and return nothing, so a huge in-process run never
 	// buffers its results. closedUsers synthesizes the pool from UserCount when the
 	// client sent only a count (the large-run path), or returns the explicit pool.
+	users, err := s.authenticateClosedUsers(ctx, spec)
+	if err != nil {
+		return err
+	}
 	runner := s.runnerFor(rs, spec, load.WithResultSink(sink))
-	_, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.closedUsers(), spec.Seed)
+	_, err = runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, users, spec.Seed)
 	return err
+}
+
+// authenticateClosedUsers materializes the closed-model pool and, when the spec
+// carries a credential pool, assigns each user the credential keyed by its index
+// so user i always authenticates as Acquire(i) (a pool wraps around its entries).
+// With no credential pool it returns the pool unchanged (every user
+// unauthenticated), so a run without auth is byte-for-byte what it was before.
+// The pool provider's Acquire is pure, so the per-user assignment is deterministic
+// and independent of the seeded traversal.
+func (s *Server) authenticateClosedUsers(ctx context.Context, spec RunSpec) ([]load.VirtualUser, error) {
+	users := spec.closedUsers()
+	provider, err := spec.credentialProvider()
+	if err != nil {
+		return nil, err
+	}
+	if provider == nil {
+		return users, nil
+	}
+	for i := range users {
+		cred, err := provider.Acquire(ctx, i)
+		if err != nil {
+			return nil, fmt.Errorf("api: acquire credential for user %d: %w", i, err)
+		}
+		users[i].Cred = cred
+	}
+	return users, nil
 }
 
 // executeDistributed dials each worker, fans the run's virtual users out across
@@ -906,6 +1037,12 @@ func (rs *runState) report() Report {
 	rs.mu.Unlock()
 	return Report{Run: exec, Stats: rs.stats(), Findings: findings, Workers: exec.Workers}
 }
+
+// Report returns a finalized-or-live run's report and whether it was found. It is
+// the Go-level accessor the in-process CLI polls (the HTTP report handler shares
+// the same lookup), so an authenticated in-process run can be observed without a
+// JSON round-trip.
+func (s *Server) Report(id domain.ID) (Report, bool) { return s.reportFor(id) }
 
 // reportFor returns a run's report and whether it was found. A live run in the
 // in-memory cache is served directly; otherwise the run is rebuilt from the
