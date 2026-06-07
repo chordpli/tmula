@@ -165,7 +165,10 @@ type runState struct {
 	trace *traceBuf
 	// heat, when non-nil, aggregates per-edge traffic for the large-scale heatmap
 	// (set for any opted-in run). Its methods are concurrency-safe.
-	heat     *heatAgg
+	heat *heatAgg
+	// latency, when non-nil, aggregates request latencies into a time x latency
+	// grid for the latency heatmap (set for any opted-in run). Concurrency-safe.
+	latency  *latencyHeat
 	cancel   context.CancelFunc
 	done     chan struct{}
 	findings []domain.Finding
@@ -293,6 +296,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
 	s.mux.HandleFunc("GET /runs/{id}/trace", s.streamTrace)
 	s.mux.HandleFunc("GET /runs/{id}/heatmap", s.streamHeatmap)
+	s.mux.HandleFunc("GET /runs/{id}/latency-heatmap", s.streamLatencyHeatmap)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
@@ -457,6 +461,10 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 	// when the run is small enough.
 	if spec.Trace {
 		rs.heat = newHeatAgg(spec.Graph)
+		// The latency grid measures time from the run's real start, independent of
+		// the server's injected clock, so it buckets against the same wall clock the
+		// event sink stamps each request with.
+		rs.latency = newLatencyHeat(time.Now())
 		if traceSmallEnough(spec) {
 			rs.trace = newTraceBuf()
 		}
@@ -573,14 +581,17 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // into tracing.
 func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
 	opts := []load.RunnerOption{load.WithGuard(rs.guard)}
-	if rs.heat != nil || rs.trace != nil {
-		heat, trace := rs.heat, rs.trace
+	if rs.heat != nil || rs.trace != nil || rs.latency != nil {
+		heat, trace, latency := rs.heat, rs.trace, rs.latency
 		opts = append(opts, load.WithEventSink(func(e load.StepEvent) {
 			if heat != nil {
 				heat.record(e)
 			}
 			if trace != nil {
 				trace.add(e)
+			}
+			if latency != nil {
+				latency.record(e.LatencyMs, time.Now())
 			}
 		}))
 	}
