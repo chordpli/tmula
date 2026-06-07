@@ -62,6 +62,49 @@ func TestRunConcurrentUsers(t *testing.T) {
 	}
 }
 
+func TestRunEmitsTerminalEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// a (a request) -> done (a template-less terminal: no request fires).
+	g := domain.ScenarioGraph{
+		ID:    "g",
+		Nodes: []domain.Node{{ID: "a", APITemplateID: "ta"}, {ID: "done"}},
+		Edges: []domain.Edge{{From: "a", To: "done", Weight: 1.0}},
+	}
+	tmpls := map[domain.ID]domain.APITemplate{"ta": {Method: "GET", Path: "/a"}}
+
+	var mu sync.Mutex
+	var events []StepEvent
+	r := NewRunner(NewRESTAdapter(2*time.Second), srv.URL, tmpls,
+		WithEventSink(func(e StepEvent) { mu.Lock(); events = append(events, e); mu.Unlock() }))
+
+	if _, err := r.Run(context.Background(), g, "a", 5, []VirtualUser{{ID: "u"}}, 1); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var req, term *StepEvent
+	for i := range events {
+		switch {
+		case events[i].To == "a" && !events[i].Terminal:
+			req = &events[i]
+		case events[i].To == "done" && events[i].Terminal:
+			term = &events[i]
+		}
+	}
+	if req == nil {
+		t.Fatal("expected a request event for node a")
+	}
+	if term == nil {
+		t.Fatal("expected a terminal event reaching done (so the funnel can show completions)")
+	}
+	if term.From != "a" || !term.OK || term.Status != 0 || term.LatencyMs != 0 {
+		t.Errorf("terminal event = %+v, want {From:a OK:true Status:0 LatencyMs:0 Terminal:true}", *term)
+	}
+}
+
 func TestRunCancelledContextSendsNothing(t *testing.T) {
 	var hits int64
 	var mu sync.Mutex
