@@ -142,7 +142,32 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
-  const users = Array.from({ length: form.users }, (_, i) => ({ id: `u${i}` }))
+  // The open model generates its own sessions from the arrival rate and reads only
+  // a single template user, so don't materialize one object per "virtual user":
+  // that array is unused and would be megabytes — exceeding the request size limit
+  // — at large counts. Closed runs need the real pool, one entry per user.
+  const users =
+    form.workloadKind === 'open'
+      ? [{ id: 'u0' }]
+      : Array.from({ length: form.users }, (_, i) => ({ id: `u${i}` }))
+
+  // Size the safety cap to the configured load so the guard protects the target
+  // (host allowlist + a ceiling) without silently throttling what the operator
+  // asked for — a hardcoded 1000 rps would cap a 12k arrival rate. Both fields
+  // must be > 0 (the guard rejects 0); an "uncapped" (0) max-concurrency maps to a
+  // generous ceiling derived from the arrival rate.
+  // Math.ceil every term: the form fields can be fractional, and the server decodes
+  // these into ints (a non-integer would be rejected with a 400).
+  const rateCap =
+    form.workloadKind === 'open'
+      ? {
+          maxRps: Math.max(1000, Math.ceil(form.arrivalRate * 1.5)),
+          maxConcurrency:
+            form.maxConcurrency > 0
+              ? Math.max(Math.ceil(form.maxConcurrency), 200)
+              : Math.max(2000, Math.ceil(form.arrivalRate * 2)),
+        }
+      : { maxRps: Math.max(1000, Math.ceil(form.users)), maxConcurrency: Math.max(200, Math.ceil(form.users)) }
 
   const spec: RunSpec = {
     experiment: {
@@ -154,7 +179,7 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     targetEnv: {
       baseUrl: form.baseUrl,
       allowlist,
-      rateCap: { maxRps: 1000, maxConcurrency: 200 },
+      rateCap,
       envClass: 'dev',
     },
     graph,
