@@ -1,6 +1,6 @@
 # tmula examples
 
-A runnable example so you can see how tmula is used — point it at an API, send
+A runnable example so you can see how tmula is used: point it at an API, send
 virtual users through a behavior graph, and read the issues it finds **without
 recruiting real users**.
 
@@ -8,17 +8,17 @@ recruiting real users**.
 
 | Path | What it is |
 |---|---|
-| [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** — REST API, open (arrival-rate) model, personas, distributed runs |
+| [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** - REST API, open (arrival-rate) model, personas, distributed runs |
 | `sample-api/` | A tiny **"shop"** API (stdlib Go) with a few **deliberate bugs** to find (:9000) |
 | `shop/{graph,templates}.json`, `shop/scenario.yaml` | The shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs |
-| `ticketing-api/` | A second tiny API: **concert ticketing** — seat-contention 409s, a payment rush, sold-out 404s (:9100) |
+| `ticketing-api/` | A second tiny API: **concert ticketing** - seat-contention 409s, a payment rush, sold-out 404s (:9100) |
 | `ticketing/{graph,templates}.json`, `ticketing/scenario.yaml` | The ticketing journey (`events → detail → seats → hold → pay`) with exit drop-offs |
 | `imports/` | Importable **OpenAPI + HAR** samples for both domains (web UI → *Import from OpenAPI / HAR*, or `tmula init --from`) |
 | `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
 
 ### Two example domains
 
-There are two complete demos so it's clear how to swap tmula onto your own API —
+There are two complete demos so it's clear how to swap tmula onto your own API -
 a **shop** and a **concert-ticketing** site. Each ships a sample API server, a
 behavior graph + templates, and an importable OpenAPI/HAR. In the web console
 they're one-click **presets** ("Branching shop" / "Concert tickets"): picking one
@@ -32,7 +32,7 @@ go run ./examples/ticketing-api   # ticketing  → :9100
 
 ## Easiest: the `tmula run` CLI
 
-One binary, one command — no curl, no jq, no separately running server:
+One binary, one command. No curl, no jq, no separately running server:
 
 ```bash
 go build -o ./bin/tmula ./cmd/engine
@@ -74,7 +74,7 @@ The sample API is healthy on the happy path but has planted bugs:
 - `GET /search` has an occasional slow response (~5% tail latency, ~180 ms)
 - `GET /product` returns 404 ~2% of the time (broken product link)
 - `POST /cart` fails ~8% of the time (an intermittent 500)
-- `POST /checkout` **saturates under concurrent load** but **recovers when traffic drops** — unlike a permanent outage
+- `POST /checkout` **saturates under concurrent load** but **recovers when traffic drops** - unlike a permanent outage
 
 So the run reports something like:
 
@@ -125,11 +125,11 @@ findings identically.
 ## Adapt it to your own API
 
 1. Point `targetEnv.baseUrl` at your service and add its host to `allowlist`
-   (only dev/staging hosts are allowed — prod is locked).
+   (only dev/staging hosts are allowed - prod is locked).
 2. Edit `shop/templates.json` with your real endpoints (method, path, headers,
    `payloadTemplate`). Use `{{.token}}` / `{{.subject}}` in headers/payloads to
    inject per-user credentials.
 3. Edit `shop/graph.json` to describe how a real user moves between them. Mark
-   required-order edges with `"dependency": true` — those steps are never
+   required-order edges with `"dependency": true` - those steps are never
    skipped, even when a virtual user deviates.
 4. Re-run. The findings now describe *your* service.
