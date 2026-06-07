@@ -42,7 +42,25 @@ type Runner struct {
 	baseURL   string
 	templates map[domain.ID]domain.APITemplate // keyed by APITemplate ID
 	guard     *safety.Guard                    // optional; nil = no enforcement
+	eventSink EventSink                        // optional; nil = no per-step events
 }
+
+// StepEvent is one request a virtual user made, emitted live for visualization.
+// From is the node the user came from ("" at the entry); To is the node that
+// made the request. OK is true on a non-error response below 400.
+type StepEvent struct {
+	UserID    string
+	From      string
+	To        string
+	Status    int
+	LatencyMs float64
+	OK        bool
+}
+
+// EventSink receives a StepEvent for every request a session makes. It is called
+// concurrently from many session goroutines, so it must be safe for concurrent
+// use; it should also be cheap (it runs on the request hot path).
+type EventSink func(StepEvent)
 
 // NewRunner builds a Runner. templates is keyed by APITemplate ID; a node with
 // an empty or unknown APITemplateID is treated as a pure state (no request).
@@ -62,6 +80,10 @@ type RunnerOption func(*Runner)
 // cannot redirect traffic off the allowlisted target — the rate/concurrency cap
 // (which throttles rather than drops), and the kill switch.
 func WithGuard(g *safety.Guard) RunnerOption { return func(r *Runner) { r.guard = g } }
+
+// WithEventSink streams a StepEvent for every request, so a caller (the control
+// plane) can show live per-user traffic. Leave it unset for normal runs.
+func WithEventSink(s EventSink) RunnerOption { return func(r *Runner) { r.eventSink = s } }
 
 // throttleInterval is how long a session waits before retrying a reservation the
 // rate/concurrency cap is currently refusing.
@@ -173,10 +195,13 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 
 	var results []StepResult
 	sent := false
+	var prevNode domain.ID // the node the user came from; "" at the entry
 	for _, nodeID := range path {
 		if ctx.Err() != nil {
 			break // cancelled (kill switch): stop this user's journey
 		}
+		from := prevNode
+		prevNode = nodeID // advance even for pure-state nodes, so edges are correct
 		tmpl, ok := nodeTmpl[nodeID]
 		if !ok {
 			continue // pure state node, no request
@@ -196,6 +221,16 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		}
 		resp, sErr := r.send(ctx, req)
 		results = append(results, StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
+		if r.eventSink != nil {
+			r.eventSink(StepEvent{
+				UserID:    u.ID,
+				From:      string(from),
+				To:        string(nodeID),
+				Status:    resp.StatusCode,
+				LatencyMs: resp.LatencyMs,
+				OK:        sErr == nil && resp.StatusCode < 400,
+			})
+		}
 		sent = true
 	}
 	return results
