@@ -154,10 +154,11 @@ function Operator() {
 
   const prevRunId = report ? previousRunId(history, report.run.id) : undefined
 
-  // Live traffic is honored only for small runs (the backend ignores it above the
-  // cap), so the toggle is gated to the same limit and auto-off when exceeded.
-  const traceTooMany = !traceable(form)
-  const traceOn = form.traceEnabled && !traceTooMany
+  // Live traffic is now honored at any scale. The run size only picks the render
+  // mode: small runs animate each request ('events'); large runs draw an aggregate
+  // per-edge heatmap that stays cheap no matter how many requests flow.
+  const traceOn = form.traceEnabled
+  const liveMode: 'events' | 'heatmap' = traceable(form) ? 'events' : 'heatmap'
   // Parse the scenario graph for the live view, reusing the same guarded pattern
   // as buildRunSpec: if it does not parse, just skip the visualization.
   const parsedGraph = traceOn ? safeParseGraph(form.graphJSON) : null
@@ -285,17 +286,19 @@ function Operator() {
             <input value={form.start} onChange={(e) => set('start', e.target.value)} style={inp} />
           </Field>
         </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: traceTooMany ? '#999' : '#444' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#444' }}>
           <input
             type="checkbox"
             checked={traceOn}
-            disabled={traceTooMany}
             onChange={(e) => set('traceEnabled', e.target.checked)}
           />
-          Live traffic — animate each request as it runs
-          {traceTooMany && (
+          Live traffic — per-request for small runs, heatmap for large
+          {traceOn && (
             <span style={{ color: '#999' }}>
-              · only for small runs (≤{MAX_TRACE_USERS} {form.workloadKind === 'open' ? 'max concurrency' : 'users'})
+              ·{' '}
+              {liveMode === 'events'
+                ? `animating each request (≤${MAX_TRACE_USERS} ${form.workloadKind === 'open' ? 'max concurrency' : 'users'})`
+                : `aggregate heatmap (>${MAX_TRACE_USERS} ${form.workloadKind === 'open' ? 'max concurrency' : 'users'})`}
             </span>
           )}
         </label>
@@ -345,6 +348,7 @@ function Operator() {
                 start={form.start}
                 runId={runId}
                 active={status === 'running'}
+                mode={liveMode}
               />
             </div>
           )}

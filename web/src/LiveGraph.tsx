@@ -1,12 +1,32 @@
 import type React from 'react'
 import { useEffect, useMemo, useReducer, useRef } from 'react'
-import { layoutGraph, parseTraceFrame, traceURL, type TraceEvent } from './api'
+import {
+  formatCount,
+  heatColor,
+  heatmapURL,
+  heatWidth,
+  layoutGraph,
+  parseHeatFrame,
+  parseTraceFrame,
+  traceURL,
+  type HeatEdge,
+  type TraceEvent,
+} from './api'
 
-// LiveGraph animates a run's per-step trace over its scenario graph: each request
-// is a dot that travels from one node to the next (a pulse at the entry node),
-// green when it succeeded and red when it failed. The graph is laid out by
-// layoutGraph (a pure, tested helper); all motion runs from a single
-// requestAnimationFrame loop so it stays smooth and the dot count can be capped.
+// LiveGraph visualizes a run's traffic over its scenario graph. It has two modes:
+//
+//   'events'  — the Phase-1 view for small runs: every request is a dot that
+//               travels from one node to the next (a pulse at the entry node),
+//               green when it succeeded and red when it failed.
+//   'heatmap' — the Phase-2 view that works at any scale (millions of requests):
+//               instead of per-request dots it draws each edge weighted by its
+//               cumulative request volume and tinted by its error ratio, so a
+//               glance shows where traffic concentrates and where errors are.
+//
+// The graph is laid out by layoutGraph (a pure, tested helper). In 'events' mode
+// all motion runs from a single requestAnimationFrame loop so it stays smooth and
+// the dot count can be capped; 'heatmap' mode does no per-dot animation (it is an
+// aggregate) beyond a subtle opacity pulse when a fresh frame arrives.
 
 interface GraphNode {
   id: string
@@ -25,6 +45,7 @@ interface LiveGraphProps {
   start: string
   runId: string
   active: boolean
+  mode: 'events' | 'heatmap'
 }
 
 // Visual + motion tuning. Colors track the GitHub-dark palette so green/red
@@ -34,6 +55,7 @@ const DOT_R = 6 // travelling request dot radius
 const PAD = 60 // padding around the graph's bounding box
 const TRAVEL_MS = 600 // how long a dot takes to cross an edge / a pulse to fade
 const MAX_DOTS = 300 // cap concurrent dots so the RAF loop stays cheap
+const PULSE_MS = 450 // heatmap: how long the opacity pulse on a fresh frame lasts
 const OK_COLOR = '#3fb950'
 const ERR_COLOR = '#f85149'
 const BG = '#0d1117'
@@ -58,7 +80,7 @@ interface NodeCount {
   errors: number
 }
 
-export default function LiveGraph({ graph, start, runId, active }: LiveGraphProps) {
+export default function LiveGraph({ graph, start, runId, active, mode }: LiveGraphProps) {
   // Layout is pure and depends only on the graph + start, so memoize it.
   const positions = useMemo(
     () => layoutGraph(graph.nodes, graph.edges, start),
@@ -69,6 +91,28 @@ export default function LiveGraph({ graph, start, runId, active }: LiveGraphProp
   // fit any graph shape responsively.
   const view = useMemo(() => boundingBox(positions, PAD), [positions])
 
+  return mode === 'heatmap' ? (
+    <HeatmapView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
+  ) : (
+    <EventsView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
+  )
+}
+
+// Positions/view are computed once by the parent and shared by both modes.
+interface ModeProps {
+  graph: { nodes: GraphNode[]; edges: GraphEdge[] }
+  start: string
+  runId: string
+  active: boolean
+  positions: Record<string, { x: number; y: number }>
+  view: { x: number; y: number; w: number; h: number }
+}
+
+// ---------------------------------------------------------------------------
+// Events mode (Phase 1): per-request travelling dots.
+// ---------------------------------------------------------------------------
+
+function EventsView({ graph, start, runId, active, positions, view }: ModeProps) {
   // Live, mutable state lives in refs so the rAF loop and SSE handler can update
   // it without forcing a React render per event. A single forced render per
   // animation frame (via tick) reads these refs to paint.
@@ -180,20 +224,10 @@ export default function LiveGraph({ graph, start, runId, active }: LiveGraphProp
         width="100%"
         role="img"
         aria-label="Live request traffic over the scenario graph"
-        style={{ display: 'block', background: BG, borderRadius: 8, maxHeight: 460 }}
+        style={canvas}
       >
         <defs>
-          <marker
-            id="lg-arrow"
-            viewBox="0 0 10 10"
-            refX="9"
-            refY="5"
-            markerWidth="7"
-            markerHeight="7"
-            orient="auto-start-reverse"
-          >
-            <path d="M0,0 L10,5 L0,10 z" fill={EDGE} />
-          </marker>
+          <ArrowMarker />
         </defs>
 
         {/* Edges first so nodes and dots paint on top. */}
@@ -303,6 +337,246 @@ export default function LiveGraph({ graph, start, runId, active }: LiveGraphProp
   )
 }
 
+// ---------------------------------------------------------------------------
+// Heatmap mode (Phase 2): per-edge aggregate flow, scales to any run size.
+// ---------------------------------------------------------------------------
+
+// edgeKey identifies an edge by endpoints so stream aggregates can be matched to
+// the declared graph edges. Entry edges (from === "") key on their destination.
+function edgeKey(from: string, to: string): string {
+  return `${from} ${to}`
+}
+
+function HeatmapView({ graph, start, runId, active, positions, view }: ModeProps) {
+  // The latest per-edge aggregates, keyed by endpoints. Held in a ref so the SSE
+  // handler can replace it without a render per frame; tick() repaints on update.
+  const heatRef = useRef<Map<string, HeatEdge>>(new Map())
+  const totalRef = useRef(0) // cumulative request count across all edges
+  const pulseRef = useRef(0) // performance.now() of the last frame, drives the pulse
+  const rafRef = useRef<number | null>(null)
+  const [, tick] = useReducer((n: number) => n + 1, 0)
+
+  // Drive a short opacity pulse after each frame so the graph visibly "breathes"
+  // on update without animating individual requests. The loop coasts to a stop
+  // once the pulse has elapsed, so it never spins when traffic is idle.
+  const ensurePulse = useRef<() => void>(() => {})
+  ensurePulse.current = () => {
+    if (rafRef.current !== null) return
+    const step = () => {
+      const elapsed = performance.now() - pulseRef.current
+      if (elapsed < PULSE_MS) {
+        rafRef.current = requestAnimationFrame(step)
+      } else {
+        rafRef.current = null
+      }
+      tick()
+    }
+    rafRef.current = requestAnimationFrame(step)
+  }
+
+  function ingest(edges: HeatEdge[]) {
+    const heat = heatRef.current
+    let total = 0
+    for (const e of edges) {
+      heat.set(edgeKey(e.from, e.to), e)
+    }
+    // Counts are cumulative, so the total is just the sum of the current edges.
+    for (const e of heat.values()) total += e.requests
+    totalRef.current = total
+    pulseRef.current = performance.now()
+    ensurePulse.current()
+  }
+
+  // Open the heatmap stream while active; tear it down on unmount, when active
+  // goes false, on the done frame, or when the run id changes.
+  useEffect(() => {
+    if (!active) return
+    heatRef.current = new Map()
+    totalRef.current = 0
+    tick()
+
+    const es = new EventSource(heatmapURL(runId))
+    es.onmessage = (e: MessageEvent) => {
+      const line = typeof e.data === 'string' && e.data.startsWith('data:') ? e.data : `data: ${e.data}`
+      const frame = parseHeatFrame(line)
+      if (!frame) return // malformed frame: ignore, keep the stream open
+      if (frame.edges?.length) ingest(frame.edges)
+      if (frame.done) es.close()
+    }
+    es.onerror = () => {
+      es.close()
+    }
+    return () => {
+      es.close()
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [active, runId])
+
+  const heat = heatRef.current
+
+  // The busiest edge sets the scale so widths stay legible whether the peak is 12
+  // or 12 million requests (ln keeps a wide range readable in one frame).
+  let maxRequests = 0
+  for (const e of heat.values()) if (e.requests > maxRequests) maxRequests = e.requests
+
+  // A short fade-in right after each frame, applied as a global opacity nudge so
+  // the whole graph pulses on update. 1 when idle (no in-flight pulse).
+  const sincePulse = performance.now() - pulseRef.current
+  const pulse = sincePulse < PULSE_MS ? 0.82 + 0.18 * (sincePulse / PULSE_MS) : 1
+
+  // Entry edges (from === "") have no source node to draw a line from; surface
+  // them as a halo on the destination node instead.
+  const entryHeat = new Map<string, HeatEdge>()
+  for (const e of heat.values()) {
+    if (e.from === '' && positions[e.to]) entryHeat.set(e.to, e)
+  }
+
+  return (
+    <figure style={figure}>
+      <figcaption style={caption}>
+        <span style={{ color: TEXT, fontWeight: 600 }}>Live traffic</span>
+        <span style={{ color: MUTED }}> — heatmap: edge weight is request volume</span>
+        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 14, alignItems: 'center' }}>
+          <span style={{ color: MUTED, fontSize: 12 }}>
+            <span style={{ color: TEXT, fontWeight: 600 }}>{formatCount(totalRef.current)}</span> requests
+          </span>
+          <Legend color={OK_COLOR} label="healthy" />
+          <Legend color={ERR_COLOR} label="errors" />
+        </span>
+      </figcaption>
+      <svg
+        viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
+        width="100%"
+        role="img"
+        aria-label="Aggregate request traffic heatmap over the scenario graph"
+        style={canvas}
+      >
+        <defs>
+          <ArrowMarker />
+        </defs>
+
+        {/* Edges, weighted by volume and tinted by error ratio. Idle edges keep
+            the faint base stroke so the graph's shape stays visible. */}
+        <g opacity={pulse}>
+          {graph.edges.map((e, i) => {
+            const a = positions[e.from]
+            const b = positions[e.to]
+            if (!a || !b) return null
+            const h = heat.get(edgeKey(e.from, e.to))
+            const hot = h !== undefined && h.requests > 0
+            const w = hot ? heatWidth(h.requests, maxRequests) : 1.5
+            const color = hot ? heatColor(h.errors, h.requests) : EDGE
+            const { x1, y1, x2, y2 } = trimToRim(a, b, NODE_R + 2)
+            const mid = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 }
+            return (
+              <g key={`e${i}`}>
+                <line
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={color}
+                  strokeWidth={w}
+                  strokeLinecap="round"
+                  strokeDasharray={e.dependency ? '6 5' : undefined}
+                  markerEnd="url(#lg-arrow)"
+                  opacity={hot ? 0.95 : 0.6}
+                />
+                {hot && (
+                  <text
+                    x={mid.x}
+                    y={mid.y - 6}
+                    textAnchor="middle"
+                    fontSize={11}
+                    fontFamily="ui-monospace, monospace"
+                    fill={TEXT}
+                    style={labelHalo}
+                  >
+                    {formatCount(h.requests)}
+                    {h.errors > 0 && <tspan fill={ERR_COLOR}> · {formatCount(h.errors)} err</tspan>}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+        </g>
+
+        {/* Nodes, with a colored halo for entry traffic (the "" -> node edge). */}
+        <g opacity={pulse}>
+          {graph.nodes.map((n) => {
+            const p = positions[n.id]
+            if (!p) return null
+            const entry = entryHeat.get(n.id)
+            const isStart = n.id === start
+            return (
+              <g key={n.id}>
+                {entry && entry.requests > 0 && (
+                  <circle
+                    cx={p.x}
+                    cy={p.y}
+                    r={NODE_R + 6}
+                    fill="none"
+                    stroke={heatColor(entry.errors, entry.requests)}
+                    strokeWidth={Math.max(2, heatWidth(entry.requests, maxRequests) - 2)}
+                    opacity={0.85}
+                  />
+                )}
+                <circle
+                  cx={p.x}
+                  cy={p.y}
+                  r={NODE_R}
+                  fill={NODE_FILL}
+                  stroke={isStart ? OK_COLOR : NODE_STROKE}
+                  strokeWidth={isStart ? 2.5 : 1.5}
+                />
+                <text
+                  x={p.x}
+                  y={p.y + 4}
+                  textAnchor="middle"
+                  fontSize={13}
+                  fontFamily="ui-monospace, monospace"
+                  fill={TEXT}
+                >
+                  {n.id}
+                </text>
+                {entry && entry.requests > 0 && (
+                  <text x={p.x} y={p.y + NODE_R + 16} textAnchor="middle" fontSize={11} fill={MUTED}>
+                    {formatCount(entry.requests)} in
+                    {entry.errors > 0 && <tspan fill={ERR_COLOR}> · {formatCount(entry.errors)} err</tspan>}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+        </g>
+      </svg>
+    </figure>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Shared presentation.
+// ---------------------------------------------------------------------------
+
+function ArrowMarker() {
+  return (
+    <marker
+      id="lg-arrow"
+      viewBox="0 0 10 10"
+      refX="9"
+      refY="5"
+      markerWidth="7"
+      markerHeight="7"
+      orient="auto-start-reverse"
+    >
+      <path d="M0,0 L10,5 L0,10 z" fill={EDGE} />
+    </marker>
+  )
+}
+
 function Legend({ color, label }: { color: string; label: string }) {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: MUTED, fontSize: 12 }}>
@@ -372,4 +646,18 @@ const caption: React.CSSProperties = {
   fontSize: 13,
   marginBottom: 8,
   padding: '0 2px',
+}
+const canvas: React.CSSProperties = {
+  display: 'block',
+  background: BG,
+  borderRadius: 8,
+  maxHeight: 460,
+}
+// A subtle dark backdrop behind edge labels so the count stays readable where it
+// crosses a thick, brightly-colored stroke.
+const labelHalo: React.CSSProperties = {
+  paintOrder: 'stroke',
+  stroke: BG,
+  strokeWidth: 3,
+  strokeLinejoin: 'round',
 }
