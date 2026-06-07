@@ -28,6 +28,21 @@ func (o RequestObservation) unavailable() bool {
 	return o.StatusCode >= 500 || o.ErrorClass == "timeout" || o.ErrorClass == "transport"
 }
 
+// contractSignal reports whether o is a contract violation: a non-mutated
+// happy-path request that returned a 5xx or failed an assertion. Shared by the
+// obs-list classifier (classifyContract) and the Summary tally so the predicate
+// cannot drift between the two paths.
+func (o RequestObservation) contractSignal() bool {
+	return !o.Mutated && (o.StatusCode >= 500 || o.ErrorClass == "assertion")
+}
+
+// mutationSignal reports whether o is a mutation finding: a mutated input that
+// surfaced an error. Shared by the obs-list classifier (classifyMutation) and
+// the Summary tally so the predicate cannot drift between the two paths.
+func (o RequestObservation) mutationSignal() bool {
+	return o.Mutated && o.failed()
+}
+
 // ClassifyConfig holds the thresholds used to turn observations into findings.
 type ClassifyConfig struct {
 	ErrorRateThreshold float64 // overall error rate above this -> threshold finding
@@ -72,7 +87,7 @@ func classifyMutation(runID domain.ID, obs []RequestObservation) []domain.Findin
 	counts := map[domain.ID]int{}
 	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
-		if o.Mutated && o.failed() {
+		if o.mutationSignal() {
 			counts[o.APIID]++
 			if _, ok := firstSeen[o.APIID]; !ok {
 				firstSeen[o.APIID] = o.TS
@@ -89,10 +104,7 @@ func classifyContract(runID domain.ID, obs []RequestObservation) []domain.Findin
 	counts := map[domain.ID]int{}
 	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
-		if o.Mutated {
-			continue
-		}
-		if o.StatusCode >= 500 || o.ErrorClass == "assertion" {
+		if o.contractSignal() {
 			counts[o.APIID]++
 			if _, ok := firstSeen[o.APIID]; !ok {
 				firstSeen[o.APIID] = o.TS
@@ -103,20 +115,40 @@ func classifyContract(runID domain.ID, obs []RequestObservation) []domain.Findin
 		"%d contract violation(s) on %s (unexpected error on the happy path)")
 }
 
+// classifyAvailability flags APIs that suffered a long enough run of consecutive
+// unavailable() results. The streak is evaluated in per-endpoint timestamp order
+// (o.TS), so it no longer depends on the interleave in which concurrently-streamed
+// results happened to be recorded: the same multiset of observations yields the
+// same finding regardless of arrival order. Observations sharing an equal TS keep
+// their insertion order (stable tie-break), which preserves the behaviour of the
+// zero-TS / monotonic-TS test fixtures while making distinctly-timed events robust.
 func classifyAvailability(runID domain.ID, obs []RequestObservation, run int) []domain.Finding {
 	if run <= 0 {
 		return nil
 	}
-	maxRun := map[domain.ID]int{}
-	cur := map[domain.ID]int{}
+	// Group by API in first-seen order, then sort each group by completion time.
+	byAPI := map[domain.ID][]RequestObservation{}
+	order := make([]domain.ID, 0)
 	for _, o := range obs {
-		if o.unavailable() {
-			cur[o.APIID]++
-			if cur[o.APIID] > maxRun[o.APIID] {
-				maxRun[o.APIID] = cur[o.APIID]
+		if _, ok := byAPI[o.APIID]; !ok {
+			order = append(order, o.APIID)
+		}
+		byAPI[o.APIID] = append(byAPI[o.APIID], o)
+	}
+	maxRun := map[domain.ID]int{}
+	for _, api := range order {
+		group := byAPI[api]
+		sort.SliceStable(group, func(i, j int) bool { return group[i].TS.Before(group[j].TS) })
+		cur := 0
+		for _, o := range group {
+			if o.unavailable() {
+				cur++
+				if cur > maxRun[api] {
+					maxRun[api] = cur
+				}
+			} else {
+				cur = 0
 			}
-		} else {
-			cur[o.APIID] = 0
 		}
 	}
 	counts := map[domain.ID]int{}
@@ -145,24 +177,30 @@ func classifyThreshold(runID domain.ID, obs []RequestObservation, cfg ClassifyCo
 	if total == 0 {
 		return nil
 	}
-	var findings []domain.Finding
 	rate := float64(failed) / float64(total)
-	if cfg.ErrorRateThreshold > 0 && rate > cfg.ErrorRateThreshold {
-		findings = append(findings, domain.Finding{
-			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
-			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", rate, cfg.ErrorRateThreshold),
-		})
-	}
+	// Only sort + compute p95 when the p95 gate is enabled (preserves the
+	// sort-only-when-needed behaviour); pass p95=0 when disabled.
+	var p95 float64
 	if cfg.P95LatencyMs > 0 {
 		sort.Float64s(latencies)
-		if p95 := percentile(latencies, 0.95); p95 > cfg.P95LatencyMs {
-			findings = append(findings, domain.Finding{
-				RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
-				Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", p95, cfg.P95LatencyMs),
-			})
-		}
+		p95 = percentile(latencies, 0.95)
 	}
-	return findings
+	return thresholdFindings(runID, rate, p95, cfg)
+}
+
+// thresholdFindings builds the 0-2 threshold findings shared by the obs-list and
+// Summary classifiers, so their messages and comparisons cannot drift.
+func thresholdFindings(runID domain.ID, errorRate, p95 float64, cfg ClassifyConfig) []domain.Finding {
+	var out []domain.Finding
+	if cfg.ErrorRateThreshold > 0 && errorRate > cfg.ErrorRateThreshold {
+		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", errorRate, cfg.ErrorRateThreshold)})
+	}
+	if cfg.P95LatencyMs > 0 && p95 > cfg.P95LatencyMs {
+		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", p95, cfg.P95LatencyMs)})
+	}
+	return out
 }
 
 // findingsFromCounts builds one finding per API present in counts, in stable

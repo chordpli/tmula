@@ -2,6 +2,7 @@ package obs
 
 import (
 	"testing"
+	"time"
 
 	"github.com/chordpli/tmula/internal/domain"
 )
@@ -78,6 +79,77 @@ func TestAvailabilityResetsOnSuccess(t *testing.T) {
 	// contract findings appear (non-mutated 5xx), but no availability.
 	if findingsByCategory(fs)[domain.FindingAvailability] != 0 {
 		t.Error("a success in the middle should reset the consecutive-failure run")
+	}
+}
+
+// TestClassifyAvailabilityOrderRobust pins TASK 1: availability streaks are
+// counted in per-endpoint timestamp order, so the same multiset of observations
+// yields the same finding regardless of the arrival order in which interleaved,
+// concurrently-streamed results were recorded.
+func TestClassifyAvailabilityOrderRobust(t *testing.T) {
+	base := time.Unix(1000, 0)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	// Part 1: a clean 5-long consecutive-failure streak by TS for one API.
+	// Build the same set in two different ARRIVAL orders and assert both produce
+	// the same availability finding count. ts 1..5 fail, then 6..7 succeed.
+	canonical := []RequestObservation{
+		{APIID: "pay", ErrorClass: "timeout", TS: at(1)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(2)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(3)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(4)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(5)},
+		{APIID: "pay", StatusCode: 200, TS: at(6)},
+		{APIID: "pay", StatusCode: 200, TS: at(7)},
+	}
+	// A deterministic (hand-picked, non-random) permutation of the same slice.
+	shuffled := []RequestObservation{
+		canonical[6], canonical[2], canonical[0], canonical[5],
+		canonical[4], canonical[1], canonical[3],
+	}
+
+	sortedAgg := NewAggregator()
+	for _, o := range canonical {
+		sortedAgg.Add(o)
+	}
+	shuffledAgg := NewAggregator()
+	for _, o := range shuffled {
+		shuffledAgg.Add(o)
+	}
+
+	cfg := ClassifyConfig{AvailabilityRun: 5}
+	gotSorted := findingsByCategory(sortedAgg.Classify("r", cfg))[domain.FindingAvailability]
+	gotShuffled := findingsByCategory(shuffledAgg.Classify("r", cfg))[domain.FindingAvailability]
+	if gotSorted != 1 {
+		t.Fatalf("sorted order: want 1 availability finding, got %d", gotSorted)
+	}
+	if gotSorted != gotShuffled {
+		t.Fatalf("availability finding count must not depend on arrival order: sorted=%d shuffled=%d", gotSorted, gotShuffled)
+	}
+
+	// Part 2: arrival order would HIDE the streak, but timestamp order reveals it.
+	// The five "down" timestamps for api "pay" are at ts 1..5 (consecutive in
+	// time), but in ARRIVAL order each is separated by a later-timestamped success
+	// (ts 100+) for the SAME api. Walking by arrival resets the run on every
+	// success and never reaches 5; walking by TS sees the contiguous 1..5 streak.
+	interleaved := []RequestObservation{
+		{APIID: "pay", StatusCode: 200, TS: at(100)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(1)},
+		{APIID: "pay", StatusCode: 200, TS: at(101)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(2)},
+		{APIID: "pay", StatusCode: 200, TS: at(102)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(3)},
+		{APIID: "pay", StatusCode: 200, TS: at(103)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(4)},
+		{APIID: "pay", StatusCode: 200, TS: at(104)},
+		{APIID: "pay", ErrorClass: "timeout", TS: at(5)},
+	}
+	ia := NewAggregator()
+	for _, o := range interleaved {
+		ia.Add(o)
+	}
+	if got := findingsByCategory(ia.Classify("r", cfg))[domain.FindingAvailability]; got != 1 {
+		t.Fatalf("timestamp order should reveal the 5-long streak hidden by arrival interleave, got %d availability findings", got)
 	}
 }
 
