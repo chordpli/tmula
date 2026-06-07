@@ -27,7 +27,10 @@ func traceSmallEnough(spec RunSpec) bool {
 		c := spec.Workload.MaxConcurrency
 		return c > 0 && c <= traceMaxUsers
 	}
-	return len(spec.Users) > 0 && len(spec.Users) <= traceMaxUsers
+	// Size off the effective pool (poolSize), so a small closed run requested as a
+	// count — with no shipped Users array — still opts into per-request tracing.
+	n := spec.poolSize()
+	return n > 0 && n <= traceMaxUsers
 }
 
 // traceWireEvent is one step event as streamed to the browser.

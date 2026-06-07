@@ -36,7 +36,14 @@ type RunSpec struct {
 	Start      domain.ID                        `json:"start"`
 	MaxSteps   int                              `json:"maxSteps"`
 	Users      []load.VirtualUser               `json:"users"`
-	Seed       int64                            `json:"seed"`
+	// UserCount sizes the closed-model virtual-user pool when Users is empty: the
+	// server synthesizes u0..u{UserCount-1} at run (and shard) time instead of the
+	// client shipping one object per user, so a huge closed run fits in a small
+	// request body rather than overflowing the create-request size limit. An
+	// explicit Users list always wins; the open model ignores it (it generates its
+	// own sessions from the arrival rate).
+	UserCount int   `json:"userCount,omitempty"`
+	Seed      int64 `json:"seed"`
 	// Workers lists gRPC worker addresses to distribute the run across. When
 	// empty the run executes locally in-process; when set, the control plane
 	// dials each worker, fans the virtual users out across them, and aggregates
@@ -99,8 +106,9 @@ func (r RunSpec) Validate() error {
 		}
 	}
 	// The open model generates its own sessions from the arrival rate, so it
-	// needs no user list; every other path needs at least one user.
-	if !r.isOpen() && len(r.Users) == 0 {
+	// needs no user list; every other path needs at least one user — supplied
+	// either as an explicit pool or as a positive UserCount the server expands.
+	if !r.isOpen() && r.poolSize() <= 0 {
 		return fmt.Errorf("api: at least one virtual user is required")
 	}
 	// The open model runs in-process only; refuse worker fields rather than
@@ -133,6 +141,32 @@ func (r RunSpec) Validate() error {
 // isOpen reports whether the spec uses the open (arrival-rate) workload model.
 func (r RunSpec) isOpen() bool {
 	return r.Workload != nil && r.Workload.Kind == domain.WorkloadOpen
+}
+
+// poolSize is the closed-model virtual-user count: the explicit Users length when
+// the client shipped a pool, otherwise the UserCount it asked the server to
+// synthesize. It sizes both the local pool and the distributed fan-out, so the two
+// paths agree on how many users a count-only run drives.
+func (r RunSpec) poolSize() int {
+	if len(r.Users) > 0 {
+		return len(r.Users)
+	}
+	return r.UserCount
+}
+
+// closedUsers returns the virtual-user pool for a closed run. It returns the
+// explicit Users when the client sent them; otherwise it synthesizes a stable
+// u0..u{UserCount-1} pool so a large run need not ship one object per user. Callers
+// reach it only after Validate has ensured poolSize > 0, so the count is positive.
+func (r RunSpec) closedUsers() []load.VirtualUser {
+	if len(r.Users) > 0 {
+		return r.Users
+	}
+	users := make([]load.VirtualUser, r.UserCount)
+	for i := range users {
+		users[i] = load.VirtualUser{ID: fmt.Sprintf("u%d", i)}
+	}
+	return users
 }
 
 // validateTemplatePath rejects a template path that could redirect a request off
@@ -268,6 +302,15 @@ func (s *Server) Handler() http.Handler { return s.mux }
 // exhaust memory.
 const maxRequestBytes = 4 << 20 // 4 MiB
 
+// maxLocalPoolUsers bounds the virtual-user pool an in-process (non-distributed)
+// closed run synthesizes from UserCount. The request-body limit used to cap this
+// transitively — a pool shipped as one object per user hit maxRequestBytes around
+// ~270k — but now that the pool is a count, an explicit ceiling keeps a tiny
+// request from asking the control plane to allocate an unbounded pool (and a
+// goroutine per user). A larger closed run must fan out across workers, the path
+// built for that scale.
+const maxLocalPoolUsers = 1_000_000
+
 // Shutdown cancels every in-flight run and waits for their goroutines to drain,
 // or until ctx is done. Call it during graceful shutdown so background runs are
 // not abandoned.
@@ -401,6 +444,13 @@ func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(spec.Workers) == 0 && len(s.defaultWorkers) > 0 {
 		spec.Workers = append([]string(nil), s.defaultWorkers...)
+	}
+	// A closed run with no workers executes in-process and synthesizes its whole
+	// pool locally, so bound it — checked after default workers are applied, so a
+	// run that will distribute (the path built for huge pools) is exempt.
+	if len(spec.Workers) == 0 && !spec.isOpen() && spec.poolSize() > maxLocalPoolUsers {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("api: closed pool of %d exceeds the in-process limit of %d; distribute across workers to run larger", spec.poolSize(), maxLocalPoolUsers))
+		return
 	}
 	id := s.nextID("exp")
 	spec.id = id
@@ -609,7 +659,9 @@ func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
 // each step into the run's collector and finding aggregator.
 func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
 	runner := s.runnerFor(rs, spec)
-	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
+	// closedUsers synthesizes the pool from UserCount when the client sent only a
+	// count (the large-run path), or returns the explicit pool as-is.
+	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.closedUsers(), spec.Seed)
 	ts := s.now()
 	for _, res := range results {
 		cls := errorClass(res)
@@ -643,7 +695,9 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 
 	shardSpec := shardSpecFor(spec)
 	ts := s.now()
-	_, steps, err := coord.Distribute(ctx, shardSpec, len(spec.Users))
+	// The coordinator splits the pool by count and each worker synthesizes its own
+	// shard of users, so only poolSize crosses here — never the materialized array.
+	_, steps, err := coord.Distribute(ctx, shardSpec, spec.poolSize())
 	if err != nil {
 		return fmt.Errorf("api: distribute run: %w", err)
 	}
@@ -678,7 +732,7 @@ func (s *Server) executeDistributedSummary(ctx context.Context, rs *runState, sp
 		return obs.Stats{}, nil, fmt.Errorf("api: build coordinator: %w", err)
 	}
 
-	summary, err := coord.DistributeSummary(ctx, shardSpecFor(spec), len(spec.Users))
+	summary, err := coord.DistributeSummary(ctx, shardSpecFor(spec), spec.poolSize())
 	if err != nil {
 		return obs.Stats{}, nil, fmt.Errorf("api: distribute summary: %w", err)
 	}
