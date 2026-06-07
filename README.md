@@ -7,6 +7,13 @@
   plain load generation and manual testing miss.
 </p>
 
+<p align="center">
+  <img src="docs/images/01-flow-map.png" width="840"
+       alt="tmula traffic-flow map: virtual users walking a branching shop journey (browse → search / category → product → cart → checkout → done); edge thickness is request volume and red counts mark where the happy path broke">
+  <br>
+  <sub><i>Live traffic flow from a branching-shop run — edge thickness is request volume, and the red counts mark where the happy path broke (cart / checkout 5xx).</i></sub>
+</p>
+
 ---
 
 ## What is tmula?
@@ -117,6 +124,20 @@ personas), hit **Run**, and watch it live:
 - a **latency heatmap** (time × latency band),
 - findings, a standalone **HTML report**, **compare with previous run**, and read-only **share** links,
 - a one-click **OpenAPI / HAR import** and scenario **presets**, in a bilingual UI (English / 한국어).
+
+<p align="center">
+  <img src="docs/images/02-config-load-model.png" width="480"
+       alt="Load-model configuration form: workload (open / closed), arrival rate, duration, max concurrency, think time, and weighted personas">
+  <br>
+  <sub><i>Dial in the load — an open arrival rate (or a closed pool that loops), think time, and weighted personas, each able to start at a different node.</i></sub>
+</p>
+
+<p align="center">
+  <img src="docs/images/03-latency-heatmap.png" width="760"
+       alt="Latency heatmap: request density by latency band (rows, 0–5 ms up to 5000+ ms) over wall-clock time (columns)">
+  <br>
+  <sub><i>The latency heatmap — request density by latency band (rows) over time (columns); most requests sit in the 0–10 ms bands with a thin tail.</i></sub>
+</p>
 
 > A plain `make build` / `go build` embeds only a placeholder page that tells you to run
 > `make web`. The CLI needs no UI build at all.
