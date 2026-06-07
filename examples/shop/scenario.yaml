@@ -5,16 +5,21 @@
 #
 # `flow` steps run in order; consecutive steps are linked automatically and a
 # step's `dependsOn` marks that edge as a required (never-skipped) dependency.
+# For the full branching graph (browse → search/category → product → cart →
+# checkout, with exit drop-offs at every stage), use shop/graph.json +
+# shop/templates.json directly via the REST API or the web UI.
 target: http://127.0.0.1:9000
 allow: [127.0.0.1]
 flow:
   - id: browse
     request: GET /browse
-  - id: products
-    request: GET /products
+  - id: search
+    request: GET /search
+  - id: product
+    request: GET /product
   - id: cart
     request: POST /cart
-    body: '{"productId":"p1","qty":1}'
+    body: '{"productId":"p7","qty":1}'
   - id: checkout
     request: POST /checkout
     body: '{"total":42}'

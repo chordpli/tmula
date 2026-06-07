@@ -1,6 +1,8 @@
 {
   "t_browse":   { "method": "GET",  "path": "/browse" },
-  "t_products": { "method": "GET",  "path": "/products" },
-  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p1\",\"qty\":1}" },
+  "t_search":   { "method": "GET",  "path": "/search" },
+  "t_category": { "method": "GET",  "path": "/category" },
+  "t_product":  { "method": "GET",  "path": "/product" },
+  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p7\",\"qty\":1}" },
   "t_checkout": { "method": "POST", "path": "/checkout", "payloadTemplate": "{\"total\":42}" }
 }

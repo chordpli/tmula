@@ -135,17 +135,19 @@ curl -s "$API/runs/compare?a=$RUN_BEFORE&b=$RUN_AFTER" > compare.html
 ./examples/run-demo.sh 100      # 100 유저
 ```
 
-샘플 "쇼핑몰" API(`:9000`) + 엔진(`:8080`)을 띄우고 `browse → products → cart → checkout`
-시나리오를 돌린 뒤 리포트를 출력합니다. (요구: `go`, `jq`, `curl`)
+샘플 "쇼핑몰" API(`:9000`) + 엔진(`:8080`)을 띄우고 `browse → search/category → product → cart → checkout`
+분기 시나리오를 돌린 뒤 리포트를 출력합니다. (요구: `go`, `jq`, `curl`)
 
 ```
 ------------- FINDINGS -------------
+  • [CRITICAL] contract: 6 contract violation(s) on product (unexpected 404 on the happy path)
+  • [CRITICAL] contract: 8 contract violation(s) on cart (unexpected error on the happy path)
   • [CRITICAL] contract: 90 contract violation(s) on checkout (unexpected error on the happy path)
-  • [CRITICAL] availability: 76 consecutive failures on checkout (saturation or downtime)
+  • [CRITICAL] availability: 53 consecutive failures on checkout (saturation or downtime)
   • [WARNING]  threshold: error rate 0.24 exceeded threshold 0.20
 ```
 
-샘플 API의 `checkout`은 부하를 받으면 무너지도록 심어져 있고, tmula가 **실제 유저가 겪기 전에** 그걸 잡습니다.
+샘플 API의 `product`는 ~2% 404, `cart`는 ~8% 500, `checkout`은 부하를 받으면 포화되지만 부하가 줄면 회복됩니다 — tmula가 **실제 유저가 겪기 전에** 그걸 잡습니다.
 
 ---
 
@@ -157,7 +159,8 @@ tmula에 주는 건 결국 이 셋입니다.
 ```json
 {
   "t_browse":   { "method": "GET",  "path": "/browse" },
-  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p1\",\"qty\":1}" },
+  "t_product":  { "method": "GET",  "path": "/product" },
+  "t_cart":     { "method": "POST", "path": "/cart",     "payloadTemplate": "{\"productId\":\"p7\",\"qty\":1}" },
   "t_checkout": { "method": "POST", "path": "/checkout", "payloadTemplate": "{\"total\":42}" }
 }
 ```
@@ -168,16 +171,23 @@ tmula에 주는 건 결국 이 셋입니다.
   "id": "shop",
   "nodes": [
     { "id": "browse",   "apiTemplateId": "t_browse" },
+    { "id": "product",  "apiTemplateId": "t_product" },
     { "id": "cart",     "apiTemplateId": "t_cart" },
-    { "id": "checkout", "apiTemplateId": "t_checkout" }
+    { "id": "checkout", "apiTemplateId": "t_checkout" },
+    { "id": "exit" }
   ],
   "edges": [
-    { "from": "browse", "to": "cart",     "weight": 0.7 },
-    { "from": "cart",   "to": "checkout", "weight": 0.8, "dependency": true }
+    { "from": "browse",  "to": "product",  "weight": 0.7 },
+    { "from": "browse",  "to": "exit",     "weight": 0.3 },
+    { "from": "product", "to": "cart",     "weight": 0.45 },
+    { "from": "product", "to": "exit",     "weight": 0.55 },
+    { "from": "cart",    "to": "checkout", "weight": 0.6, "dependency": true },
+    { "from": "cart",    "to": "exit",     "weight": 0.4 }
   ]
 }
 ```
 > `weight` = 그 간선으로 갈 확률, `dependency: true` = **절대 건너뛸 수 없는 순서**(cart 없이 checkout 불가).
+> `exit` 같은 template 없는 노드는 이탈 지점 — 유저 세션이 자연스럽게 종료됩니다.
 > 유저가 이탈(deviate)해도 의존성 간선은 깨지지 않습니다.
 
 **③ targetEnv — 대상 주소 + 안전장치**
@@ -230,15 +240,22 @@ EXP=$(curl -fsS -X POST "$API/experiments" -H 'Content-Type: application/json' -
                   "rateCap": { "maxRps":20000, "maxConcurrency":1000 }, "envClass":"dev" },
   "graph":      { "id":"shop", "nodes":[
                     {"id":"browse","apiTemplateId":"t_browse"},
+                    {"id":"product","apiTemplateId":"t_product"},
                     {"id":"cart","apiTemplateId":"t_cart"},
-                    {"id":"checkout","apiTemplateId":"t_checkout"}],
+                    {"id":"checkout","apiTemplateId":"t_checkout"},
+                    {"id":"exit"}],
                   "edges":[
-                    {"from":"browse","to":"cart","weight":0.8},
-                    {"from":"cart","to":"checkout","weight":0.9,"dependency":true}] },
+                    {"from":"browse","to":"product","weight":0.7},
+                    {"from":"browse","to":"exit","weight":0.3},
+                    {"from":"product","to":"cart","weight":0.45},
+                    {"from":"product","to":"exit","weight":0.55},
+                    {"from":"cart","to":"checkout","weight":0.6,"dependency":true},
+                    {"from":"cart","to":"exit","weight":0.4}] },
   "templates":  { "t_browse":{"method":"GET","path":"/browse"},
-                  "t_cart":{"method":"POST","path":"/cart","payloadTemplate":"{\"qty\":1}"},
+                  "t_product":{"method":"GET","path":"/product"},
+                  "t_cart":{"method":"POST","path":"/cart","payloadTemplate":"{\"productId\":\"p7\",\"qty\":1}"},
                   "t_checkout":{"method":"POST","path":"/checkout","payloadTemplate":"{\"total\":42}"} },
-  "start":"browse", "maxSteps":10, "users":[{"id":"u0"},{"id":"u1"}], "seed":1
+  "start":"browse", "maxSteps":12, "users":[{"id":"u0"},{"id":"u1"}], "seed":1
 }' | jq -r .id)
 
 # (2) 실행  →  202 {"runId":"run_..."}
@@ -457,13 +474,20 @@ curl -fsS -X POST "$API/experiments" -H 'Content-Type: application/json' -d '{
                   "rateCap": { "maxRps":50000, "maxConcurrency":20000 }, "envClass":"dev" },
   "graph":      { "id":"shop", "nodes":[
                     {"id":"browse","apiTemplateId":"t_browse"},
+                    {"id":"product","apiTemplateId":"t_product"},
                     {"id":"cart","apiTemplateId":"t_cart"},
-                    {"id":"checkout","apiTemplateId":"t_checkout"}],
+                    {"id":"checkout","apiTemplateId":"t_checkout"},
+                    {"id":"exit"}],
                   "edges":[
-                    {"from":"browse","to":"cart","weight":0.6},
-                    {"from":"cart","to":"checkout","weight":0.8,"dependency":true}] },
+                    {"from":"browse","to":"product","weight":0.7},
+                    {"from":"browse","to":"exit","weight":0.3},
+                    {"from":"product","to":"cart","weight":0.45},
+                    {"from":"product","to":"exit","weight":0.55},
+                    {"from":"cart","to":"checkout","weight":0.6,"dependency":true},
+                    {"from":"cart","to":"exit","weight":0.4}] },
   "templates":  { "t_browse":{"method":"GET","path":"/browse"},
-                  "t_cart":{"method":"POST","path":"/cart","payloadTemplate":"{\"qty\":1}"},
+                  "t_product":{"method":"GET","path":"/product"},
+                  "t_cart":{"method":"POST","path":"/cart","payloadTemplate":"{\"productId\":\"p7\",\"qty\":1}"},
                   "t_checkout":{"method":"POST","path":"/checkout","payloadTemplate":"{\"total\":42}"} },
   "start":"browse", "maxSteps":12, "users":[{"id":"u0"}], "seed":1,
 
@@ -496,11 +520,18 @@ curl -fsS -X POST "$API/experiments" -H 'Content-Type: application/json' -d "$(j
                 rateCap: { maxRps:50000, maxConcurrency:20000 }, envClass:"dev" },
   graph:      { id:"shop", nodes:[
                   {id:"browse",apiTemplateId:"t_browse"},
-                  {id:"cart",apiTemplateId:"t_cart"}],
-                edges:[{from:"browse",to:"cart",weight:0.8}] },
+                  {id:"product",apiTemplateId:"t_product"},
+                  {id:"cart",apiTemplateId:"t_cart"},
+                  {id:"exit"}],
+                edges:[
+                  {from:"browse",to:"product",weight:0.7},
+                  {from:"browse",to:"exit",weight:0.3},
+                  {from:"product",to:"cart",weight:0.45},
+                  {from:"product",to:"exit",weight:0.55}] },
   templates:  { t_browse:{method:"GET",path:"/browse"},
-                t_cart:{method:"POST",path:"/cart",payloadTemplate:"{\"qty\":1}"} },
-  start:"browse", maxSteps:10, seed:1,
+                t_product:{method:"GET",path:"/product"},
+                t_cart:{method:"POST",path:"/cart",payloadTemplate:"{\"productId\":\"p7\",\"qty\":1}"} },
+  start:"browse", maxSteps:12, seed:1,
   users: $users,
   workers: ["127.0.0.1:9101","127.0.0.1:9102"],
   aggregateWorkers: true
