@@ -1,0 +1,17 @@
+# Keep the build context small and reproducible — the image rebuilds the UI and
+# binaries from source, so committed artifacts and local junk are excluded.
+.git
+.github
+.claude
+.omc
+.shots
+bin
+docs
+# The web build is regenerated inside the image; never ship local node_modules/dist.
+web/node_modules
+web/dist
+# Stale embedded assets from a local `make embed`; the image embeds a fresh build.
+internal/web/static/assets
+# Docs and editor cruft — not needed to build.
+**/*.log
+.DS_Store

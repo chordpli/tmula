@@ -43,7 +43,20 @@ in runs **locally first** and **scales out** to distributed master/worker mode f
 
 Requirements: macOS / Linux. (Building from source needs Go 1.25+ and Node 20+.)
 
-**Install it (recommended)** — one line downloads a prebuilt single binary with the web UI baked in:
+**Try it instantly (Docker)** — no Go/Node, no install. One command brings up the console (real UI
+baked in) plus both example APIs, each with planted bugs:
+
+```bash
+git clone https://github.com/chordpli/tmula.git && cd tmula
+docker compose up                    # builds on first run, then starts everything
+```
+
+Open <http://localhost:8080>, pick the **shop** or **ticketing** preset, then point it at the bundled
+API: set **Base URL** to `http://sample-api:9000` (shop) or `http://ticketing-api:9100` (ticketing) and
+add that host (`sample-api` / `ticketing-api`) to the **Allowlist**, then hit **Run**. Inside the
+Compose network the engine reaches the SUTs by service name (not `localhost`), so both fields use it.
+
+**Install it** — one line downloads a prebuilt single binary with the web UI baked in:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
@@ -60,9 +73,13 @@ tmula run scenario.yaml              # run a scenario, print the findings
 
 ```bash
 git clone https://github.com/chordpli/tmula.git && cd tmula
-make web                             # build UI + embed + run the console on :8080
+make demo                            # UI + engine + both example APIs, all locally
+make web                             # just the console on :8080
 # CLI only (fast, placeholder UI):   make build
 ```
+
+With `make demo` the presets work as-is — they target `localhost:9000` / `:9100`, which the bundled
+shop and ticketing APIs serve. Ctrl-C stops all three.
 
 **Or just watch it find bugs** — one command, a sample API with planted bugs:
 
