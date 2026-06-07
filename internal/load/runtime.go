@@ -2,12 +2,14 @@ package load
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/engine"
+	"github.com/chordpli/tmula/internal/safety"
 )
 
 // ThinkFunc yields the pause a virtual user takes between two steps of its
@@ -39,12 +41,68 @@ type Runner struct {
 	adapter   Adapter
 	baseURL   string
 	templates map[domain.ID]domain.APITemplate // keyed by APITemplate ID
+	guard     *safety.Guard                    // optional; nil = no enforcement
 }
 
 // NewRunner builds a Runner. templates is keyed by APITemplate ID; a node with
 // an empty or unknown APITemplateID is treated as a pure state (no request).
-func NewRunner(adapter Adapter, baseURL string, templates map[domain.ID]domain.APITemplate) *Runner {
-	return &Runner{adapter: adapter, baseURL: baseURL, templates: templates}
+func NewRunner(adapter Adapter, baseURL string, templates map[domain.ID]domain.APITemplate, opts ...RunnerOption) *Runner {
+	r := &Runner{adapter: adapter, baseURL: baseURL, templates: templates}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
+}
+
+// RunnerOption customizes a Runner.
+type RunnerOption func(*Runner)
+
+// WithGuard enforces the safety policy on every request the runner sends: the
+// host allowlist — checked against the *rendered* URL so a template variable
+// cannot redirect traffic off the allowlisted target — the rate/concurrency cap
+// (which throttles rather than drops), and the kill switch.
+func WithGuard(g *safety.Guard) RunnerOption { return func(r *Runner) { r.guard = g } }
+
+// throttleInterval is how long a session waits before retrying a reservation the
+// rate/concurrency cap is currently refusing.
+const throttleInterval = 5 * time.Millisecond
+
+// send dispatches one request through the adapter, enforcing the safety guard
+// when present. A guard rejection (off-allowlist host, or the kill switch) is
+// returned as the step error rather than reaching the target.
+func (r *Runner) send(ctx context.Context, req RenderedRequest) (Response, error) {
+	if r.guard == nil {
+		return r.adapter.Send(ctx, req)
+	}
+	if err := r.guard.AllowHost(req.URL); err != nil {
+		return Response{}, err
+	}
+	if err := r.reserve(ctx); err != nil {
+		return Response{}, err
+	}
+	defer r.guard.Release()
+	resp, err := r.adapter.Send(ctx, req)
+	r.guard.ReportOutcome(err == nil && resp.StatusCode < 500)
+	return resp, err
+}
+
+// reserve blocks until the guard grants a rate token and a concurrency slot, so
+// the cap throttles offered load rather than dropping it. It returns on the kill
+// switch (a non-limit error) or when ctx is cancelled.
+func (r *Runner) reserve(ctx context.Context) error {
+	for {
+		err := r.guard.Reserve()
+		if err == nil {
+			return nil
+		}
+		var le *safety.LimitError
+		if !errors.As(err, &le) {
+			return err // killed, not a transient cap rejection
+		}
+		if !sleep(ctx, throttleInterval) {
+			return ctx.Err()
+		}
+	}
 }
 
 // Run executes every virtual user as its own goroutine. Each user walks the
@@ -136,7 +194,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 			results = append(results, StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
 			continue
 		}
-		resp, sErr := r.adapter.Send(ctx, req)
+		resp, sErr := r.send(ctx, req)
 		results = append(results, StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
 		sent = true
 	}

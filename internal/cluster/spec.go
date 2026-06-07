@@ -32,6 +32,15 @@ type ShardSpec struct {
 	// Seed is the run-wide base seed; a user's per-walk seed is Seed plus its
 	// global index, which keeps the whole run deterministic across any split.
 	Seed int64 `json:"seed"`
+
+	// Allowlist, RateCap and EnvClass carry the control plane's safety policy so
+	// a worker enforces the same host allowlist and rate/concurrency cap the
+	// master does, on the actual TargetBaseURL it was handed. Empty Allowlist
+	// means no policy was shipped (the worker then runs unguarded — only for
+	// low-level tests; the control plane always populates these).
+	Allowlist []string        `json:"allowlist,omitempty"`
+	RateCap   domain.RateCap  `json:"rateCap,omitempty"`
+	EnvClass  domain.EnvClass `json:"envClass,omitempty"`
 }
 
 // Validate checks the spec is runnable before it is dispatched or executed.
@@ -47,6 +56,11 @@ func (s ShardSpec) Validate() error {
 	}
 	if s.MaxSteps <= 0 {
 		return fmt.Errorf("cluster: shard spec: maxSteps must be > 0")
+	}
+	// A shipped allowlist must come with a usable rate cap so the worker can
+	// build the guard (NewGuard requires positive caps).
+	if len(s.Allowlist) > 0 && (s.RateCap.MaxRPS <= 0 || s.RateCap.MaxConcurrency <= 0) {
+		return fmt.Errorf("cluster: shard spec: rateCap must be positive when an allowlist is set")
 	}
 	return nil
 }
