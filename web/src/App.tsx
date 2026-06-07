@@ -6,6 +6,7 @@ import {
   createExperiment,
   getReport,
   killRun,
+  MAX_TRACE_USERS,
   reportHTMLURL,
   runDisabled,
   shareTokenFromQuery,
@@ -15,6 +16,7 @@ import {
   type Report,
   type Stats,
 } from './api'
+import LiveGraph from './LiveGraph'
 import ReportView, { StatsView } from './ReportView'
 import Viewer from './Viewer'
 
@@ -62,6 +64,7 @@ const initialForm: ExperimentForm = {
   thinkMinMs: 0,
   thinkMaxMs: 0,
   segmentsJSON: '',
+  traceEnabled: false,
 }
 
 // segmentsPlaceholder shows the persona-mix shape without prefilling it, so an
@@ -149,6 +152,14 @@ function Operator() {
   }
 
   const prevRunId = report ? previousRunId(history, report.run.id) : undefined
+
+  // Live traffic is honored only for small runs (the backend ignores it above the
+  // cap), so the toggle is gated to the same limit and auto-off when exceeded.
+  const traceTooMany = form.users > MAX_TRACE_USERS
+  const traceOn = form.traceEnabled && !traceTooMany
+  // Parse the scenario graph for the live view, reusing the same guarded pattern
+  // as buildRunSpec: if it does not parse, just skip the visualization.
+  const parsedGraph = traceOn ? safeParseGraph(form.graphJSON) : null
 
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 880, margin: '2rem auto', padding: '0 1rem' }}>
@@ -273,6 +284,18 @@ function Operator() {
             <input value={form.start} onChange={(e) => set('start', e.target.value)} style={inp} />
           </Field>
         </div>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: traceTooMany ? '#999' : '#444' }}>
+          <input
+            type="checkbox"
+            checked={traceOn}
+            disabled={traceTooMany}
+            onChange={(e) => set('traceEnabled', e.target.checked)}
+          />
+          Live traffic (≤200 users) — animate each request as it runs
+          {traceTooMany && (
+            <span style={{ color: '#999' }}>· disabled above {MAX_TRACE_USERS} users</span>
+          )}
+        </label>
         <Field label="Scenario graph (JSON)">
           <textarea value={form.graphJSON} onChange={(e) => set('graphJSON', e.target.value)} rows={10} style={ta} />
         </Field>
@@ -311,6 +334,17 @@ function Operator() {
             Run {runId} — <span>{status}</span>
             {runMode && <span style={{ color: '#555', fontWeight: 400, fontSize: 14 }}> · {runMode}</span>}
           </h2>
+          {traceOn && parsedGraph && runId && (
+            <div style={{ margin: '0.5rem 0 1rem' }}>
+              <LiveGraph
+                key={runId}
+                graph={parsedGraph}
+                start={form.start}
+                runId={runId}
+                active={status === 'running'}
+              />
+            </div>
+          )}
           {stats && <StatsView stats={stats} />}
         </section>
       )}
@@ -348,6 +382,24 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function previousRunId(history: string[], id: string): string | undefined {
   const idx = history.indexOf(id)
   return idx > 0 ? history[idx - 1] : undefined
+}
+
+interface ParsedGraph {
+  nodes: { id: string; apiTemplateId?: string }[]
+  edges: { from: string; to: string; weight?: number; dependency?: boolean }[]
+}
+
+// safeParseGraph parses the scenario-graph JSON for the live view, returning null
+// on invalid JSON or a missing nodes/edges array — same guarded approach as
+// buildRunSpec, but non-throwing so a bad graph simply hides the visualization.
+function safeParseGraph(json: string): ParsedGraph | null {
+  try {
+    const g = JSON.parse(json) as Partial<ParsedGraph>
+    if (!Array.isArray(g.nodes) || !Array.isArray(g.edges)) return null
+    return { nodes: g.nodes, edges: g.edges }
+  } catch {
+    return null
+  }
 }
 
 const inp: React.CSSProperties = { width: '100%', padding: '6px 8px', border: '1px solid #ccc', borderRadius: 6 }

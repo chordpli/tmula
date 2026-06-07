@@ -2,11 +2,14 @@ import { describe, it, expect } from 'vitest'
 import {
   buildRunSpec,
   compareURL,
+  layoutGraph,
   parseSSEData,
   parseSegments,
+  parseTraceFrame,
   reportHTMLURL,
   runDisabled,
   shareTokenFromQuery,
+  traceURL,
   type ExperimentForm,
 } from './api'
 
@@ -27,6 +30,7 @@ const form: ExperimentForm = {
   thinkMinMs: 0,
   thinkMaxMs: 0,
   segmentsJSON: '',
+  traceEnabled: false,
 }
 
 describe('buildRunSpec', () => {
@@ -115,6 +119,17 @@ describe('buildRunSpec', () => {
     expect(() => buildRunSpec({ ...form, workloadKind: 'open', segmentsJSON: 'not json' })).toThrow()
     expect(() => buildRunSpec({ ...form, workloadKind: 'open', segmentsJSON: '{"name":"a"}' })).toThrow()
   })
+
+  it('attaches trace only when enabled and users <= 200', () => {
+    // Disabled → never attaches.
+    expect(buildRunSpec({ ...form, users: 10, traceEnabled: false }).trace).toBeUndefined()
+    // Enabled and within the small-run cap → attaches.
+    expect(buildRunSpec({ ...form, users: 10, traceEnabled: true }).trace).toBe(true)
+    // The boundary (exactly 200) is still honored.
+    expect(buildRunSpec({ ...form, users: 200, traceEnabled: true }).trace).toBe(true)
+    // Above the cap → omitted even when requested (backend would ignore it).
+    expect(buildRunSpec({ ...form, users: 201, traceEnabled: true }).trace).toBeUndefined()
+  })
 })
 
 describe('report URLs', () => {
@@ -195,5 +210,127 @@ describe('runDisabled', () => {
     expect(runDisabled('completed')).toBe(false)
     expect(runDisabled('failed')).toBe(false)
     expect(runDisabled('killed')).toBe(false)
+  })
+})
+
+describe('traceURL', () => {
+  it('builds the per-run trace SSE URL', () => {
+    expect(traceURL('run-1')).toBe('/api/runs/run-1/trace')
+  })
+})
+
+describe('parseTraceFrame', () => {
+  it('parses a data line of step events', () => {
+    const frame = parseTraceFrame(
+      'data: {"events":[{"seq":1,"userId":"u3","from":"cart","to":"checkout","status":200,"latencyMs":7.3,"ok":true}],"done":false}',
+    )
+    expect(frame?.done).toBe(false)
+    expect(frame?.events).toHaveLength(1)
+    expect(frame?.events[0]).toEqual({
+      seq: 1,
+      userId: 'u3',
+      from: 'cart',
+      to: 'checkout',
+      status: 200,
+      latencyMs: 7.3,
+      ok: true,
+    })
+  })
+
+  it('parses an entry event (empty from) and a transport error', () => {
+    const frame = parseTraceFrame(
+      'data: {"events":[{"seq":1,"userId":"u0","from":"","to":"browse","status":0,"latencyMs":0,"ok":false}]}',
+    )
+    expect(frame?.events[0].from).toBe('')
+    expect(frame?.events[0].status).toBe(0)
+    expect(frame?.events[0].ok).toBe(false)
+    // done is optional and absent here.
+    expect(frame?.done).toBeUndefined()
+  })
+
+  it('parses the terminal frame', () => {
+    const frame = parseTraceFrame('data: {"events":[],"done":true}')
+    expect(frame?.events).toEqual([])
+    expect(frame?.done).toBe(true)
+  })
+
+  it('ignores non-data, blank, and malformed lines', () => {
+    expect(parseTraceFrame('')).toBeNull()
+    expect(parseTraceFrame(': comment')).toBeNull()
+    expect(parseTraceFrame('event: ping')).toBeNull()
+    expect(parseTraceFrame('data:')).toBeNull()
+    expect(parseTraceFrame('data: {bad json')).toBeNull()
+  })
+})
+
+describe('layoutGraph', () => {
+  it('places nodes in columns by BFS depth from the start', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const edges = [
+      { from: 'a', to: 'b' },
+      { from: 'b', to: 'c' },
+    ]
+    const pos = layoutGraph(nodes, edges, 'a')
+    // x increases with depth; a < b < c.
+    expect(pos.a.x).toBeLessThan(pos.b.x)
+    expect(pos.b.x).toBeLessThan(pos.c.x)
+    // A linear chain shares the same vertical lane.
+    expect(pos.a.y).toBe(pos.b.y)
+    expect(pos.b.y).toBe(pos.c.y)
+  })
+
+  it('spreads same-depth nodes vertically and keeps them column-aligned', () => {
+    const nodes = [{ id: 'root' }, { id: 'x' }, { id: 'y' }]
+    const edges = [
+      { from: 'root', to: 'x' },
+      { from: 'root', to: 'y' },
+    ]
+    const pos = layoutGraph(nodes, edges, 'root')
+    // x and y siblings sit in the same column...
+    expect(pos.x.x).toBe(pos.y.x)
+    // ...one column right of the root...
+    expect(pos.root.x).toBeLessThan(pos.x.x)
+    // ...and are separated vertically.
+    expect(pos.x.y).not.toBe(pos.y.y)
+  })
+
+  it('uses the shortest path for the column (diamond converges)', () => {
+    // a -> b -> d and a -> d: d should be at the deeper of its reachable depths
+    // is ambiguous; BFS assigns the first (shortest) depth = 1.
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'd' }]
+    const edges = [
+      { from: 'a', to: 'b' },
+      { from: 'b', to: 'd' },
+      { from: 'a', to: 'd' },
+    ]
+    const pos = layoutGraph(nodes, edges, 'a')
+    // d is reachable directly from a (depth 1) and via b (depth 2); BFS keeps 1.
+    expect(pos.d.x).toBe(pos.b.x)
+  })
+
+  it('parks nodes unreachable from the start in a trailing column', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'orphan' }]
+    const edges = [{ from: 'a', to: 'b' }]
+    const pos = layoutGraph(nodes, edges, 'a')
+    // The orphan sits strictly to the right of every reachable node.
+    expect(pos.orphan.x).toBeGreaterThan(pos.a.x)
+    expect(pos.orphan.x).toBeGreaterThan(pos.b.x)
+  })
+
+  it('is deterministic for the same input', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const edges = [
+      { from: 'a', to: 'b' },
+      { from: 'a', to: 'c' },
+    ]
+    expect(layoutGraph(nodes, edges, 'a')).toEqual(layoutGraph(nodes, edges, 'a'))
+  })
+
+  it('positions every node, even with a missing start', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }]
+    const edges = [{ from: 'a', to: 'b' }]
+    const pos = layoutGraph(nodes, edges, 'nope')
+    // No start match → all nodes are unreachable but still placed.
+    expect(Object.keys(pos).sort()).toEqual(['a', 'b'])
   })
 })
