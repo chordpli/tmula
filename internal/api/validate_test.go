@@ -42,3 +42,32 @@ func TestRejectsUnsafeTemplatePath(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// TestClosedRequiresPoolOrCount asserts a closed run is valid when it carries
+// either an explicit user array or a positive UserCount, and rejected when it has
+// neither — the count now satisfies the "at least one virtual user" rule so a large
+// pool can be requested as a number instead of a shipped array.
+func TestClosedRequiresPoolOrCount(t *testing.T) {
+	cp, closeCP := newCP(t)
+	defer closeCP()
+	sut := sutOK()
+	defer sut.Close()
+
+	// Neither a user array nor a count → rejected (VirtualUserCount stays positive,
+	// so this isolates the pool check, not the experiment-params check).
+	spec := specFor(sut.URL, 1)
+	spec.Users = nil
+	spec.UserCount = 0
+	resp := postJSON(t, cp.URL+"/experiments", spec)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty pool + zero count = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A positive count alone is a valid closed pool (synthesized server-side).
+	resp = postJSON(t, cp.URL+"/experiments", specForCount(sut.URL, 5))
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("count-only pool = %d, want 201", resp.StatusCode)
+	}
+	resp.Body.Close()
+}

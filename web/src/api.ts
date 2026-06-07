@@ -48,6 +48,10 @@ export interface RunSpec {
   start: string
   maxSteps: number
   users: { id: string }[]
+  // Closed-run pool size. The server synthesizes the pool (u0..uN-1) from this when
+  // `users` is empty, so a large closed run is a small body instead of one object
+  // per user; the open model ignores it.
+  userCount?: number
   seed: number
   workers?: string[]
   aggregateWorkers?: boolean
@@ -142,14 +146,13 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
-  // The open model generates its own sessions from the arrival rate and reads only
-  // a single template user, so don't materialize one object per "virtual user":
-  // that array is unused and would be megabytes — exceeding the request size limit
-  // — at large counts. Closed runs need the real pool, one entry per user.
-  const users =
-    form.workloadKind === 'open'
-      ? [{ id: 'u0' }]
-      : Array.from({ length: form.users }, (_, i) => ({ id: `u${i}` }))
+  // Neither model ships one object per virtual user. The open model generates its
+  // own sessions from the arrival rate and reads only a single template user; the
+  // closed model now sends an empty pool plus `userCount` and lets the server
+  // synthesize u0..uN-1 at run time. Materializing one object per user would be
+  // megabytes — over the server's request size limit ("request body too large") —
+  // at large counts (~270k+), which was the closed-run bug this fixes.
+  const users = form.workloadKind === 'open' ? [{ id: 'u0' }] : []
 
   // Size the safety cap to the configured load so the guard protects the target
   // (host allowlist + a ceiling) without silently throttling what the operator
@@ -189,6 +192,10 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     users,
     seed: 1,
   }
+  // Closed runs send the pool size as a count and let the server synthesize
+  // u0..uN-1; the open model generates its own sessions, so the count is
+  // meaningless there and is left off to keep the open spec clean.
+  if (form.workloadKind !== 'open') spec.userCount = form.users
   // Only attach workers when the operator named at least one address; an empty
   // list would otherwise signal a distributed run with no workers. Worker-side
   // aggregation only makes sense for a distributed run, so gate it on workers.

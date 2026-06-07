@@ -67,10 +67,11 @@ const form: ExperimentForm = {
 }
 
 describe('buildRunSpec', () => {
-  it('creates one virtual user per requested user', () => {
+  it('sends the closed pool as a count, not a per-user array', () => {
     const spec = buildRunSpec(form)
-    expect(spec.users).toHaveLength(3)
-    expect(spec.users[0]).toEqual({ id: 'u0' })
+    // The pool is requested as a number; the server synthesizes u0..uN-1.
+    expect(spec.users).toHaveLength(0)
+    expect(spec.userCount).toBe(3)
     expect(spec.start).toBe('a')
     expect(spec.maxSteps).toBe(5)
   })
@@ -81,12 +82,23 @@ describe('buildRunSpec', () => {
     // the "request body too large" bug at ~900k users).
     const spec = buildRunSpec({ ...form, workloadKind: 'open', users: 899999 })
     expect(spec.users).toHaveLength(1)
-    // The count is still recorded as metadata.
+    // The open model generates its own sessions, so it carries no operational pool
+    // count — only the metadata virtualUserCount records the requested number.
+    expect(spec.userCount).toBeUndefined()
     expect((spec.experiment as { params: { virtualUserCount: number } }).params.virtualUserCount).toBe(899999)
   })
 
-  it('keeps the full user pool for the closed model', () => {
-    expect(buildRunSpec({ ...form, workloadKind: 'closed', users: 1000 }).users).toHaveLength(1000)
+  it('does not materialize a giant user array for large closed runs', () => {
+    // A huge closed pool must NOT balloon the request body with one object per
+    // user — that was the "request body too large" bug above ~270k users. The pool
+    // is sent as a count and the server synthesizes it instead.
+    const spec = buildRunSpec({ ...form, workloadKind: 'closed', users: 500_000 })
+    expect(spec.users).toHaveLength(0)
+    expect(spec.userCount).toBe(500_000)
+    // The count is still recorded as experiment metadata too.
+    expect((spec.experiment as { params: { virtualUserCount: number } }).params.virtualUserCount).toBe(
+      500_000,
+    )
   })
 
   it('sizes the safety rate cap to the configured open load (no silent throttle)', () => {
