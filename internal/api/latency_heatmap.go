@@ -172,7 +172,11 @@ func (s *Server) streamLatencyHeatmap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ticker := time.NewTicker(250 * time.Millisecond)
+	// Unlike the per-edge flow map (a fixed number of edges), this grid gains a
+	// column every latencyBinWidth of wall clock, so a full snapshot grows O(time).
+	// Latency distributions move slowly, so refresh once a second rather than 4x —
+	// that quarters the bytes re-sent on a long run while still feeling live.
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
