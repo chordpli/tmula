@@ -120,7 +120,7 @@ describe('buildRunSpec', () => {
     expect(() => buildRunSpec({ ...form, workloadKind: 'open', segmentsJSON: '{"name":"a"}' })).toThrow()
   })
 
-  it('attaches trace only when enabled and users <= 200', () => {
+  it('attaches trace only when enabled and the run is small (closed: users)', () => {
     // Disabled → never attaches.
     expect(buildRunSpec({ ...form, users: 10, traceEnabled: false }).trace).toBeUndefined()
     // Enabled and within the small-run cap → attaches.
@@ -129,6 +129,16 @@ describe('buildRunSpec', () => {
     expect(buildRunSpec({ ...form, users: 200, traceEnabled: true }).trace).toBe(true)
     // Above the cap → omitted even when requested (backend would ignore it).
     expect(buildRunSpec({ ...form, users: 201, traceEnabled: true }).trace).toBeUndefined()
+  })
+
+  it('gates trace on max concurrency for the open model, not the user count', () => {
+    const open = { ...form, workloadKind: 'open' as const, traceEnabled: true, users: 999 }
+    // Open: a small max-concurrency traces even with a large nominal user count.
+    expect(buildRunSpec({ ...open, maxConcurrency: 100 }).trace).toBe(true)
+    // Open: a large max-concurrency does not trace (matches the backend).
+    expect(buildRunSpec({ ...open, maxConcurrency: 500 }).trace).toBeUndefined()
+    // Open: uncapped (0) does not trace.
+    expect(buildRunSpec({ ...open, maxConcurrency: 0 }).trace).toBeUndefined()
   })
 })
 

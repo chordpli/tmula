@@ -12,6 +12,7 @@ import {
   shareTokenFromQuery,
   startRun,
   streamURL,
+  traceable,
   type ExperimentForm,
   type Report,
   type Stats,
@@ -155,7 +156,7 @@ function Operator() {
 
   // Live traffic is honored only for small runs (the backend ignores it above the
   // cap), so the toggle is gated to the same limit and auto-off when exceeded.
-  const traceTooMany = form.users > MAX_TRACE_USERS
+  const traceTooMany = !traceable(form)
   const traceOn = form.traceEnabled && !traceTooMany
   // Parse the scenario graph for the live view, reusing the same guarded pattern
   // as buildRunSpec: if it does not parse, just skip the visualization.
@@ -291,9 +292,11 @@ function Operator() {
             disabled={traceTooMany}
             onChange={(e) => set('traceEnabled', e.target.checked)}
           />
-          Live traffic (≤200 users) — animate each request as it runs
+          Live traffic — animate each request as it runs
           {traceTooMany && (
-            <span style={{ color: '#999' }}>· disabled above {MAX_TRACE_USERS} users</span>
+            <span style={{ color: '#999' }}>
+              · only for small runs (≤{MAX_TRACE_USERS} {form.workloadKind === 'open' ? 'max concurrency' : 'users'})
+            </span>
           )}
         </label>
         <Field label="Scenario graph (JSON)">
