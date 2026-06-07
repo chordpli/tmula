@@ -131,6 +131,78 @@ func TestFromHAR(t *testing.T) {
 	}
 }
 
+func TestOpenAPIGenericVerbsNotCheckout(t *testing.T) {
+	// Generic verbs like completeProfile must NOT be ranked as checkout (and shoved
+	// to the end) just because they contain "complete"/"confirm". They get the
+	// neutral middle stage, so they sort before a real checkout.
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://h
+paths:
+  /catalog:
+    get: { operationId: listCatalog }
+  /profile/complete:
+    post: { operationId: completeProfile }
+  /checkout:
+    post: { operationId: checkout }
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	want := []string{"GET /catalog", "POST /profile/complete", "POST /checkout"}
+	for i, w := range want {
+		if s.Flow[i].Request != w {
+			t.Errorf("step %d = %q, want %q (a generic 'complete' verb must not rank as checkout)", i, s.Flow[i].Request, w)
+		}
+	}
+}
+
+func TestOpenAPIKeywordJourneyOrder(t *testing.T) {
+	// Paths are declared scrambled; the importer should reorder them into a
+	// plausible shopping journey from the operationId/path keywords, not
+	// alphabetically (which would give addToCart, browse, category, ...).
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://shop
+paths:
+  /checkout:
+    post: { operationId: checkout }
+  /cart:
+    post: { operationId: addToCart }
+  /product:
+    get: { operationId: product }
+  /search:
+    get: { operationId: search }
+  /browse:
+    get: { operationId: browse }
+  /category:
+    get: { operationId: category }
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	want := []string{
+		"GET /browse",   // land
+		"GET /category", // browse a collection
+		"GET /search",
+		"GET /product", // view a specific item
+		"POST /cart",   // add to cart
+		"POST /checkout",
+	}
+	if len(s.Flow) != len(want) {
+		t.Fatalf("flow = %d steps, want %d", len(s.Flow), len(want))
+	}
+	for i, w := range want {
+		if s.Flow[i].Request != w {
+			t.Errorf("step %d = %q, want %q", i, s.Flow[i].Request, w)
+		}
+	}
+}
+
 func TestOpenAPIJourneyOrder(t *testing.T) {
 	const doc = `
 openapi: 3.0.0

@@ -90,6 +90,14 @@ func collectOperations(paths map[string]map[string]json.RawMessage) []apiOp {
 		}
 	}
 	sort.Slice(ops, func(i, j int) bool {
+		// Primary: a plausible user journey (land -> browse/search -> view ->
+		// cart -> checkout) inferred from operationId/path keywords, so an imported
+		// scenario reads like a real flow instead of alphabetically. Ties fall back
+		// to the structural order (shallower paths first, then path, then method, so
+		// safe reads precede writes).
+		if si, sj := journeyStage(ops[i]), journeyStage(ops[j]); si != sj {
+			return si < sj
+		}
 		if di, dj := pathDepth(ops[i].path), pathDepth(ops[j].path); di != dj {
 			return di < dj
 		}
@@ -99,6 +107,45 @@ func collectOperations(paths map[string]map[string]json.RawMessage) []apiOp {
 		return methodOrder(ops[i].method) < methodOrder(ops[j].method)
 	})
 	return ops
+}
+
+// journeyStage scores an operation by where it tends to fall in a user journey,
+// using well-known keywords in its operationId and path. OpenAPI carries no flow
+// information, so this turns an otherwise alphabetical dump into a sensible
+// default order (e.g. browse before cart before checkout); the user can still
+// reorder afterwards. Lower is earlier. Unknown operations get a neutral middle
+// stage so recognized anchors sort around them.
+func journeyStage(o apiOp) int {
+	t := strings.ToLower(o.op.OperationID + " " + o.path)
+	has := func(subs ...string) bool { return matchesAny(t, subs...) }
+	switch {
+	case has("login", "signin", "sign-in", "logon", "oauth", "/token", "session", "register", "signup", "sign-up"):
+		return 0 // authenticate first
+	// Checkout keywords stay commerce-specific so generic verbs (completeProfile,
+	// confirmEmail) are not dragged to the end of an unrelated API.
+	case has("checkout", "payment", "/pay", "purchase", "placeorder", "place-order", "/charge", "fulfil", "/order"):
+		return 8 // pay / complete the journey last
+	case has("cart", "basket", "/bag", "wishlist", "add-to", "addto", "addtocart"):
+		return 6 // add to cart late, before checkout
+	case has("browse", "home", "landing", "/index", "/root", "dashboard", "welcome"):
+		return 1 // land on an entry page first
+	case has("search", "list", "catalog", "catalogue", "categor", "explore", "feed", "menu", "products", "items", "gallery"):
+		return 2 // browse / search a collection
+	case has("detail", "view", "show", "/product", "/item", "{id}", "{slug}", "getone", "byid", "by-id"):
+		return 4 // view a specific resource
+	default:
+		return 3 // unknown: a neutral middle
+	}
+}
+
+// matchesAny reports whether s contains any of subs.
+func matchesAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // methodOrder ranks HTTP methods reads-before-writes, destructive last.
