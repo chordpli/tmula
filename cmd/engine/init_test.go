@@ -55,6 +55,12 @@ func TestDetectFormat(t *testing.T) {
 		{"auto", "spec.yaml", "openapi: 3.0.0", "openapi"},
 		{"har", "whatever", "", "har"},
 		{"openapi", "x.har", "", "openapi"}, // explicit format wins over extension
+		// The reported bug: a HAR uploaded via the web UI arrives with no filename,
+		// so it must be detected structurally from its log/entries shape, not
+		// fall through to OpenAPI ("openapi has no paths").
+		{"auto", "", `{"log":{"version":"1.2","entries":[{"request":{"method":"GET","url":"http://h/a"}}]}}`, "har"},
+		{"auto", "", `{"openapi":"3.0.0","paths":{"/a":{"get":{}}}}`, "openapi"},
+		{"auto", "", "swagger: \"2.0\"\npaths:\n  /a:\n    get: {}", "openapi"}, // YAML via substring fallback
 	}
 	for _, c := range cases {
 		if got := detectFormat(c.format, c.name, []byte(c.data)); got != c.want {

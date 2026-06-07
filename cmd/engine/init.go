@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -82,14 +83,37 @@ func importScenario(data []byte, format, name string) (scenariofile.Scenario, er
 }
 
 // detectFormat resolves an explicit --format, else infers it from the filename
-// and content (HAR is JSON with a top-level log/entries; anything else is
-// treated as OpenAPI).
+// extension and finally the content. A HAR is JSON with a top-level "log" object
+// holding an "entries" array; OpenAPI/Swagger has "openapi"/"swagger"/"paths".
+// Content sniffing is structural (parse the JSON and inspect keys) so it is
+// robust to whitespace and key order — a real browser HAR was being misread as
+// OpenAPI when uploaded without its .har name. A substring guess remains as a
+// last resort for non-JSON (YAML) OpenAPI.
 func detectFormat(format, name string, data []byte) string {
 	if format != "" && format != "auto" {
 		return format
 	}
 	if strings.HasSuffix(strings.ToLower(name), ".har") {
 		return "har"
+	}
+	var probe struct {
+		Log *struct {
+			Entries []json.RawMessage `json:"entries"`
+		} `json:"log"`
+		OpenAPI json.RawMessage            `json:"openapi"`
+		Swagger json.RawMessage            `json:"swagger"`
+		Paths   map[string]json.RawMessage `json:"paths"`
+	}
+	if json.Unmarshal(data, &probe) == nil {
+		// Check the OpenAPI markers first: a real OpenAPI doc never carries a
+		// top-level log/entries, so this keeps a (pathological) spec that happens
+		// to mention one from being mistaken for a HAR.
+		switch {
+		case len(probe.OpenAPI) > 0 || len(probe.Swagger) > 0 || probe.Paths != nil:
+			return "openapi"
+		case probe.Log != nil && probe.Log.Entries != nil:
+			return "har"
+		}
 	}
 	if bytes.Contains(data, []byte(`"log"`)) && bytes.Contains(data, []byte(`"entries"`)) {
 		return "har"

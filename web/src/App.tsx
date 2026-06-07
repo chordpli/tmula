@@ -653,6 +653,12 @@ function ImportPanel({
     const file = e.target.files?.[0]
     if (!file) return
     setFileName(file.name)
+    // Pick the format from the extension so the strongest signal (the filename)
+    // isn't lost: a .har upload must parse as HAR, not be sniffed as OpenAPI.
+    // .json stays on 'auto' since it can be either.
+    const lower = file.name.toLowerCase()
+    if (lower.endsWith('.har')) setFormat('har')
+    else if (lower.endsWith('.yaml') || lower.endsWith('.yml')) setFormat('openapi')
     try {
       // Read the file client-side so the textarea reflects exactly what will be
       // imported; the operator can still edit it before importing.

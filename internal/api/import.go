@@ -28,6 +28,11 @@ type importResult struct {
 	MaxSteps  int    `json:"maxSteps"`
 }
 
+// importMaxBytes bounds an uploaded API description. It is larger than a normal
+// API request (maxRequestBytes) because real HAR captures routinely run to a few
+// megabytes; the importer only reads it, so the headroom is safe.
+const importMaxBytes = 32 << 20 // 32 MiB
+
 // handleImport converts an uploaded OpenAPI or HAR description into a scenario
 // (graph + templates + start) so the UI can prefill an experiment from an API
 // spec instead of hand-writing JSON. The request body is the raw description and
@@ -38,10 +43,10 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, fmt.Errorf("api: import is not configured"))
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, importMaxBytes)
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("read body: %w", err))
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Errorf("api: description exceeds the %d MiB import limit", importMaxBytes>>20))
 		return
 	}
 	if len(data) == 0 {
