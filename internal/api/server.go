@@ -611,11 +611,11 @@ func (s *Server) runnerFor(rs *runState, spec RunSpec, extra ...load.RunnerOptio
 // step into the run's collector and finding aggregator as it completes rather
 // than materializing the whole run first. The result sink fires from many session
 // goroutines at once; both the collector's Record and the aggregator's Add are
-// mutex-guarded, so the sink is safe for concurrent use. Every observation shares
-// one start-of-run timestamp, exactly as the previous slice loop assigned it, so
-// findings and stats are identical.
+// mutex-guarded, so the sink is safe for concurrent use. Each observation is
+// stamped with s.now() at the moment its result is recorded (its completion time),
+// matching the latency heatmap beside it, so the timestamp-ordered availability
+// classifier reflects real per-request timing; stats are unaffected (they ignore TS).
 func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
-	ts := s.now()
 	sink := func(res load.StepResult) {
 		cls := errorClass(res)
 		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, cls)
@@ -624,7 +624,7 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 			StatusCode: res.Resp.StatusCode,
 			LatencyMs:  res.Resp.LatencyMs,
 			ErrorClass: cls,
-			TS:         ts,
+			TS:         s.now(),
 		})
 	}
 	// Wiring the sink at construction makes the Runner stream each result into the
@@ -683,14 +683,16 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 	}
 
 	shardSpec := shardSpecFor(spec)
-	ts := s.now()
 	// Fold each shard step into the collector + aggregator as it streams in via
 	// DistributeInto, rather than receiving one ShardStep per request for the whole
 	// run and looping it: bounded master memory at any request volume. The sink
 	// fires concurrently from every shard's receive loop; collector.Record and
-	// agg.Add are both mutex-guarded, so it is safe for concurrent use. The
-	// coordinator splits the pool by count and each worker synthesizes its own shard
-	// of users, so only poolSize crosses here — never a materialized user array.
+	// agg.Add are both mutex-guarded, so it is safe for concurrent use. The master
+	// stamps each streamed worker result with s.now() at receive time, so the
+	// timestamp-ordered availability classifier reflects per-request timing; stats
+	// ignore TS and are unaffected. The coordinator splits the pool by count and each
+	// worker synthesizes its own shard of users, so only poolSize crosses here —
+	// never a materialized user array.
 	sink := func(st cluster.ShardStep) {
 		rs.collector.Record(st.StatusCode, st.LatencyMs, st.ErrorClass)
 		agg.Add(obs.RequestObservation{
@@ -698,7 +700,7 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 			StatusCode: st.StatusCode,
 			LatencyMs:  st.LatencyMs,
 			ErrorClass: st.ErrorClass,
-			TS:         ts,
+			TS:         s.now(),
 		})
 	}
 	if _, err := coord.DistributeInto(ctx, shardSpec, spec.PoolSize(), sink); err != nil {

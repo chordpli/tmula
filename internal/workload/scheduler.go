@@ -258,7 +258,7 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 				setupOnce.Do(func() { firstSetupErr = err })
 				return
 			}
-			record(collector, agg, results, s.clock.Now())
+			record(collector, agg, results, s.clock.Now)
 		}()
 	}
 
@@ -316,9 +316,11 @@ func thinkFunc(tt domain.ThinkTime, sessionSeed int64) load.ThinkFunc {
 // aggregator using the SAME mapping as the closed path (internal/api executeLocal):
 // status/latency/class into the collector, and a RequestObservation keyed by the
 // visited node id into the aggregator. This is what makes the rate, contract and
-// mutation findings match across the open and closed models; availability, being
-// run-length based, also depends on the order sessions complete under concurrency.
-func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepResult, ts time.Time) {
+// mutation findings match across the open and closed models. Each observation is
+// stamped via now() at the moment it is recorded, so availability now depends on
+// per-request timestamp order (stable on ties), consistent with the closed path,
+// rather than the order sessions happen to complete under concurrency.
+func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepResult, now func() time.Time) {
 	for _, sr := range results {
 		cls := errorClass(sr)
 		collector.Record(sr.Resp.StatusCode, sr.Resp.LatencyMs, cls)
@@ -327,7 +329,7 @@ func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepRe
 			StatusCode: sr.Resp.StatusCode,
 			LatencyMs:  sr.Resp.LatencyMs,
 			ErrorClass: cls,
-			TS:         ts,
+			TS:         now(),
 		})
 	}
 }
