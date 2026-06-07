@@ -35,7 +35,7 @@ func TestLatencyHeatRecordSnapshot(t *testing.T) {
 	h.record(30, t0.Add(700*time.Millisecond)) // row 3, col 1 again
 	h.record(-50, t0.Add(-9*time.Millisecond)) // clock skew clamps to col 0, row 0
 
-	cells, max := h.snapshot()
+	cells, max, _ := h.snapshot()
 	if len(cells) != latencyRows() {
 		t.Fatalf("rows = %d, want %d", len(cells), latencyRows())
 	}
@@ -58,7 +58,7 @@ func TestLatencyHeatRecordSnapshot(t *testing.T) {
 
 func TestLatencyHeatSnapshotEmpty(t *testing.T) {
 	h := newLatencyHeat(time.Unix(0, 0))
-	cells, max := h.snapshot()
+	cells, max, _ := h.snapshot()
 	if len(cells) != latencyRows() {
 		t.Fatalf("rows = %d, want %d", len(cells), latencyRows())
 	}
@@ -69,6 +69,43 @@ func TestLatencyHeatSnapshotEmpty(t *testing.T) {
 	}
 	if max != 0 {
 		t.Errorf("maxCount = %d, want 0", max)
+	}
+}
+
+// TestLatencyHeatSnapshotDownsamplesLongRun: a run long enough to exceed
+// latencyMaxCols columns must stream a downsampled grid (<= the cap) with a
+// proportionally widened bin, preserving total counts — so a soak's frame size
+// stays bounded instead of growing with run length.
+func TestLatencyHeatSnapshotDownsamplesLongRun(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	h := newLatencyHeat(t0)
+	const span = 1000 // 1000 columns at the base bin = well past latencyMaxCols
+	for c := 0; c < span; c++ {
+		h.record(7, t0.Add(time.Duration(c)*latencyBinWidth)) // one sample per column (row 1)
+	}
+
+	cells, max, binMs := h.snapshot()
+	if len(cells) != latencyRows() {
+		t.Fatalf("rows = %d, want %d", len(cells), latencyRows())
+	}
+	if cols := len(cells[0]); cols > latencyMaxCols {
+		t.Errorf("cols = %d, want <= %d (downsampled)", cols, latencyMaxCols)
+	}
+	base := int(latencyBinWidth / time.Millisecond)
+	if binMs <= base {
+		t.Errorf("binWidthMs = %d, want > %d (widened by the merge)", binMs, base)
+	}
+	var total int64
+	for _, row := range cells {
+		for _, v := range row {
+			total += v
+		}
+	}
+	if total != span {
+		t.Errorf("total counts = %d, want %d (merge must preserve counts)", total, span)
+	}
+	if max < 1 {
+		t.Errorf("maxCount = %d, want >= 1", max)
 	}
 }
 
