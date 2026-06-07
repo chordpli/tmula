@@ -510,6 +510,44 @@ export async function startRun(experimentId: string): Promise<string> {
   return (await res.json()).runId as string
 }
 
+// ImportResult is what POST /api/import returns on success: a ready-to-edit
+// scenario the caller can drop straight into the Scenario card's fields.
+export interface ImportResult {
+  graph: unknown
+  templates: unknown
+  start: string
+  maxSteps: number
+}
+
+// importScenario converts a raw OpenAPI or HAR document into a scenario via the
+// backend. `format` is 'auto' (let the server sniff it), 'openapi', or 'har'. The
+// body is the raw spec text (JSON/YAML/HAR), posted as-is. On a non-2xx it throws
+// the server's own error text so the UI can show a meaningful message (the backend
+// returns 400 {error} on a bad spec and 501 when the importer is unavailable);
+// otherwise it returns the parsed scenario. It deliberately throws rather than
+// returning a sentinel so the caller's catch surfaces the message inline.
+export async function importScenario(
+  spec: string,
+  format: 'auto' | 'openapi' | 'har',
+): Promise<ImportResult> {
+  const res = await fetch(`${API}/import?format=${format}`, { method: 'POST', body: spec })
+  if (!res.ok) {
+    const text = (await res.text()).trim()
+    let message = text
+    // The server reports failures as { "error": "..." }; unwrap it when present so
+    // the user sees the reason, not the raw JSON envelope. Fall back to the body
+    // text, then to the status code, so there is always something to show.
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) message = parsed.error
+    } catch {
+      /* not JSON: keep the raw text */
+    }
+    throw new Error(message || `import failed: ${res.status}`)
+  }
+  return (await res.json()) as ImportResult
+}
+
 export async function getReport(runId: string): Promise<Report> {
   const res = await fetch(`${API}/runs/${runId}/report`)
   if (!res.ok) throw new Error(`report failed: ${res.status}`)
@@ -553,11 +591,27 @@ export function compareURL(a: string, b: string): string {
   return `${API}/runs/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`
 }
 
+// SharedReportError carries a stable code (and the HTTP status) so the viewer can
+// render a localized message instead of a hard-coded English string. The message
+// is kept as a readable English fallback for non-UI callers / logs.
+export class SharedReportError extends Error {
+  code: 'expired' | 'notFound' | 'unavailable'
+  status: number
+  constructor(code: 'expired' | 'notFound' | 'unavailable', status: number, message: string) {
+    super(message)
+    this.name = 'SharedReportError'
+    this.code = code
+    this.status = status
+  }
+}
+
 export async function getSharedReport(token: string): Promise<Report> {
   const res = await fetch(`${API}/reports/shared/${token}`)
-  if (res.status === 410) throw new Error('This shared report has expired.')
-  if (res.status === 404) throw new Error('This shared report was not found.')
-  if (!res.ok) throw new Error(`Shared report unavailable (${res.status}).`)
+  if (res.status === 410) throw new SharedReportError('expired', 410, 'This shared report has expired.')
+  if (res.status === 404)
+    throw new SharedReportError('notFound', 404, 'This shared report was not found.')
+  if (!res.ok)
+    throw new SharedReportError('unavailable', res.status, `Shared report unavailable (${res.status}).`)
   return (await res.json()) as Report
 }
 

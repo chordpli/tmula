@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   buildRunSpec,
   compareURL,
@@ -10,6 +10,7 @@ import {
   heatColor,
   heatmapURL,
   heatWidth,
+  importScenario,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
   latencyCellColor,
@@ -202,6 +203,67 @@ describe('report URLs', () => {
   })
   it('builds the compare URL with encoded ids', () => {
     expect(compareURL('run a', 'run-2')).toBe('/api/runs/compare?a=run%20a&b=run-2')
+  })
+})
+
+describe('importScenario', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  // mockFetch installs a fetch stub returning the given response and records the
+  // last call so the URL/method/body can be asserted.
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      } as Response)
+    })
+    return calls
+  }
+
+  it('POSTs the raw spec to the format-scoped import endpoint and returns the scenario', async () => {
+    const scenario = {
+      graph: { id: 'g', nodes: [{ id: 'a' }], edges: [] },
+      templates: { ta: { method: 'GET', path: '/a' } },
+      start: 'a',
+      maxSteps: 3,
+    }
+    const calls = mockFetch({ ok: true, status: 200, body: JSON.stringify(scenario) })
+    const out = await importScenario('openapi: 3.0.0', 'openapi')
+    expect(out).toEqual(scenario)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/import?format=openapi')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.body).toBe('openapi: 3.0.0')
+  })
+
+  it('passes the chosen format through in the query string', async () => {
+    const calls = mockFetch({ ok: true, status: 200, body: '{"graph":{},"templates":{},"start":"x","maxSteps":1}' })
+    await importScenario('{}', 'har')
+    expect(calls[0].url).toBe('/api/import?format=har')
+    await importScenario('{}', 'auto')
+    expect(calls[1].url).toBe('/api/import?format=auto')
+  })
+
+  it('throws the server error message from a 400 { error } body', async () => {
+    mockFetch({ ok: false, status: 400, body: '{"error":"unrecognized spec"}' })
+    await expect(importScenario('garbage', 'auto')).rejects.toThrow('unrecognized spec')
+  })
+
+  it('throws the raw body when a failure is not JSON', async () => {
+    mockFetch({ ok: false, status: 400, body: 'plain text failure' })
+    await expect(importScenario('garbage', 'auto')).rejects.toThrow('plain text failure')
+  })
+
+  it('falls back to the status code when the failure body is empty', async () => {
+    mockFetch({ ok: false, status: 501, body: '' })
+    await expect(importScenario('x', 'auto')).rejects.toThrow('501')
   })
 })
 
