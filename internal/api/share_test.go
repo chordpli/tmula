@@ -69,7 +69,7 @@ func TestSharedReportHidesInternalKillReason(t *testing.T) {
 		collector: obs.NewCollector(),
 		done:      make(chan struct{}),
 	}
-	s.shares["tok"] = shareEntry{runID: "r1"}
+	s.shareReg.add("tok", shareEntry{runID: "r1"}, maxRetainedShares)
 
 	// Shared path: the internal text must be gone.
 	shReq := httptest.NewRequest(http.MethodGet, "/reports/shared/tok", nil)
@@ -129,7 +129,7 @@ func TestShareExpiredReadDeletes(t *testing.T) {
 		done:      make(chan struct{}),
 	}
 	exp := now.Add(time.Second)
-	s.registerShareLocked("tok", shareEntry{runID: "r1", expiresAt: &exp})
+	s.shareReg.add("tok", shareEntry{runID: "r1", expiresAt: &exp}, maxRetainedShares)
 	now = now.Add(2 * time.Second) // past expiry
 
 	req := httptest.NewRequest(http.MethodGet, "/reports/shared/tok", nil)
@@ -138,10 +138,7 @@ func TestShareExpiredReadDeletes(t *testing.T) {
 	if rr.Code != http.StatusGone {
 		t.Fatalf("expired share = %d, want 410", rr.Code)
 	}
-	s.mu.Lock()
-	_, stillThere := s.shares["tok"]
-	s.mu.Unlock()
-	if stillThere {
+	if s.shareReg.has("tok") {
 		t.Error("expired share token should be deleted on read")
 	}
 }
@@ -154,21 +151,21 @@ func TestShareCapEvictsOldest(t *testing.T) {
 	s.now = func() time.Time { return now }
 
 	past := now.Add(-time.Second)
-	s.mu.Lock()
+	// Register all three first (well under cap, so no eviction yet), then enforce a
+	// cap of 2 as a separate step — exactly the old register*3 + enforceCap order.
 	// Oldest token is already expired; it should be reclaimed first.
-	s.registerShareLocked("expired", shareEntry{runID: "r", expiresAt: &past})
-	s.registerShareLocked("old", shareEntry{runID: "r"})
-	s.registerShareLocked("new", shareEntry{runID: "r"})
-	s.enforceShareCapLocked(2)
-	defer s.mu.Unlock()
+	s.shareReg.add("expired", shareEntry{runID: "r", expiresAt: &past}, maxRetainedShares)
+	s.shareReg.add("old", shareEntry{runID: "r"}, maxRetainedShares)
+	s.shareReg.add("new", shareEntry{runID: "r"}, maxRetainedShares)
+	s.shareReg.enforceCap(2)
 
-	if len(s.shares) > 2 {
-		t.Fatalf("shares = %d, want <= 2", len(s.shares))
+	if n := s.shareReg.len(); n > 2 {
+		t.Fatalf("shares = %d, want <= 2", n)
 	}
-	if _, ok := s.shares["expired"]; ok {
+	if s.shareReg.has("expired") {
 		t.Error("expired token should be evicted first")
 	}
-	if _, ok := s.shares["new"]; !ok {
+	if !s.shareReg.has("new") {
 		t.Error("most recent token should be retained")
 	}
 }
@@ -183,7 +180,7 @@ func TestShareExpired(t *testing.T) {
 		done:      make(chan struct{}),
 	}
 	exp := now.Add(time.Second)
-	s.shares["tok"] = shareEntry{runID: "r1", expiresAt: &exp}
+	s.shareReg.add("tok", shareEntry{runID: "r1", expiresAt: &exp}, maxRetainedShares)
 
 	now = now.Add(2 * time.Second) // advance past expiry
 

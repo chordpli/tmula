@@ -280,7 +280,7 @@ func TestSharedReportFromStoreScrubsKillReason(t *testing.T) {
 	if err := st.SaveStats("rf", obs.Stats{Total: 3}); err != nil {
 		t.Fatal(err)
 	}
-	srv.shares["tok"] = shareEntry{runID: "rf"}
+	srv.shareReg.add("tok", shareEntry{runID: "rf"}, maxRetainedShares)
 
 	cp := httptest.NewServer(srv.Handler())
 	defer cp.Close()

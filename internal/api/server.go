@@ -36,14 +36,16 @@ type Server struct {
 	mu      sync.Mutex
 	specs   map[domain.ID]RunSpec
 	runs    map[domain.ID]*runState
-	shares  map[string]shareEntry
 	store   store.Store
 	adapter load.Adapter
 	masker  *mask.Masker
+	// shareReg owns the share-token bookkeeping behind its own mutex, decoupled
+	// from s.mu (which guards run state). Share access was already localized and
+	// never shared a critical section with run state, so this is behavior-preserving.
+	shareReg *shareRegistry
 	// runOrder records run IDs in insertion order so the retention bound can evict
-	// the oldest terminal runs first. shareOrder does the same for share tokens.
+	// the oldest terminal runs first.
 	runOrder       []domain.ID
-	shareOrder     []string
 	defaultWorkers []string
 	// importFn, when set (WithImporter), converts an uploaded OpenAPI/HAR spec into
 	// a RunSpec for POST /import. Injected so the api package avoids the
@@ -93,13 +95,15 @@ func NewServer(adapter load.Adapter, opts ...Option) *Server {
 	s := &Server{
 		specs:   make(map[domain.ID]RunSpec),
 		runs:    make(map[domain.ID]*runState),
-		shares:  make(map[string]shareEntry),
 		store:   store.NewMemStore(),
 		adapter: adapter,
 		masker:  mask.New(mask.Config{}),
 		now:     time.Now,
 		mux:     http.NewServeMux(),
 	}
+	// The registry reads s.now at call time (not a snapshot), so a test that later
+	// reassigns s.now to drive share expiry is honored.
+	s.shareReg = newShareRegistry(func() time.Time { return s.now() })
 	// Options run after the default store is set, so WithStore can replace it.
 	for _, opt := range opts {
 		opt(s)
