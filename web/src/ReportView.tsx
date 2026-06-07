@@ -1,17 +1,63 @@
 import type { Report, Stats } from './api'
 
-const sevColor: Record<string, string> = { critical: '#d73a4a', warning: '#d4a72c', info: '#0969da' }
+// errorRateKind picks a stat color by how alarming the error rate is, so a glance
+// reads green/amber/red without needing to parse the number.
+function errorRateKind(rate: number): '' | 'warn' | 'danger' {
+  if (rate >= 0.05) return 'danger'
+  if (rate > 0) return 'warn'
+  return ''
+}
 
+// StatsView renders the headline metrics as a compact card grid: requests, error
+// rate, latency percentiles, and timeouts. Shared by the live run, the report, and
+// the shared-link viewer so all three stay consistent.
 export function StatsView({ stats }: { stats: Stats }) {
+  const errKind = errorRateKind(stats.errorRate)
   return (
-    <ul style={{ lineHeight: 1.7 }}>
-      <li>requests: {stats.total}</li>
-      <li>error rate: {(stats.errorRate * 100).toFixed(1)}%</li>
-      <li>
-        latency p50/p95/p99: {stats.p50.toFixed(0)} / {stats.p95.toFixed(0)} / {stats.p99.toFixed(0)} ms
-      </li>
-      <li>timeouts: {stats.timeouts}</li>
-    </ul>
+    <div className="statgrid">
+      <div className="stat">
+        <div className="stat__label">Requests</div>
+        <div className="stat__value">{stats.total.toLocaleString()}</div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">Error rate</div>
+        <div className={`stat__value${errKind ? ` stat__value--${errKind}` : ' stat__value--ok'}`}>
+          {(stats.errorRate * 100).toFixed(1)}
+          <span className="stat__unit">%</span>
+        </div>
+        <div className="stat__sub">
+          {stats.errors.toLocaleString()} error{stats.errors === 1 ? '' : 's'}
+        </div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">Latency p50</div>
+        <div className="stat__value">
+          {stats.p50.toFixed(0)}
+          <span className="stat__unit">ms</span>
+        </div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">Latency p95</div>
+        <div className="stat__value">
+          {stats.p95.toFixed(0)}
+          <span className="stat__unit">ms</span>
+        </div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">Latency p99</div>
+        <div className="stat__value">
+          {stats.p99.toFixed(0)}
+          <span className="stat__unit">ms</span>
+        </div>
+        <div className="stat__sub">max {stats.max.toFixed(0)} ms</div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">Timeouts</div>
+        <div className={`stat__value${stats.timeouts > 0 ? ' stat__value--warn' : ''}`}>
+          {stats.timeouts.toLocaleString()}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -23,19 +69,42 @@ export default function ReportView({ report }: { report: Report }) {
   return (
     <div>
       <StatsView stats={report.stats} />
-      <h3>Findings ({findings.length})</h3>
+
+      <div className="findings__head" style={{ marginTop: 22 }}>
+        <h3 className="findings__title">Findings</h3>
+        <span className="findings__count">{findings.length}</span>
+      </div>
+
       {findings.length === 0 ? (
-        <p style={{ color: '#1a7f37' }}>No issues detected.</p>
+        <div className="findings__empty">
+          <CheckIcon />
+          No issues detected.
+        </div>
       ) : (
-        <ul style={{ lineHeight: 1.7 }}>
-          {findings.map((f, i) => (
-            <li key={i}>
-              <span style={{ color: sevColor[f.severity] ?? '#555', fontWeight: 600 }}>[{f.category}]</span>{' '}
-              {f.description}
-            </li>
-          ))}
-        </ul>
+        <div>
+          {findings.map((f, i) => {
+            const sev = (f.severity || 'info').toLowerCase()
+            const sevClass = sev === 'critical' || sev === 'warning' ? sev : 'info'
+            return (
+              <div className="finding" key={i}>
+                <span className={`finding__sev finding__sev--${sevClass}`}>{sev}</span>
+                <span>
+                  <span className="finding__cat">[{f.category}]</span> <span className="finding__desc">{f.description}</span>
+                </span>
+              </div>
+            )
+          })}
+        </div>
       )}
     </div>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M8.5 12.2l2.3 2.3 4.7-4.9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   )
 }

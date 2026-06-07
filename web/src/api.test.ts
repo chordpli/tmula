@@ -10,9 +10,14 @@ import {
   heatColor,
   heatmapURL,
   heatWidth,
+  LAT_CELL_EMPTY,
+  LAT_CELL_HOT,
+  latencyCellColor,
+  latencyHeatmapURL,
   layoutGraph,
   lerpColor,
   parseHeatFrame,
+  parseLatencyFrame,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
@@ -356,6 +361,85 @@ describe('parseHeatFrame', () => {
     expect(parseHeatFrame('event: ping')).toBeNull()
     expect(parseHeatFrame('data:')).toBeNull()
     expect(parseHeatFrame('data: {bad json')).toBeNull()
+  })
+})
+
+describe('latencyHeatmapURL', () => {
+  it('builds the per-run latency-heatmap SSE URL', () => {
+    expect(latencyHeatmapURL('run-1')).toBe('/api/runs/run-1/latency-heatmap')
+  })
+})
+
+describe('parseLatencyFrame', () => {
+  it('parses a data line of the latency histogram', () => {
+    const frame = parseLatencyFrame(
+      'data: {"binWidthMs":1000,"rows":[{"loMs":0,"hiMs":100,"label":"0–100ms"},{"loMs":100,"hiMs":0,"label":"100ms+"}],"cells":[[3,1],[0,2]],"maxCount":3,"done":false}',
+    )
+    expect(frame?.done).toBe(false)
+    expect(frame?.binWidthMs).toBe(1000)
+    expect(frame?.maxCount).toBe(3)
+    expect(frame?.rows).toHaveLength(2)
+    expect(frame?.rows[0]).toEqual({ loMs: 0, hiMs: 100, label: '0–100ms' })
+    // hiMs === 0 marks the unbounded top bucket.
+    expect(frame?.rows[1]).toEqual({ loMs: 100, hiMs: 0, label: '100ms+' })
+    // cells[rowIndex][colIndex] = count in that band × time bucket.
+    expect(frame?.cells).toEqual([
+      [3, 1],
+      [0, 2],
+    ])
+  })
+
+  it('parses the terminal frame', () => {
+    const frame = parseLatencyFrame('data: {"binWidthMs":500,"rows":[],"cells":[],"maxCount":0,"done":true}')
+    expect(frame?.rows).toEqual([])
+    expect(frame?.cells).toEqual([])
+    expect(frame?.maxCount).toBe(0)
+    expect(frame?.done).toBe(true)
+  })
+
+  it('ignores non-data, blank, and malformed lines', () => {
+    expect(parseLatencyFrame('')).toBeNull()
+    expect(parseLatencyFrame(': comment')).toBeNull()
+    expect(parseLatencyFrame('event: ping')).toBeNull()
+    expect(parseLatencyFrame('data:')).toBeNull()
+    expect(parseLatencyFrame('data: {bad json')).toBeNull()
+  })
+})
+
+describe('latencyCellColor', () => {
+  it('is the near-blank tint for zero density or no peak', () => {
+    expect(latencyCellColor(0, 0)).toBe(LAT_CELL_EMPTY)
+    expect(latencyCellColor(0, 100)).toBe(LAT_CELL_EMPTY)
+    expect(latencyCellColor(50, 0)).toBe(LAT_CELL_EMPTY)
+    expect(latencyCellColor(-3, 100)).toBe(LAT_CELL_EMPTY)
+  })
+
+  it('is the strong accent at peak density', () => {
+    expect(rgb(latencyCellColor(100, 100))).toEqual(rgb(LAT_CELL_HOT))
+  })
+
+  it('darkens monotonically with density between the endpoints', () => {
+    const [emptyR, emptyG, emptyB] = rgb(LAT_CELL_EMPTY)
+    const [hotR, hotG, hotB] = rgb(LAT_CELL_HOT)
+    const [lowR, lowG, lowB] = rgb(latencyCellColor(10, 100))
+    const [hiR, hiG, hiB] = rgb(latencyCellColor(90, 100))
+    // A denser cell sits closer to the hot endpoint on every channel (the ramp
+    // runs light indigo -> dark indigo, so each channel decreases toward the peak).
+    expect(lowR).toBeLessThanOrEqual(emptyR)
+    expect(lowR).toBeGreaterThanOrEqual(hotR)
+    expect(hiR).toBeLessThan(lowR)
+    expect(hiG).toBeLessThan(lowG)
+    expect(hiB).toBeLessThanOrEqual(lowB)
+    // Bounded by the ramp endpoints on every channel.
+    expect(hiR).toBeGreaterThanOrEqual(hotR)
+    expect(hiG).toBeGreaterThanOrEqual(hotG)
+    expect(hiB).toBeGreaterThanOrEqual(hotB)
+    expect(lowG).toBeLessThanOrEqual(emptyG)
+    expect(lowB).toBeLessThanOrEqual(emptyB)
+  })
+
+  it('clamps an out-of-range density to the peak color', () => {
+    expect(rgb(latencyCellColor(500, 100))).toEqual(rgb(LAT_CELL_HOT))
   })
 })
 

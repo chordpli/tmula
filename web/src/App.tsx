@@ -17,21 +17,44 @@ import {
   type Report,
   type Stats,
 } from './api'
+import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import ReportView, { StatsView } from './ReportView'
 import Viewer from './Viewer'
 
+// The default scenario is a small branching shop journey: a shopper browses, may
+// search or jump to a category, lands on a product, and a fraction add to cart and
+// check out (the cart -> checkout edge is a dependency). The exit edges drain the
+// rest so traffic spreads realistically across the graph the instant a run starts.
 const defaultGraph = JSON.stringify(
   {
-    id: 'checkout',
+    id: 'shop',
     nodes: [
       { id: 'browse', apiTemplateId: 't_browse' },
+      { id: 'search', apiTemplateId: 't_search' },
+      { id: 'category', apiTemplateId: 't_category' },
+      { id: 'product', apiTemplateId: 't_product' },
       { id: 'cart', apiTemplateId: 't_cart' },
-      { id: 'pay', apiTemplateId: 't_pay' },
+      { id: 'checkout', apiTemplateId: 't_checkout' },
+      { id: 'done' },
+      { id: 'exit' },
     ],
     edges: [
-      { from: 'browse', to: 'cart', weight: 0.8 },
-      { from: 'cart', to: 'pay', weight: 0.9, dependency: true },
+      { from: 'browse', to: 'search', weight: 0.4 },
+      { from: 'browse', to: 'category', weight: 0.4 },
+      { from: 'browse', to: 'exit', weight: 0.2 },
+      { from: 'search', to: 'product', weight: 0.65 },
+      { from: 'search', to: 'category', weight: 0.15 },
+      { from: 'search', to: 'exit', weight: 0.2 },
+      { from: 'category', to: 'product', weight: 0.7 },
+      { from: 'category', to: 'browse', weight: 0.15 },
+      { from: 'category', to: 'exit', weight: 0.15 },
+      { from: 'product', to: 'cart', weight: 0.45 },
+      { from: 'product', to: 'browse', weight: 0.25 },
+      { from: 'product', to: 'exit', weight: 0.3 },
+      { from: 'cart', to: 'checkout', weight: 0.6, dependency: true },
+      { from: 'cart', to: 'exit', weight: 0.4 },
+      { from: 'checkout', to: 'done', weight: 1.0 },
     ],
   },
   null,
@@ -41,31 +64,37 @@ const defaultGraph = JSON.stringify(
 const defaultTemplates = JSON.stringify(
   {
     t_browse: { method: 'GET', path: '/browse' },
-    t_cart: { method: 'POST', path: '/cart', payloadTemplate: '{"item":"x"}' },
-    t_pay: { method: 'POST', path: '/pay', payloadTemplate: '{"amount":10}' },
+    t_search: { method: 'GET', path: '/search' },
+    t_category: { method: 'GET', path: '/category' },
+    t_product: { method: 'GET', path: '/product' },
+    t_cart: { method: 'POST', path: '/cart', payloadTemplate: '{"productId":"p7","qty":1}' },
+    t_checkout: { method: 'POST', path: '/checkout', payloadTemplate: '{"total":42}' },
   },
   null,
   2,
 )
 
+// Defaults are tuned so a non-developer sees traffic the instant they click Run:
+// an open (organic) model that ramps real arrivals over 30s, tracing on, against a
+// local target with a friendly allowlist and the branching shop scenario above.
 const initialForm: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
   allowlist: 'localhost, 127.0.0.1',
   users: 20,
-  maxSteps: 8,
+  maxSteps: 12,
   start: 'browse',
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
   workers: '',
   aggregateWorkers: false,
-  workloadKind: 'closed',
-  arrivalRate: 50,
-  durationSeconds: 10,
-  maxConcurrency: 500,
-  thinkMinMs: 0,
-  thinkMaxMs: 0,
+  workloadKind: 'open',
+  arrivalRate: 12,
+  durationSeconds: 30,
+  maxConcurrency: 80,
+  thinkMinMs: 300,
+  thinkMaxMs: 900,
   segmentsJSON: '',
-  traceEnabled: false,
+  traceEnabled: true,
 }
 
 // segmentsPlaceholder shows the persona-mix shape without prefilling it, so an
@@ -156,230 +185,463 @@ function Operator() {
 
   // Live traffic is now honored at any scale. The run size only picks the render
   // mode: small runs animate each request ('events'); large runs draw an aggregate
-  // per-edge heatmap that stays cheap no matter how many requests flow.
+  // per-edge flow map that stays cheap no matter how many requests flow.
   const traceOn = form.traceEnabled
-  const liveMode: 'events' | 'heatmap' = traceable(form) ? 'events' : 'heatmap'
+  const liveMode: 'events' | 'flow' = traceable(form) ? 'events' : 'flow'
   // Parse the scenario graph for the live view, reusing the same guarded pattern
   // as buildRunSpec: if it does not parse, just skip the visualization.
   const parsedGraph = traceOn ? safeParseGraph(form.graphJSON) : null
 
+  const openModel = form.workloadKind === 'open'
+  const hasWorkers = form.workers.trim().length > 0
+  const isRunning = status === 'running'
+  const sizeUnit = openModel ? 'max concurrency' : 'users'
+  const liveCopy =
+    liveMode === 'events'
+      ? `animating each request (≤${MAX_TRACE_USERS} ${sizeUnit})`
+      : `aggregate flow map (>${MAX_TRACE_USERS} ${sizeUnit})`
+
   return (
-    <main style={{ fontFamily: 'system-ui, sans-serif', maxWidth: 880, margin: '2rem auto', padding: '0 1rem' }}>
-      <h1>tmula</h1>
-      <p style={{ color: '#555' }}>Real-user traffic simulator — configure an experiment and run it.</p>
+    <main className="app">
+      <header className="masthead">
+        <span className="brand">
+          <span className="brand__mark" aria-hidden="true">
+            <BrandGlyph />
+          </span>
+          <span>
+            <h1 className="brand__name">tmula</h1>
+            <p className="brand__tag">Real-user traffic simulator</p>
+          </span>
+        </span>
+        <span className="masthead__spacer" />
+        {status && (
+          <span className="masthead__status">
+            <StatusPill status={status} />
+          </span>
+        )}
+      </header>
 
-      <section style={{ display: 'grid', gap: '0.75rem' }}>
-        <Field label="Target base URL">
-          <input value={form.baseUrl} onChange={(e) => set('baseUrl', e.target.value)} style={inp} />
-        </Field>
-        <Field label="Allowlist (comma-separated hosts)">
-          <input value={form.allowlist} onChange={(e) => set('allowlist', e.target.value)} style={inp} />
-        </Field>
-        <Field label="Worker addresses (comma-separated, blank = local)">
-          <input
-            value={form.workers}
-            onChange={(e) => set('workers', e.target.value)}
-            placeholder="e.g. 127.0.0.1:9101, 127.0.0.1:9102"
-            style={inp}
-          />
-        </Field>
-        {form.workers.trim() && (
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#444' }}>
-            <input
-              type="checkbox"
-              checked={form.aggregateWorkers}
-              onChange={(e) => set('aggregateWorkers', e.target.checked)}
-            />
-            Aggregate on workers (one summary per shard) — scales to millions; findings are run-wide
-          </label>
-        )}
-        <Field label="Workload model">
-          <select
-            value={form.workloadKind}
-            onChange={(e) => set('workloadKind', e.target.value as 'closed' | 'open')}
-            style={inp}
-          >
-            <option value="closed">closed — fixed virtual users (loop)</option>
-            <option value="open">open — users arrive at a rate over time (organic)</option>
-          </select>
-        </Field>
-        {form.workloadKind === 'open' && (
-          <>
-            <div style={{ display: 'flex', gap: '1rem' }}>
-            <Field label="Arrival rate (users/sec)">
+      <div className="stack">
+        {/* ---- Target ---- */}
+        <section className="card" aria-labelledby="card-target">
+          <div className="card__head">
+            <span className="card__step" aria-hidden="true">1</span>
+            <h2 className="card__title" id="card-target">Target</h2>
+          </div>
+          <p className="card__hint">
+            Where the simulated traffic goes, and the hosts it is allowed to reach. Add worker
+            addresses to fan the load out across machines.
+          </p>
+          <div className="stack" style={{ gap: 16 }}>
+            <Field label="Base URL" help="The service under test, e.g. your staging or local server.">
               <input
-                type="number"
-                min={1}
-                value={form.arrivalRate}
-                onChange={(e) => set('arrivalRate', Math.max(1, Number(e.target.value) || 1))}
-                style={inp}
+                className="input"
+                value={form.baseUrl}
+                onChange={(e) => set('baseUrl', e.target.value)}
+                placeholder="http://localhost:9000"
               />
             </Field>
-            <Field label="Duration (sec)">
-              <input
-                type="number"
-                min={1}
-                value={form.durationSeconds}
-                onChange={(e) => set('durationSeconds', Math.max(1, Number(e.target.value) || 1))}
-                style={inp}
-              />
-            </Field>
-            <Field label="Max concurrency">
-              <input
-                type="number"
-                min={0}
-                value={form.maxConcurrency}
-                onChange={(e) => set('maxConcurrency', Math.max(0, Number(e.target.value) || 0))}
-                style={inp}
-              />
-            </Field>
-            <Field label="Think min/max (ms)">
-              <div style={{ display: 'flex', gap: 4 }}>
-                <input
-                  type="number"
-                  min={0}
-                  value={form.thinkMinMs}
-                  onChange={(e) => set('thinkMinMs', Math.max(0, Number(e.target.value) || 0))}
-                  style={inp}
-                />
-                <input
-                  type="number"
-                  min={0}
-                  value={form.thinkMaxMs}
-                  onChange={(e) => set('thinkMaxMs', Math.max(0, Number(e.target.value) || 0))}
-                  style={inp}
-                />
-              </div>
-            </Field>
-            </div>
-            <Field label="Personas / segments (JSON array — optional, open model)">
-              <textarea
-                value={form.segmentsJSON}
-                onChange={(e) => set('segmentsJSON', e.target.value)}
-                rows={6}
-                placeholder={segmentsPlaceholder}
-                style={ta}
-              />
-            </Field>
-          </>
-        )}
-        <div style={{ display: 'flex', gap: '1rem' }}>
-          <Field label="Virtual users">
-            <input
-              type="number"
-              min={1}
-              value={form.users}
-              onChange={(e) => set('users', Math.max(1, Number(e.target.value) || 1))}
-              style={inp}
-            />
-          </Field>
-          <Field label="Max steps">
-            <input
-              type="number"
-              min={1}
-              value={form.maxSteps}
-              onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
-              style={inp}
-            />
-          </Field>
-          <Field label="Start node">
-            <input value={form.start} onChange={(e) => set('start', e.target.value)} style={inp} />
-          </Field>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: '#444' }}>
-          <input
-            type="checkbox"
-            checked={traceOn}
-            onChange={(e) => set('traceEnabled', e.target.checked)}
-          />
-          Live traffic — per-request for small runs, heatmap for large
-          {traceOn && (
-            <span style={{ color: '#999' }}>
-              ·{' '}
-              {liveMode === 'events'
-                ? `animating each request (≤${MAX_TRACE_USERS} ${form.workloadKind === 'open' ? 'max concurrency' : 'users'})`
-                : `aggregate heatmap (>${MAX_TRACE_USERS} ${form.workloadKind === 'open' ? 'max concurrency' : 'users'})`}
-            </span>
-          )}
-        </label>
-        <Field label="Scenario graph (JSON)">
-          <textarea value={form.graphJSON} onChange={(e) => set('graphJSON', e.target.value)} rows={10} style={ta} />
-        </Field>
-        <Field label="API templates (JSON)">
-          <textarea
-            value={form.templatesJSON}
-            onChange={(e) => set('templatesJSON', e.target.value)}
-            rows={8}
-            style={ta}
-          />
-        </Field>
-        <div>
-          <button
-            onClick={run}
-            disabled={runDisabled(status)}
-            style={{ ...btn, opacity: runDisabled(status) ? 0.5 : 1 }}
-          >
-            Run experiment
-          </button>
-          {runId && status === 'running' && (
-            <button
-              onClick={() => killRun(runId).catch((e) => setError(String(e)))}
-              style={{ ...btn, background: '#d73a4a', marginLeft: 8 }}
+            <Field
+              label="Allowlist"
+              help="Comma-separated hosts traffic may hit — a guardrail so a run can never escape your target."
             >
-              Kill
-            </button>
-          )}
-        </div>
-      </section>
-
-      {error && <p style={{ color: '#d73a4a' }}>{error}</p>}
-
-      {status && (
-        <section style={{ marginTop: '1.5rem' }}>
-          <h2>
-            Run {runId} — <span>{status}</span>
-            {runMode && <span style={{ color: '#555', fontWeight: 400, fontSize: 14 }}> · {runMode}</span>}
-          </h2>
-          {traceOn && parsedGraph && runId && (
-            <div style={{ margin: '0.5rem 0 1rem' }}>
-              <LiveGraph
-                key={runId}
-                graph={parsedGraph}
-                start={form.start}
-                runId={runId}
-                active={status === 'running'}
-                mode={liveMode}
+              <input
+                className="input"
+                value={form.allowlist}
+                onChange={(e) => set('allowlist', e.target.value)}
+                placeholder="localhost, 127.0.0.1"
               />
-            </div>
-          )}
-          {stats && <StatsView stats={stats} />}
-        </section>
-      )}
-
-      {report && (
-        <section style={{ marginTop: '1rem' }}>
-          <div style={{ display: 'flex', gap: 12, marginBottom: 8, fontSize: 14 }}>
-            <a href={reportHTMLURL(report.run.id)} target="_blank" rel="noreferrer" style={link}>
-              View HTML report ↗
-            </a>
-            {prevRunId && (
-              <a href={compareURL(prevRunId, report.run.id)} target="_blank" rel="noreferrer" style={link}>
-                Compare with previous run ↗
-              </a>
+            </Field>
+            <Field
+              label="Workers"
+              help="Optional. Comma-separated worker addresses to distribute the load. Leave blank to run on this machine."
+            >
+              <input
+                className="input"
+                value={form.workers}
+                onChange={(e) => set('workers', e.target.value)}
+                placeholder="e.g. 127.0.0.1:9101, 127.0.0.1:9102"
+              />
+            </Field>
+            {hasWorkers && (
+              <Check
+                checked={form.aggregateWorkers}
+                onChange={(v) => set('aggregateWorkers', v)}
+                label="Aggregate on workers (one summary per shard)"
+                sub="Scales to millions of users — each worker summarizes its shard instead of streaming every request. Findings stay run-wide."
+              />
             )}
           </div>
-          <ReportView report={report} />
         </section>
-      )}
+
+        {/* ---- Load model ---- */}
+        <section className="card" aria-labelledby="card-load">
+          <div className="card__head">
+            <span className="card__step" aria-hidden="true">2</span>
+            <h2 className="card__title" id="card-load">Load model</h2>
+          </div>
+          <p className="card__hint">
+            How users hit your service. <strong>Open</strong> mimics organic traffic — users arrive
+            at a rate over time. <strong>Closed</strong> holds a fixed pool that loops.
+          </p>
+          <div className="stack" style={{ gap: 16 }}>
+            <Field label="Workload" help="Open is the most realistic for a public-facing service.">
+              <select
+                className="select"
+                value={form.workloadKind}
+                onChange={(e) => set('workloadKind', e.target.value as 'closed' | 'open')}
+              >
+                <option value="open">Open — users arrive at a rate over time (organic)</option>
+                <option value="closed">Closed — a fixed pool of virtual users that loop</option>
+              </select>
+            </Field>
+
+            {openModel && (
+              <>
+                <hr className="divider" />
+                <div className="field-row field-row--2">
+                  <Field label="Arrival rate" help="New users per second.">
+                    <div className="input-suffix">
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        value={form.arrivalRate}
+                        onChange={(e) => set('arrivalRate', Math.max(1, Number(e.target.value) || 1))}
+                      />
+                      <span className="input-suffix__unit">/ sec</span>
+                    </div>
+                  </Field>
+                  <Field label="Duration" help="How long users keep arriving.">
+                    <div className="input-suffix">
+                      <input
+                        className="input"
+                        type="number"
+                        min={1}
+                        value={form.durationSeconds}
+                        onChange={(e) => set('durationSeconds', Math.max(1, Number(e.target.value) || 1))}
+                      />
+                      <span className="input-suffix__unit">sec</span>
+                    </div>
+                  </Field>
+                  <Field label="Max concurrency" help="Back-pressure cap. 0 = uncapped.">
+                    <input
+                      className="input"
+                      type="number"
+                      min={0}
+                      value={form.maxConcurrency}
+                      onChange={(e) => set('maxConcurrency', Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </Field>
+                  <Field label="Think time" help="Pause between a user's steps (ms, min–max).">
+                    <div className="range-pair">
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        aria-label="Think time minimum (ms)"
+                        value={form.thinkMinMs}
+                        onChange={(e) => set('thinkMinMs', Math.max(0, Number(e.target.value) || 0))}
+                      />
+                      <span className="range-pair__dash" aria-hidden="true">–</span>
+                      <input
+                        className="input"
+                        type="number"
+                        min={0}
+                        aria-label="Think time maximum (ms)"
+                        value={form.thinkMaxMs}
+                        onChange={(e) => set('thinkMaxMs', Math.max(0, Number(e.target.value) || 0))}
+                      />
+                    </div>
+                  </Field>
+                </div>
+                <Field
+                  label={
+                    <>
+                      Personas
+                      <span className="field__badge">advanced</span>
+                    </>
+                  }
+                  help="Optional JSON mix of weighted user types, each with its own entry node and pacing. Leave blank for one uniform population."
+                >
+                  <textarea
+                    className="textarea"
+                    value={form.segmentsJSON}
+                    onChange={(e) => set('segmentsJSON', e.target.value)}
+                    rows={6}
+                    placeholder={segmentsPlaceholder}
+                    spellCheck={false}
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* ---- Scenario ---- */}
+        <section className="card" aria-labelledby="card-scenario">
+          <div className="card__head">
+            <span className="card__step" aria-hidden="true">3</span>
+            <h2 className="card__title" id="card-scenario">Scenario</h2>
+          </div>
+          <p className="card__hint">
+            The journey users take. Each run starts at the start node and walks the graph for up to
+            the max steps; the JSON below defines the nodes, edges, and the API each node calls.
+          </p>
+          <div className="stack" style={{ gap: 16 }}>
+            <div className="field-row">
+              <Field label="Start node" help="Where every user begins.">
+                <input className="input" value={form.start} onChange={(e) => set('start', e.target.value)} />
+              </Field>
+              <Field label="Max steps" help="Longest path a user may take before stopping.">
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={form.maxSteps}
+                  onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
+                />
+              </Field>
+              <Field label="Virtual users" help="Closed: the pool size. Open: a nominal upper bound.">
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={form.users}
+                  onChange={(e) => set('users', Math.max(1, Number(e.target.value) || 1))}
+                />
+              </Field>
+            </div>
+
+            <Check
+              checked={traceOn}
+              onChange={(v) => set('traceEnabled', v)}
+              label="Show live traffic while the run streams"
+              sub={
+                traceOn
+                  ? `Per-request animation for small runs, an aggregate flow map for large ones · ${liveCopy}`
+                  : 'Per-request animation for small runs, an aggregate flow map for large ones'
+              }
+            />
+
+            <hr className="divider" />
+
+            <Field
+              label={
+                <>
+                  Scenario graph
+                  <span className="field__badge">JSON · advanced</span>
+                </>
+              }
+              help="Nodes and weighted edges. A dependency edge must complete before its target runs."
+            >
+              <textarea
+                className="textarea"
+                value={form.graphJSON}
+                onChange={(e) => set('graphJSON', e.target.value)}
+                rows={12}
+                spellCheck={false}
+              />
+            </Field>
+            <Field
+              label={
+                <>
+                  API templates
+                  <span className="field__badge">JSON · advanced</span>
+                </>
+              }
+              help="The request each node sends: method, path, and an optional payload template."
+            >
+              <textarea
+                className="textarea"
+                value={form.templatesJSON}
+                onChange={(e) => set('templatesJSON', e.target.value)}
+                rows={9}
+                spellCheck={false}
+              />
+            </Field>
+          </div>
+        </section>
+
+        {/* ---- Run ---- */}
+        <section className="card">
+          <div className="actionbar">
+            <button
+              className="btn btn--primary btn--lg"
+              onClick={run}
+              disabled={runDisabled(status)}
+            >
+              <PlayIcon />
+              {runDisabled(status) ? 'Running…' : 'Run experiment'}
+            </button>
+            {runId && isRunning && (
+              <button
+                className="btn btn--danger btn--lg"
+                onClick={() => killRun(runId).catch((e) => setError(String(e)))}
+              >
+                <StopIcon />
+                Kill run
+              </button>
+            )}
+            <span className="actionbar__note">
+              {openModel ? (
+                <>
+                  ~<strong>{form.arrivalRate}</strong> users/sec for <strong>{form.durationSeconds}s</strong>
+                </>
+              ) : (
+                <>
+                  <strong>{form.users}</strong> virtual users · up to <strong>{form.maxSteps}</strong> steps
+                </>
+              )}
+            </span>
+          </div>
+        </section>
+
+        {error && (
+          <div className="alert" role="alert">
+            <span className="alert__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>{error}</span>
+          </div>
+        )}
+
+        {/* ---- Live run ---- */}
+        {status && (
+          <section className="card" aria-live="polite">
+            <div className="runhead">
+              <h2 className="runhead__title">Run</h2>
+              <span className="runhead__id">{runId || '—'}</span>
+              <StatusPill status={status} />
+              {runMode && <span className="runhead__mode">· {runMode}</span>}
+            </div>
+
+            {traceOn && parsedGraph && runId && (
+              <div className="viz">
+                <div className="viz__head">
+                  <h3 className="viz__title">Traffic flow</h3>
+                  <span className="viz__sub">where requests travel across your scenario</span>
+                </div>
+                <LiveGraph
+                  key={runId}
+                  graph={parsedGraph}
+                  start={form.start}
+                  runId={runId}
+                  active={isRunning}
+                  mode={liveMode}
+                />
+              </div>
+            )}
+
+            {traceOn && runId && (
+              <div className="viz">
+                <div className="viz__head">
+                  <h3 className="viz__title">Latency heatmap</h3>
+                  <span className="viz__sub">request density by latency band over time</span>
+                </div>
+                <LatencyHeatmap runId={runId} active={isRunning} />
+              </div>
+            )}
+
+            {stats && (
+              <div className="viz">
+                <div className="viz__head">
+                  <h3 className="viz__title">Live metrics</h3>
+                </div>
+                <StatsView stats={stats} />
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ---- Report ---- */}
+        {report && (
+          <section className="card">
+            <div className="reportlinks">
+              <a className="reportlink" href={reportHTMLURL(report.run.id)} target="_blank" rel="noreferrer">
+                View full HTML report
+                <ExternalIcon />
+              </a>
+              {prevRunId && (
+                <a className="reportlink" href={compareURL(prevRunId, report.run.id)} target="_blank" rel="noreferrer">
+                  Compare with previous run
+                  <ExternalIcon />
+                </a>
+              )}
+            </div>
+            <ReportView report={report} />
+          </section>
+        )}
+      </div>
     </main>
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+// StatusPill renders the run status as a colored pill: running pulses, terminal
+// states read at a glance (completed = green, killed/failed = red).
+function StatusPill({ status }: { status: string }) {
+  const kind = statusKind(status)
   return (
-    <label style={{ display: 'block' }}>
-      <span style={{ display: 'block', fontSize: 13, color: '#444', marginBottom: 4 }}>{label}</span>
+    <span className={`pill pill--${kind}`}>
+      <span className="pill__dot" aria-hidden="true" />
+      {status}
+    </span>
+  )
+}
+
+// statusKind maps a run status onto a pill variant.
+function statusKind(status: string): 'running' | 'ok' | 'danger' | 'warn' | 'idle' {
+  if (status === 'running' || status === 'pending' || status === 'starting') return 'running'
+  if (status === 'completed' || status === 'done' || status === 'succeeded') return 'ok'
+  if (status === 'killed' || status === 'failed' || status === 'error') return 'danger'
+  if (!status) return 'idle'
+  return 'warn'
+}
+
+// Field is a labeled form control with optional helper text. The label is a real
+// <label> wrapping the control so the association is automatic and accessible.
+function Field({
+  label,
+  help,
+  children,
+}: {
+  label: React.ReactNode
+  help?: string
+  children: React.ReactNode
+}) {
+  return (
+    <label className="field">
+      <span className="field__label">{label}</span>
       {children}
+      {help && <span className="field__help">{help}</span>}
+    </label>
+  )
+}
+
+// Check is a labeled checkbox card: the whole row is the clickable <label>.
+function Check({
+  checked,
+  onChange,
+  label,
+  sub,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  label: string
+  sub?: string
+}) {
+  return (
+    <label className={`check${checked ? ' check--on' : ''}`}>
+      <input
+        className="check__box"
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="check__body">
+        <span className="check__label">{label}</span>
+        {sub && <span className="check__sub">{sub}</span>}
+      </span>
     </label>
   )
 }
@@ -409,14 +671,54 @@ function safeParseGraph(json: string): ParsedGraph | null {
   }
 }
 
-const inp: React.CSSProperties = { width: '100%', padding: '6px 8px', border: '1px solid #ccc', borderRadius: 6 }
-const ta: React.CSSProperties = { ...inp, fontFamily: 'ui-monospace, monospace', fontSize: 13 }
-const btn: React.CSSProperties = {
-  padding: '8px 16px',
-  background: '#1f6feb',
-  color: 'white',
-  border: 'none',
-  borderRadius: 6,
-  cursor: 'pointer',
+// --- Inline icons (no asset / dependency). ------------------------------------
+
+function BrandGlyph() {
+  // Three rising signal bars — a compact "traffic" mark.
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="3" y="13" width="4.5" height="8" rx="1.4" fill="currentColor" opacity="0.7" />
+      <rect x="9.75" y="8" width="4.5" height="13" rx="1.4" fill="currentColor" opacity="0.85" />
+      <rect x="16.5" y="3" width="4.5" height="18" rx="1.4" fill="currentColor" />
+    </svg>
+  )
 }
-const link: React.CSSProperties = { color: '#1f6feb', textDecoration: 'none', fontWeight: 500 }
+
+function PlayIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M7 5.5v13l11-6.5-11-6.5z" fill="currentColor" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+    </svg>
+  )
+}
+
+function ExternalIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function AlertIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+      <path d="M12 7.5v5.5M12 16.2v.3" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  )
+}
