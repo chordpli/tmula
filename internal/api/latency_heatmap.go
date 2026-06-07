@@ -22,6 +22,12 @@ import (
 // run to a few dozen readable columns while still showing within-run movement.
 const latencyBinWidth = 500 * time.Millisecond
 
+// latencyMaxCols bounds how many time columns a snapshot streams. A long soak
+// would otherwise gain a column every bin and re-send the whole O(run-length)
+// grid each tick; past this width, snapshot merges adjacent columns and widens
+// the reported bin so the time axis stays correct at a bounded payload size.
+const latencyMaxCols = 300
+
 // latencyBounds are the inclusive-low/exclusive-high upper edges (ms) of the
 // latency bands, low to high. A request with latency < bounds[i] (and >=
 // bounds[i-1]) lands in row i; anything >= the last bound lands in the final,
@@ -101,10 +107,10 @@ func latencyRowsMeta() []latencyRowSnap {
 // snapshot returns a dense row-major grid (cells[row][col]) plus the busiest
 // cell's count for color scaling. cols spans 0..maxCol; an empty grid yields
 // zero-width rows and a zero max.
-func (h *latencyHeat) snapshot() (cells [][]int64, maxCount int64) {
+func (h *latencyHeat) snapshot() (cells [][]int64, maxCount int64, binWidthMs int) {
 	rows := latencyRows()
+	binWidthMs = int(latencyBinWidth / time.Millisecond)
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	cols := 0
 	if len(h.grid) > 0 {
 		cols = h.maxCol + 1
@@ -115,14 +121,47 @@ func (h *latencyHeat) snapshot() (cells [][]int64, maxCount int64) {
 	}
 	for col, rc := range h.grid {
 		for r := 0; r < rows; r++ {
-			c := rc[r]
-			out[r][col] = c
-			if c > maxCount {
-				maxCount = c
+			out[r][col] = rc[r]
+		}
+	}
+	h.mu.Unlock()
+
+	// Keep the streamed grid bounded regardless of run length: merge adjacent
+	// columns into <= latencyMaxCols and widen the reported bin by the same factor,
+	// so a multi-hour soak streams a fixed-size frame instead of an ever-growing one.
+	if cols > latencyMaxCols {
+		factor := (cols + latencyMaxCols - 1) / latencyMaxCols
+		out = downsampleCols(out, factor)
+		binWidthMs *= factor
+	}
+	// maxCount keys the color scale, so compute it on the (possibly merged) grid
+	// the client actually renders.
+	for _, row := range out {
+		for _, v := range row {
+			if v > maxCount {
+				maxCount = v
 			}
 		}
 	}
-	return out, maxCount
+	return out, maxCount, binWidthMs
+}
+
+// downsampleCols merges every `factor` adjacent columns by summing their counts,
+// so a row of N columns collapses to ceil(N/factor). Total counts are preserved;
+// only time resolution coarsens. factor <= 1 returns the input unchanged.
+func downsampleCols(cells [][]int64, factor int) [][]int64 {
+	if factor <= 1 {
+		return cells
+	}
+	out := make([][]int64, len(cells))
+	for r, row := range cells {
+		merged := make([]int64, (len(row)+factor-1)/factor)
+		for c, v := range row {
+			merged[c/factor] += v
+		}
+		out[r] = merged
+	}
+	return out
 }
 
 // streamLatencyHeatmap streams the time x latency grid for a run as SSE, powering
@@ -150,14 +189,14 @@ func (s *Server) streamLatencyHeatmap(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	binMs := int(latencyBinWidth / time.Millisecond)
+	baseBinMs := int(latencyBinWidth / time.Millisecond)
 	rowsMeta := latencyRowsMeta()
-	send := func(cells [][]int64, maxCount int64, done bool) {
+	send := func(cells [][]int64, maxCount int64, binWidthMs int, done bool) {
 		if cells == nil {
 			cells = [][]int64{}
 		}
 		b, _ := json.Marshal(map[string]any{
-			"binWidthMs": binMs,
+			"binWidthMs": binWidthMs,
 			"rows":       rowsMeta,
 			"cells":      cells,
 			"maxCount":   maxCount,
@@ -168,7 +207,7 @@ func (s *Server) streamLatencyHeatmap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rs.latency == nil {
-		send(nil, 0, true)
+		send(nil, 0, baseBinMs, true)
 		return
 	}
 
@@ -186,8 +225,8 @@ func (s *Server) streamLatencyHeatmap(w http.ResponseWriter, r *http.Request) {
 		}
 		status, _ := rs.snapshotStatus()
 		done := status != domain.RunRunning && status != domain.RunPending
-		cells, maxCount := rs.latency.snapshot()
-		send(cells, maxCount, done)
+		cells, maxCount, binMs := rs.latency.snapshot()
+		send(cells, maxCount, binMs, done)
 		if done {
 			return
 		}
