@@ -1,0 +1,52 @@
+# tmula demo — one command to try the whole thing, no Go/Node toolchain.
+#
+#   docker compose up        # build (first run) + start, then open http://localhost:8080
+#
+# Three services share one network. The control plane reaches the example SUTs by
+# their service name, so in the web console set the target Base URL to:
+#   shop       ->  http://sample-api:9000
+#   ticketing  ->  http://ticketing-api:9100
+# (The allowlist auto-derives from the target host, so no extra setup.) The
+# presets' default localhost URLs are for `make demo`; in Docker use the names above.
+name: tmula-demo
+
+services:
+  tmula:
+    build:
+      context: .
+      args:
+        VERSION: docker-compose
+    image: tmula-demo:local
+    command: ["tmula", "--role", "local", "--addr", ":8080"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      - sample-api
+      - ticketing-api
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # Branching-shop example API (the `shop` preset's target).
+  sample-api:
+    image: tmula-demo:local
+    command: ["sample-api"]
+    environment:
+      SAMPLE_API_ADDR: ":9000"
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  # Concert-ticketing example API (the `ticketing` preset's target).
+  ticketing-api:
+    image: tmula-demo:local
+    command: ["ticketing-api"]
+    environment:
+      TICKETING_API_ADDR: ":9100"
+    ports:
+      - "9100:9100"
+    restart: unless-stopped

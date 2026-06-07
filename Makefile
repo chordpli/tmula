@@ -4,7 +4,7 @@ BINARY := bin/tmula
 PKG := ./...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build go-build web-build embed web dev test vet fmt lint run clean tidy
+.PHONY: all build go-build web-build embed web demo dev test vet fmt lint run clean tidy
 
 all: build
 
@@ -50,6 +50,17 @@ run: build
 web: embed
 	@echo "tmula web console: open http://localhost:8080"
 	$(BINARY) --role local --addr :8080
+
+## demo: the whole thing locally — build the UI into the binary, then run the
+## engine plus both example SUTs. Open http://localhost:8080; the shop/ticketing
+## presets target localhost:9000 / :9100 out of the box. Ctrl-C stops everything.
+## (No Docker; needs Go + Node. For a zero-toolchain demo use `docker compose up`.)
+demo: embed
+	@echo "→ tmula console: http://localhost:8080   (shop SUT :9000 · ticketing SUT :9100) — Ctrl-C to stop"
+	@bash -c 'trap "kill 0" EXIT INT TERM; \
+	  SAMPLE_API_ADDR=:9000 go run ./examples/sample-api & \
+	  TICKETING_API_ADDR=:9100 go run ./examples/ticketing-api & \
+	  $(BINARY) --role local --addr :8080'
 
 ## dev: hot-reload UI dev server (proxies /api to a separately running engine).
 ## Run `make run` (or `make web`) in another terminal first.
