@@ -1,11 +1,37 @@
 package importer
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/chordpli/tmula/internal/scenariofile"
 )
+
+// TestExampleImportFilesParse keeps the shipped import examples
+// (examples/imports) valid: they must parse into a non-trivial scenario so the
+// "import this file" docs and UI demo never point at a broken sample.
+func TestExampleImportFilesParse(t *testing.T) {
+	oa, err := os.ReadFile("../../examples/imports/shop.openapi.yaml")
+	if err != nil {
+		t.Fatalf("read openapi example: %v", err)
+	}
+	if sc, err := FromOpenAPI(oa); err != nil {
+		t.Fatalf("import openapi example: %v", err)
+	} else if len(sc.Flow) < 6 {
+		t.Errorf("openapi example flow = %d steps, want >= 6", len(sc.Flow))
+	}
+
+	har, err := os.ReadFile("../../examples/imports/shop-session.har")
+	if err != nil {
+		t.Fatalf("read har example: %v", err)
+	}
+	if sc, err := FromHAR(har); err != nil {
+		t.Fatalf("import har example: %v", err)
+	} else if len(sc.Flow) < 5 {
+		t.Errorf("har example flow = %d steps, want >= 5", len(sc.Flow))
+	}
+}
 
 const openAPIv3 = `
 openapi: 3.0.0
