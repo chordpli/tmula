@@ -197,6 +197,43 @@ func TestDistributeSummaryAcrossWorkers(t *testing.T) {
 	}
 }
 
+// TestWorkerEnforcesAllowlist: a worker handed a shard whose allowlist excludes
+// the target host blocks every request — the SUT receives no traffic and the
+// aggregated stats record the blocks as errors.
+func TestWorkerEnforcesAllowlist(t *testing.T) {
+	t.Parallel()
+
+	var hits int64
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(sut.Close)
+
+	conn := startWorker(t, WithAdapter(load.NewRESTAdapter(2*time.Second)))
+	coord, err := NewCoordinator(conn)
+	if err != nil {
+		t.Fatalf("new coordinator: %v", err)
+	}
+
+	spec := linearSpec(sut.URL)
+	spec.Allowlist = []string{"example.com"} // excludes the SUT host
+	spec.RateCap = domain.RateCap{MaxRPS: 1000, MaxConcurrency: 100}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stats, _, err := coord.Distribute(ctx, spec, 5)
+	if err != nil {
+		t.Fatalf("distribute: %v", err)
+	}
+	if got := atomic.LoadInt64(&hits); got != 0 {
+		t.Errorf("SUT hits = %d, want 0 (worker must block the off-allowlist host)", got)
+	}
+	if stats.Errors == 0 {
+		t.Error("blocked requests should be recorded as errors")
+	}
+}
+
 // TestWorkerPing covers the health RPC over bufconn.
 func TestWorkerPing(t *testing.T) {
 	t.Parallel()

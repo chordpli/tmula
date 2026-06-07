@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // WorkloadKind selects how virtual users are generated over a run.
 type WorkloadKind string
@@ -97,6 +100,12 @@ func (w WorkloadModel) Validate() error {
 		if !w.Arrival.Shape.Valid() {
 			return fmt.Errorf("workload: invalid arrival shape %q", w.Arrival.Shape)
 		}
+		// Reject NaN/±Inf first: they slip past the < and <= comparisons below
+		// (NaN fails every comparison; +Inf reads as "positive") and would yield
+		// NaN/zero Poisson inter-arrival times at runtime.
+		if !finiteRate(w.Arrival.StartRate) || !finiteRate(w.Arrival.PeakRate) {
+			return fmt.Errorf("workload: arrival rates must be finite")
+		}
 		if w.Arrival.StartRate < 0 || w.Arrival.PeakRate < 0 {
 			return fmt.Errorf("workload: arrival rates must be non-negative")
 		}
@@ -111,4 +120,9 @@ func (w WorkloadModel) Validate() error {
 		}
 	}
 	return nil
+}
+
+// finiteRate reports whether r is a usable arrival rate (not NaN or ±Inf).
+func finiteRate(r float64) bool {
+	return !math.IsNaN(r) && !math.IsInf(r, 0)
 }

@@ -33,3 +33,4 @@ Thumbs.db
 .claude/
 .codex/
 .vills-lock.json
+/engine

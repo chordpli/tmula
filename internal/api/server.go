@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,17 @@ func (r RunSpec) Validate() error {
 	if err := r.Experiment.Validate(); err != nil {
 		return err
 	}
+	// Validate every template's path so a static authority/scheme/CRLF cannot be
+	// smuggled into the request URL. (A variable that renders into the path is
+	// additionally caught at request time by the guard's allowlist check.)
+	for id, t := range r.Templates {
+		if t.Method == "" {
+			return fmt.Errorf("api: template %q: method is required", id)
+		}
+		if err := validateTemplatePath(t.Path); err != nil {
+			return fmt.Errorf("api: template %q path %q: %w", id, t.Path, err)
+		}
+	}
 	if r.Start == "" {
 		return fmt.Errorf("api: start node is required")
 	}
@@ -116,6 +128,26 @@ func (r RunSpec) Validate() error {
 // isOpen reports whether the spec uses the open (arrival-rate) workload model.
 func (r RunSpec) isOpen() bool {
 	return r.Workload != nil && r.Workload.Kind == domain.WorkloadOpen
+}
+
+// validateTemplatePath rejects a template path that could redirect a request off
+// the target host: it must be a rooted path (start with a single "/"), carry no
+// scheme or authority, and contain no control characters. A "//" prefix is
+// refused because it is a protocol-relative authority.
+func validateTemplatePath(path string) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("must be a rooted path starting with /")
+	}
+	if strings.HasPrefix(path, "//") {
+		return fmt.Errorf("must not start with // (protocol-relative authority)")
+	}
+	if strings.Contains(path, "://") {
+		return fmt.Errorf("must not contain a scheme")
+	}
+	if strings.ContainsAny(path, "\r\n\t") {
+		return fmt.Errorf("must not contain control characters")
+	}
+	return nil
 }
 
 type runState struct {
@@ -425,7 +457,7 @@ func (s *Server) finalizeRun(ctx context.Context, rs *runState, err error) {
 // the scheduler generates user sessions over time and returns the aggregate
 // stats + findings directly.
 func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (obs.Stats, []domain.Finding, error) {
-	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
+	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, load.WithGuard(rs.guard))
 	user := load.VirtualUser{ID: "user"}
 	if len(spec.Users) > 0 {
 		user = spec.Users[0]
@@ -454,7 +486,7 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // executeLocal runs the experiment in-process via the load.Runner, recording
 // each step into the run's collector and finding aggregator.
 func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
-	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates)
+	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, load.WithGuard(rs.guard))
 	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
 	ts := s.now()
 	for _, res := range results {
@@ -567,6 +599,11 @@ func shardSpecFor(spec RunSpec) cluster.ShardSpec {
 		Start:         spec.Start,
 		MaxSteps:      spec.MaxSteps,
 		Seed:          spec.Seed,
+		// Ship the safety policy so each worker enforces the same allowlist and
+		// rate/concurrency cap on the target it was handed.
+		Allowlist: spec.TargetEnv.Allowlist,
+		RateCap:   spec.TargetEnv.RateCap,
+		EnvClass:  spec.TargetEnv.EnvClass,
 	}
 }
 

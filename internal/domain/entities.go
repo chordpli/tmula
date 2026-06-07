@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -112,8 +113,9 @@ func (g ScenarioGraph) Validate() error {
 			return fmt.Errorf("scenario graph: edge %q->%q references unknown node", e.From, e.To)
 		}
 		// Use a positive predicate so NaN (which fails every comparison) is
-		// rejected rather than silently passing as "not negative".
-		if !(e.Weight >= 0) {
+		// rejected rather than silently passing as "not negative"; also reject
+		// +Inf, which would satisfy ">= 0" yet poison a weighted pick.
+		if !(e.Weight >= 0) || math.IsInf(e.Weight, 1) {
 			return fmt.Errorf("scenario graph: edge %q->%q has invalid weight %v", e.From, e.To, e.Weight)
 		}
 	}

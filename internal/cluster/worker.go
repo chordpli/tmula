@@ -12,7 +12,25 @@ import (
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/obs"
+	"github.com/chordpli/tmula/internal/safety"
 )
+
+// guardForSpec builds the safety guard for a shard from the policy the master
+// shipped in the spec (host allowlist + rate/concurrency cap), so a worker
+// enforces the same allowlist the control plane does — on the actual
+// TargetBaseURL it was handed — rather than trusting it blindly. An empty
+// allowlist means no policy was shipped (low-level tests), and the worker then
+// runs unguarded.
+func guardForSpec(spec ShardSpec) (*safety.Guard, error) {
+	if len(spec.Allowlist) == 0 {
+		return nil, nil
+	}
+	return safety.NewGuard(safety.Config{
+		Allowlist:      spec.Allowlist,
+		MaxRPS:         spec.RateCap.MaxRPS,
+		MaxConcurrency: spec.RateCap.MaxConcurrency,
+	})
+}
 
 // defaultRequestTimeout bounds each individual request a worker makes when the
 // caller does not supply a custom adapter.
@@ -84,7 +102,11 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 	// max_steps); spec_json supplies the graph, templates and target. The master
 	// fills the proto fields from the same spec, so the two never diverge.
 	start := domain.ID(req.GetStartNode())
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates)
+	guard, gerr := guardForSpec(spec)
+	if gerr != nil {
+		return fmt.Errorf("cluster: worker build guard: %w", gerr)
+	}
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard))
 	users := buildUsers(offset, count)
 
 	// The Runner seeds user i (local) with seed+i. Offsetting the base seed by
@@ -124,7 +146,11 @@ func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunSh
 	}
 	offset := int(req.GetUserOffset())
 	start := domain.ID(req.GetStartNode())
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates)
+	guard, gerr := guardForSpec(spec)
+	if gerr != nil {
+		return nil, fmt.Errorf("cluster: worker build guard: %w", gerr)
+	}
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard))
 	users := buildUsers(offset, count)
 
 	results, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset))
