@@ -15,17 +15,19 @@ import {
 
 // LiveGraph visualizes a run's traffic over its scenario graph. It has two modes:
 //
-//   'events'  — the Phase-1 view for small runs: every request is a dot that
-//               travels from one node to the next (a pulse at the entry node),
-//               green when it succeeded and red when it failed.
-//   'heatmap' — the Phase-2 view that works at any scale (millions of requests):
-//               instead of per-request dots it draws each edge weighted by its
-//               cumulative request volume and tinted by its error ratio, so a
-//               glance shows where traffic concentrates and where errors are.
+//   'events' — the Phase-1 view for small runs: every request is a dot that
+//              travels from one node to the next (a pulse at the entry node),
+//              green when it succeeded and red when it failed.
+//   'flow'   — the Phase-2 view that works at any scale (millions of requests):
+//              instead of per-request dots it draws each edge weighted by its
+//              cumulative request volume and tinted by its error ratio, so a
+//              glance shows where traffic concentrates and where errors are. This
+//              is an edge-weighted flow diagram, not a latency heatmap (the
+//              canonical load-test heatmap lives in LatencyHeatmap.tsx).
 //
 // The graph is laid out by layoutGraph (a pure, tested helper). In 'events' mode
 // all motion runs from a single requestAnimationFrame loop so it stays smooth and
-// the dot count can be capped; 'heatmap' mode does no per-dot animation (it is an
+// the dot count can be capped; 'flow' mode does no per-dot animation (it is an
 // aggregate) beyond a subtle opacity pulse when a fresh frame arrives.
 
 interface GraphNode {
@@ -45,7 +47,7 @@ interface LiveGraphProps {
   start: string
   runId: string
   active: boolean
-  mode: 'events' | 'heatmap'
+  mode: 'events' | 'flow'
 }
 
 // Visual + motion tuning. Colors track the GitHub-dark palette so green/red
@@ -91,8 +93,8 @@ export default function LiveGraph({ graph, start, runId, active, mode }: LiveGra
   // fit any graph shape responsively.
   const view = useMemo(() => boundingBox(positions, PAD), [positions])
 
-  return mode === 'heatmap' ? (
-    <HeatmapView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
+  return mode === 'flow' ? (
+    <FlowView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
   ) : (
     <EventsView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
   )
@@ -338,7 +340,7 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
 }
 
 // ---------------------------------------------------------------------------
-// Heatmap mode (Phase 2): per-edge aggregate flow, scales to any run size.
+// Flow mode (Phase 2): per-edge aggregate flow, scales to any run size.
 // ---------------------------------------------------------------------------
 
 // edgeKey identifies an edge by endpoints so stream aggregates can be matched to
@@ -347,7 +349,7 @@ function edgeKey(from: string, to: string): string {
   return `${from} ${to}`
 }
 
-function HeatmapView({ graph, start, runId, active, positions, view }: ModeProps) {
+function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
   // The latest per-edge aggregates, keyed by endpoints. Held in a ref so the SSE
   // handler can replace it without a render per frame; tick() repaints on update.
   const heatRef = useRef<Map<string, HeatEdge>>(new Map())
@@ -437,8 +439,8 @@ function HeatmapView({ graph, start, runId, active, positions, view }: ModeProps
   return (
     <figure style={figure}>
       <figcaption style={caption}>
-        <span style={{ color: TEXT, fontWeight: 600 }}>Live traffic</span>
-        <span style={{ color: MUTED }}> — heatmap: edge weight is request volume</span>
+        <span style={{ color: TEXT, fontWeight: 600 }}>Traffic flow</span>
+        <span style={{ color: MUTED }}> — edge thickness is request volume</span>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: 14, alignItems: 'center' }}>
           <span style={{ color: MUTED, fontSize: 12 }}>
             <span style={{ color: TEXT, fontWeight: 600 }}>{formatCount(totalRef.current)}</span> requests
@@ -451,7 +453,7 @@ function HeatmapView({ graph, start, runId, active, positions, view }: ModeProps
         viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
         width="100%"
         role="img"
-        aria-label="Aggregate request traffic heatmap over the scenario graph"
+        aria-label="Aggregate request traffic flow over the scenario graph"
         style={canvas}
       >
         <defs>

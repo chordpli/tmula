@@ -19,7 +19,7 @@ export interface ExperimentForm {
   thinkMinMs: number // pause between a user's steps (uniform [min,max])
   thinkMaxMs: number
   segmentsJSON: string // open: persona mix as a JSON array (blank/[] = homogeneous)
-  traceEnabled: boolean // visualize live traffic (per-request for small runs, heatmap for large)
+  traceEnabled: boolean // visualize live traffic (per-request for small runs, flow map for large)
 }
 
 // Segment is one persona in an open run: a weighted share of arrivals with its
@@ -300,6 +300,61 @@ export function parseHeatFrame(line: string): HeatFrame | null {
   }
 }
 
+// --- Latency heatmap stream (the canonical load-test heatmap) -------------------
+// A LatencyFrame is a 2-D histogram: rows are latency bands (LOW -> HIGH), columns
+// are time buckets since the run started, and each cell holds the request count in
+// that band × bucket. It streams over SSE while the run is active and the final
+// frame sets done === true, then the server closes — same lifecycle as the per-edge
+// heatmap, but the payload encodes density over time rather than over the graph.
+
+// LatencyRow describes one latency band on the Y axis. hiMs === 0 marks the
+// unbounded top bucket (everything at or above loMs, e.g. "5s+").
+export interface LatencyRow {
+  loMs: number
+  hiMs: number
+  label: string
+}
+
+export interface LatencyFrame {
+  binWidthMs: number // wall-clock width of one time column (ms)
+  rows: LatencyRow[] // latency bands, ordered LOW -> HIGH
+  cells: number[][] // cells[rowIndex][colIndex] = request count
+  maxCount: number // the densest cell's count, for color scaling
+  done?: boolean
+}
+
+// parseLatencyFrame parses a single latency-heatmap SSE "data:" line, mirroring
+// parseHeatFrame exactly: it returns null for comments, blank lines, and malformed
+// payloads, keeping the stream open on a bad frame.
+export function parseLatencyFrame(line: string): LatencyFrame | null {
+  if (!line.startsWith('data:')) return null
+  const payload = line.slice('data:'.length).trim()
+  if (!payload) return null
+  try {
+    return JSON.parse(payload) as LatencyFrame
+  } catch {
+    return null
+  }
+}
+
+// LAT_CELL_EMPTY / LAT_CELL_HOT are the endpoints of the latency-heatmap density
+// ramp: a near-blank tint of the accent for low/zero density, the strong saturated
+// accent at the peak. Kept as "#rrggbb" so latencyCellColor can reuse lerpColor.
+export const LAT_CELL_EMPTY = '#eef2ff' // indigo-50: almost blank
+export const LAT_CELL_HOT = '#4338ca' // indigo-700: dense
+
+// latencyCellColor maps a cell's request count onto a sequential color ramp from a
+// very-light tint (low/zero density) to a strong, saturated accent (max density).
+// A zero count is nearly blank so empty cells recede; the ramp is interpolated in
+// sRGB via lerpColor, so it stays dependency-free. The fraction uses a sqrt so the
+// low end of a wide count range still separates visibly (a few requests already
+// read as more than nothing).
+export function latencyCellColor(count: number, maxCount: number): string {
+  if (count <= 0 || maxCount <= 0) return LAT_CELL_EMPTY
+  const frac = Math.sqrt(clamp01(count / maxCount))
+  return lerpColor(LAT_CELL_EMPTY, LAT_CELL_HOT, frac)
+}
+
 // --- Heatmap visual encoding (pure, unit-tested) -------------------------------
 // These map an edge's aggregate counts onto the stroke width and color the SVG
 // draws. They live here (next to layoutGraph) so they can be tested without the
@@ -479,6 +534,13 @@ export function traceURL(runId: string): string {
 // used by the heatmap view for runs too large to animate request-by-request.
 export function heatmapURL(runId: string): string {
   return `${API}/runs/${runId}/heatmap`
+}
+
+// latencyHeatmapURL is the latency-over-time SSE stream for a run (opt-in via
+// spec.trace): a 2-D histogram of request counts by latency band × time bucket,
+// used by the canonical load-test latency heatmap.
+export function latencyHeatmapURL(runId: string): string {
+  return `${API}/runs/${runId}/latency-heatmap`
 }
 
 // reportHTMLURL is the server-rendered, standalone HTML report for a run.
