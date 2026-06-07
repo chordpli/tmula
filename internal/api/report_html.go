@@ -25,14 +25,12 @@ func reportData(rep Report) report.Data {
 // GET /api/runs/{id}/report.html.
 func (s *Server) getReportHTML(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(r.PathValue("id"))
-	s.mu.Lock()
-	rs, ok := s.runs[id]
-	s.mu.Unlock()
+	rep, ok := s.reportFor(id)
 	if !ok {
 		writeHTMLError(w, http.StatusNotFound, fmt.Sprintf("Run %q is not available.", id))
 		return
 	}
-	out, err := report.HTML(reportData(rs.report()))
+	out, err := report.HTML(reportData(rep))
 	if err != nil {
 		writeHTMLError(w, http.StatusInternalServerError, "The report could not be rendered.")
 		return
@@ -55,10 +53,8 @@ func (s *Server) compareRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	ra, aok := s.runs[aID]
-	rb, bok := s.runs[bID]
-	s.mu.Unlock()
+	repA, aok := s.reportFor(aID)
+	repB, bok := s.reportFor(bID)
 	if !aok {
 		writeHTMLError(w, http.StatusNotFound, fmt.Sprintf("Run %q is not available.", aID))
 		return
@@ -68,7 +64,7 @@ func (s *Server) compareRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := report.CompareHTML(reportData(ra.report()), reportData(rb.report()))
+	out, err := report.CompareHTML(reportData(repA), reportData(repB))
 	if err != nil {
 		writeHTMLError(w, http.StatusInternalServerError, "The comparison could not be rendered.")
 		return

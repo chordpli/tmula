@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/chordpli/tmula/internal/domain"
+	"github.com/chordpli/tmula/internal/obs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -90,6 +91,11 @@ CREATE TABLE IF NOT EXISTS runs (
     body          JSONB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runs_experiment_id_idx ON runs (experiment_id);
+
+CREATE TABLE IF NOT EXISTS run_stats (
+    run_id TEXT PRIMARY KEY,
+    body   JSONB NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS metrics (
     seq    BIGSERIAL PRIMARY KEY,
@@ -195,6 +201,42 @@ func (s *PostgresStore) GetRun(id domain.ID) (domain.RunExecution, error) {
 		return domain.RunExecution{}, fmt.Errorf("store: unmarshal run %q: %w", id, err)
 	}
 	return r, nil
+}
+
+// SaveStats inserts or replaces the aggregate stats for a run, keyed by run id.
+func (s *PostgresStore) SaveStats(runID domain.ID, stats obs.Stats) error {
+	if runID == "" {
+		return fmt.Errorf("store: stats runId is required")
+	}
+	body, err := json.Marshal(stats)
+	if err != nil {
+		return fmt.Errorf("store: marshal stats for run %q: %w", runID, err)
+	}
+	ctx := s.ctx
+	const q = `INSERT INTO run_stats (run_id, body) VALUES ($1, $2)
+               ON CONFLICT (run_id) DO UPDATE SET body = EXCLUDED.body`
+	if _, err := s.pool.Exec(ctx, q, string(runID), body); err != nil {
+		return fmt.Errorf("store: save stats for run %q: %w", runID, err)
+	}
+	return nil
+}
+
+// Stats returns a run's aggregate stats or ErrNotFound.
+func (s *PostgresStore) Stats(runID domain.ID) (obs.Stats, error) {
+	ctx := s.ctx
+	var body []byte
+	const q = `SELECT body FROM run_stats WHERE run_id = $1`
+	if err := s.pool.QueryRow(ctx, q, string(runID)).Scan(&body); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return obs.Stats{}, fmt.Errorf("%w: stats for run %q", ErrNotFound, runID)
+		}
+		return obs.Stats{}, fmt.Errorf("store: get stats for run %q: %w", runID, err)
+	}
+	var st obs.Stats
+	if err := json.Unmarshal(body, &st); err != nil {
+		return obs.Stats{}, fmt.Errorf("store: unmarshal stats for run %q: %w", runID, err)
+	}
+	return st, nil
 }
 
 // AppendMetric appends one metric sample to its run. Appends are independent

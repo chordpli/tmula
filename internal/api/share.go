@@ -30,10 +30,9 @@ const publicKillReason = "run did not complete"
 // AD-013: viewers get a token, nothing else.
 func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(r.PathValue("id"))
-	s.mu.Lock()
-	_, ok := s.runs[id]
-	s.mu.Unlock()
-	if !ok {
+	// A run is shareable if it is live in the cache or persisted in the store, so
+	// an operator can still share a report whose live state was evicted.
+	if _, ok := s.reportFor(id); !ok {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", id))
 		return
 	}
@@ -73,7 +72,6 @@ func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 	expired := false
 	s.mu.Lock()
 	entry, ok := s.shares[token]
-	rs := s.runs[entry.runID]
 	if ok && entry.expiresAt != nil && s.now().After(*entry.expiresAt) {
 		// Drop the expired token on read so a one-shot link cannot linger in the
 		// map forever (this is also a small, steady source of share reclamation).
@@ -81,7 +79,7 @@ func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 		expired = true
 	}
 	s.mu.Unlock()
-	if !ok || rs == nil {
+	if !ok {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("share not found"))
 		return
 	}
@@ -89,13 +87,19 @@ func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusGone, fmt.Errorf("share expired"))
 		return
 	}
+	// The run is served live from the cache or rebuilt from the store, so a shared
+	// link keeps working after the live run state is evicted or a restart drops it.
+	rep, found := s.reportFor(entry.runID)
+	if !found {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("share not found"))
+		return
+	}
 
-	// report() returns a fresh Report whose Run is a value copy, so scrubbing the
+	// reportFor returns a fresh Report whose Run is a value copy, so scrubbing the
 	// KillReason here cannot affect the operator report. The field-name masker does
 	// not redact killReason, and its raw text can expose control-plane internals
 	// (worker addresses, internal errors), so replace it with a generic public
 	// string before masking and serving to the untrusted share-token viewer.
-	rep := rs.report()
 	if rep.Run.KillReason != "" {
 		rep.Run.KillReason = publicKillReason
 	}
