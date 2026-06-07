@@ -7,7 +7,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +26,7 @@ import (
 	"github.com/chordpli/tmula/internal/mask"
 	"github.com/chordpli/tmula/internal/obs"
 	"github.com/chordpli/tmula/internal/safety"
+	"github.com/chordpli/tmula/internal/store"
 	"github.com/chordpli/tmula/internal/workload"
 )
 
@@ -210,9 +213,6 @@ type runState struct {
 	// an aggregate rather than feeding the collector). When nil, the live
 	// collector snapshot is used instead.
 	finalStats *obs.Stats
-	// workers is the number of remote workers a distributed run fanned out to
-	// (0 for a local run). It is fixed at run creation, so it needs no locking.
-	workers int
 }
 
 // stats returns the run's stats: the final aggregate if one was produced
@@ -234,12 +234,16 @@ func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
 }
 
 // Server holds the in-memory registries and serves the control plane. The
-// store is intentionally in-memory; the persistent store (#14) plugs in later.
+// in-memory maps are a hot cache for live and recent runs; store is the system
+// of record. When a run is absent from s.runs (evicted past the retention bound
+// or gone after a restart) its report is rebuilt from store, so a finalized run
+// stays reportable for as long as the store retains it.
 type Server struct {
 	mu      sync.Mutex
 	specs   map[domain.ID]RunSpec
 	runs    map[domain.ID]*runState
 	shares  map[string]shareEntry
+	store   store.Store
 	adapter load.Adapter
 	masker  *mask.Masker
 	// runOrder records run IDs in insertion order so the retention bound can evict
@@ -276,6 +280,19 @@ func WithDefaultWorkers(addrs []string) Option {
 	return func(s *Server) { s.defaultWorkers = addrs }
 }
 
+// WithStore sets the persistence backend (system of record) for finalized runs.
+// When unset the server defaults to an in-process store.NewMemStore(), so the
+// in-memory behavior and existing tests are unchanged — now backed by a store a
+// report can be rebuilt from after eviction. Pass a PostgresStore for a durable,
+// shared control plane. A nil store is ignored (the default is kept).
+func WithStore(st store.Store) Option {
+	return func(s *Server) {
+		if st != nil {
+			s.store = st
+		}
+	}
+}
+
 // NewServer builds a control-plane server using the given adapter to reach the
 // system under test.
 func NewServer(adapter load.Adapter, opts ...Option) *Server {
@@ -283,11 +300,13 @@ func NewServer(adapter load.Adapter, opts ...Option) *Server {
 		specs:   make(map[domain.ID]RunSpec),
 		runs:    make(map[domain.ID]*runState),
 		shares:  make(map[string]shareEntry),
+		store:   store.NewMemStore(),
 		adapter: adapter,
 		masker:  mask.New(mask.Config{}),
 		now:     time.Now,
 		mux:     http.NewServeMux(),
 	}
+	// Options run after the default store is set, so WithStore can replace it.
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -504,12 +523,12 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 		exec: domain.RunExecution{
 			ID: runID, ExperimentID: id, Mode: mode,
 			Status: domain.RunRunning, StartedAt: s.now(),
+			Workers: len(spec.Workers),
 		},
 		collector: obs.NewCollector(),
 		guard:     guard,
 		cancel:    cancel,
 		done:      make(chan struct{}),
-		workers:   len(spec.Workers),
 	}
 	// Visualization opt-in: aggregate per-edge traffic (any scale) for the
 	// heatmap, and additionally buffer per-request events for the live-dot graph
@@ -547,7 +566,7 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 			rs.findings = findings
 			rs.mu.Unlock()
 		}
-		s.finalizeRun(ctx, rs, err)
+		s.finalizeRun(ctx, rs, spec, err)
 		return
 	}
 
@@ -562,7 +581,7 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 			rs.findings = findings
 			rs.mu.Unlock()
 		}
-		s.finalizeRun(ctx, rs, err)
+		s.finalizeRun(ctx, rs, spec, err)
 		return
 	}
 
@@ -579,14 +598,15 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	rs.mu.Lock()
 	rs.findings = findings
 	rs.mu.Unlock()
-	s.finalizeRun(ctx, rs, err)
+	s.finalizeRun(ctx, rs, spec, err)
 }
 
-// finalizeRun stamps the end time and final status of a run.
-func (s *Server) finalizeRun(ctx context.Context, rs *runState, err error) {
+// finalizeRun stamps the end time and final status of a run, then persists the
+// finished run to the store so its report survives eviction from the in-memory
+// cache and a process restart.
+func (s *Server) finalizeRun(ctx context.Context, rs *runState, spec RunSpec, err error) {
 	end := s.now()
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
 	rs.exec.EndedAt = &end
 	switch {
 	case rs.exec.Status == domain.RunKilled:
@@ -598,6 +618,35 @@ func (s *Server) finalizeRun(ctx context.Context, rs *runState, err error) {
 		rs.exec.KillReason = err.Error()
 	default:
 		rs.exec.Status = domain.RunCompleted
+	}
+	rs.mu.Unlock()
+
+	// Persist outside rs.mu: report()/stats() take rs.mu themselves, so reading
+	// them here while holding the lock would deadlock.
+	s.persistRun(rs, spec)
+}
+
+// persistRun writes a finalized run's experiment, run row, aggregate stats and
+// findings to the store, which is the system of record a report is rebuilt from
+// once the live run state is evicted or the process restarts. It is best-effort:
+// a store error is logged, not fatal, so a transient backend hiccup never crashes
+// an in-flight engine — the run still serves live from memory until evicted.
+func (s *Server) persistRun(rs *runState, spec RunSpec) {
+	if s.store == nil {
+		return
+	}
+	rep := rs.report()
+	if err := s.store.SaveExperiment(spec.Experiment); err != nil {
+		slog.Warn("persist experiment failed", "run", rep.Run.ID, "err", err)
+	}
+	if err := s.store.SaveRun(rep.Run); err != nil {
+		slog.Warn("persist run failed", "run", rep.Run.ID, "err", err)
+	}
+	if err := s.store.SaveStats(rep.Run.ID, rep.Stats); err != nil {
+		slog.Warn("persist stats failed", "run", rep.Run.ID, "err", err)
+	}
+	if err := s.store.SaveFindings(rep.Run.ID, rep.Findings); err != nil {
+		slog.Warn("persist findings failed", "run", rep.Run.ID, "err", err)
 	}
 }
 
@@ -828,26 +877,66 @@ type Report struct {
 	Workers  int                 `json:"workers"`
 }
 
-// report assembles the report for a run (caller must not hold rs.mu).
+// report assembles the report for a run (caller must not hold rs.mu). Workers is
+// taken from the run itself (set at creation, persisted on finalize) so the live
+// report and one rebuilt from the store agree on the topology.
 func (rs *runState) report() Report {
 	rs.mu.Lock()
 	exec := rs.exec
 	findings := append([]domain.Finding(nil), rs.findings...)
-	workers := rs.workers
 	rs.mu.Unlock()
-	return Report{Run: exec, Stats: rs.stats(), Findings: findings, Workers: workers}
+	return Report{Run: exec, Stats: rs.stats(), Findings: findings, Workers: exec.Workers}
+}
+
+// reportFor returns a run's report and whether it was found. A live run in the
+// in-memory cache is served directly; otherwise the run is rebuilt from the
+// store (the system of record), so a report stays available after the live state
+// is evicted past the retention bound or lost to a restart. The bool is false
+// only when neither the cache nor the store knows the run.
+func (s *Server) reportFor(id domain.ID) (Report, bool) {
+	s.mu.Lock()
+	rs, ok := s.runs[id]
+	s.mu.Unlock()
+	if ok {
+		return rs.report(), true
+	}
+	return s.reportFromStore(id)
+}
+
+// reportFromStore rebuilds a finalized run's report from persisted run + stats +
+// findings. A missing run is the not-found case; stats or findings absent (an
+// older snapshot, or a run that never finalized) degrade to zero-values rather
+// than failing, since the run row alone still makes a meaningful report.
+func (s *Server) reportFromStore(id domain.ID) (Report, bool) {
+	if s.store == nil {
+		return Report{}, false
+	}
+	run, err := s.store.GetRun(id)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("load run from store failed", "run", id, "err", err)
+		}
+		return Report{}, false
+	}
+	stats, err := s.store.Stats(id)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.Warn("load stats from store failed", "run", id, "err", err)
+	}
+	findings, err := s.store.Findings(id)
+	if err != nil {
+		slog.Warn("load findings from store failed", "run", id, "err", err)
+	}
+	return Report{Run: run, Stats: stats, Findings: findings, Workers: run.Workers}, true
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 	id := domain.ID(r.PathValue("id"))
-	s.mu.Lock()
-	rs, ok := s.runs[id]
-	s.mu.Unlock()
+	rep, ok := s.reportFor(id)
 	if !ok {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("run %q not found", id))
 		return
 	}
-	writeJSON(w, http.StatusOK, rs.report())
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {

@@ -25,6 +25,7 @@ import (
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/scenariofile"
+	"github.com/chordpli/tmula/internal/store"
 	"github.com/chordpli/tmula/internal/web"
 )
 
@@ -68,6 +69,8 @@ func serve(args []string) error {
 		roleStr    = fs.String("role", "local", "execution role: local | master | worker")
 		addr       = fs.String("addr", ":8080", "HTTP listen address (control plane + UI)")
 		workersStr = fs.String("workers", "", "comma-separated gRPC worker addresses; experiments without their own workers are distributed across these (blank = run locally)")
+		storePath  = fs.String("store", "", "local role: JSON snapshot file; loaded on start and written on graceful shutdown so run history survives a restart (blank = in-memory only)")
+		dbDSN      = fs.String("db-dsn", "", "master role: Postgres DSN for the durable store (falls back to in-memory when blank; env TMULA_DB_DSN is used if this flag is unset)")
 		showVer    = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -103,8 +106,20 @@ func serve(args []string) error {
 	if len(defaultWorkers) > 0 {
 		slog.Info("default worker pool configured", "workers", defaultWorkers)
 	}
+
+	// Persistence backend (system of record for finalized runs). Local uses an
+	// in-memory store, optionally snapshotting to --store; master uses Postgres
+	// when a DSN is given and otherwise falls back to in-memory. closeStore runs
+	// on shutdown (snapshot the local store / close the Postgres pool).
+	persistStore, closeStore, err := setupStore(role, *storePath, resolveDSN(*dbDSN))
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+
 	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second),
 		api.WithDefaultWorkers(defaultWorkers),
+		api.WithStore(persistStore),
 		// Let the UI prefill an experiment from an uploaded OpenAPI/HAR spec. The
 		// conversion lives in cmd/engine (which already depends on importer +
 		// scenariofile) and is injected so the api package avoids the cycle.
@@ -197,4 +212,71 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// resolveDSN returns the Postgres DSN: the --db-dsn flag when set, else the
+// TMULA_DB_DSN environment variable. The flag wins so an explicit value can
+// override an inherited environment.
+func resolveDSN(flagDSN string) string {
+	if strings.TrimSpace(flagDSN) != "" {
+		return flagDSN
+	}
+	return strings.TrimSpace(os.Getenv("TMULA_DB_DSN"))
+}
+
+// setupStore builds the persistence backend for the control plane and a closer
+// to run on shutdown. The closer is always non-nil, so callers can defer it
+// unconditionally.
+//
+//   - master with a DSN: a Postgres store (migrated on start); the closer closes
+//     the pool. A connect/migrate failure is fatal — a master asked for Postgres
+//     should not silently degrade to memory.
+//   - every other case (local, or master without a DSN): an in-memory store. When
+//     dataPath is set its snapshot is loaded on start (a missing file is fine on
+//     first run) and written by the closer on shutdown, so a restart keeps history.
+//
+// The zero-config `--role local` path takes the in-memory branch with no file and
+// a no-op closer, so it never touches the disk or a database.
+func setupStore(role domain.Role, dataPath, dataDSN string) (store.Store, func(), error) {
+	noop := func() {}
+
+	if role == domain.RoleMaster && dataDSN != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		pg, err := store.NewPostgresStore(ctx, dataDSN)
+		if err != nil {
+			return nil, noop, fmt.Errorf("setup store: %w", err)
+		}
+		if err := pg.Migrate(ctx); err != nil {
+			pg.Close()
+			return nil, noop, fmt.Errorf("setup store: migrate: %w", err)
+		}
+		slog.Info("using postgres store")
+		return pg, pg.Close, nil
+	}
+
+	mem := store.NewMemStore()
+	if dataPath == "" {
+		slog.Info("using in-memory store (no snapshot file)")
+		return mem, noop, nil
+	}
+	if err := mem.LoadFromFile(dataPath); err != nil {
+		// A missing file is expected on first run; only a real read/parse error is
+		// worth surfacing. Either way startup proceeds with an empty store.
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Info("no existing store snapshot; starting empty", "path", dataPath)
+		} else {
+			slog.Warn("could not load store snapshot; starting empty", "path", dataPath, "err", err)
+		}
+	} else {
+		slog.Info("loaded store snapshot", "path", dataPath)
+	}
+	closer := func() {
+		if err := mem.SaveToFile(dataPath); err != nil {
+			slog.Error("could not write store snapshot", "path", dataPath, "err", err)
+			return
+		}
+		slog.Info("wrote store snapshot", "path", dataPath)
+	}
+	return mem, closer, nil
 }

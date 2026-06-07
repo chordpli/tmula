@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/chordpli/tmula/internal/domain"
+	"github.com/chordpli/tmula/internal/obs"
 )
 
 // ErrNotFound is returned when a requested entity does not exist.
@@ -22,6 +23,15 @@ type Store interface {
 
 	SaveRun(domain.RunExecution) error
 	GetRun(id domain.ID) (domain.RunExecution, error)
+
+	// SaveStats stores the final aggregate stats for a run. They are what a report
+	// rebuilt from the store (after the live run state is evicted or the process
+	// restarts) needs but cannot recompute from the run row alone, so a finalized
+	// run persists them alongside its findings.
+	SaveStats(runID domain.ID, stats obs.Stats) error
+	// Stats returns the persisted aggregate for a run or ErrNotFound when none was
+	// saved (e.g. a run that never reached a terminal state).
+	Stats(runID domain.ID) (obs.Stats, error)
 
 	AppendMetric(domain.MetricSample) error
 	// AppendMetrics appends a batch of samples in one call. High-frequency runs
@@ -42,6 +52,7 @@ type MemStore struct {
 	mu          sync.RWMutex
 	experiments map[domain.ID]domain.Experiment
 	runs        map[domain.ID]domain.RunExecution
+	stats       map[domain.ID]obs.Stats
 	metrics     map[domain.ID][]domain.MetricSample
 	findings    map[domain.ID][]domain.Finding
 }
@@ -51,6 +62,7 @@ func NewMemStore() *MemStore {
 	return &MemStore{
 		experiments: make(map[domain.ID]domain.Experiment),
 		runs:        make(map[domain.ID]domain.RunExecution),
+		stats:       make(map[domain.ID]obs.Stats),
 		metrics:     make(map[domain.ID][]domain.MetricSample),
 		findings:    make(map[domain.ID][]domain.Finding),
 	}
@@ -101,6 +113,28 @@ func (s *MemStore) GetRun(id domain.ID) (domain.RunExecution, error) {
 		return domain.RunExecution{}, fmt.Errorf("%w: run %q", ErrNotFound, id)
 	}
 	return r, nil
+}
+
+// SaveStats stores or replaces the aggregate stats for a run.
+func (s *MemStore) SaveStats(runID domain.ID, stats obs.Stats) error {
+	if runID == "" {
+		return fmt.Errorf("store: stats runId is required")
+	}
+	s.mu.Lock()
+	s.stats[runID] = stats
+	s.mu.Unlock()
+	return nil
+}
+
+// Stats returns a run's aggregate stats or ErrNotFound.
+func (s *MemStore) Stats(runID domain.ID) (obs.Stats, error) {
+	s.mu.RLock()
+	st, ok := s.stats[runID]
+	s.mu.RUnlock()
+	if !ok {
+		return obs.Stats{}, fmt.Errorf("%w: stats for run %q", ErrNotFound, runID)
+	}
+	return st, nil
 }
 
 // AppendMetric appends one metric sample to its run.
@@ -172,6 +206,7 @@ func (s *MemStore) Findings(runID domain.ID) ([]domain.Finding, error) {
 type snapshot struct {
 	Experiments map[domain.ID]domain.Experiment     `json:"experiments"`
 	Runs        map[domain.ID]domain.RunExecution   `json:"runs"`
+	Stats       map[domain.ID]obs.Stats             `json:"stats"`
 	Metrics     map[domain.ID][]domain.MetricSample `json:"metrics"`
 	Findings    map[domain.ID][]domain.Finding      `json:"findings"`
 }
@@ -179,7 +214,7 @@ type snapshot struct {
 // SaveToFile writes a JSON snapshot of the store to path.
 func (s *MemStore) SaveToFile(path string) error {
 	s.mu.RLock()
-	snap := snapshot{Experiments: s.experiments, Runs: s.runs, Metrics: s.metrics, Findings: s.findings}
+	snap := snapshot{Experiments: s.experiments, Runs: s.runs, Stats: s.stats, Metrics: s.metrics, Findings: s.findings}
 	data, err := json.MarshalIndent(snap, "", "  ")
 	s.mu.RUnlock()
 	if err != nil {
@@ -211,6 +246,7 @@ func (s *MemStore) LoadFromFile(path string) error {
 	s.mu.Lock()
 	s.experiments = nonNilExp(snap.Experiments)
 	s.runs = nonNilRun(snap.Runs)
+	s.stats = nonNilStats(snap.Stats)
 	s.metrics = nonNilMetrics(snap.Metrics)
 	s.findings = nonNilFindings(snap.Findings)
 	s.mu.Unlock()
@@ -227,6 +263,13 @@ func nonNilExp(m map[domain.ID]domain.Experiment) map[domain.ID]domain.Experimen
 func nonNilRun(m map[domain.ID]domain.RunExecution) map[domain.ID]domain.RunExecution {
 	if m == nil {
 		return make(map[domain.ID]domain.RunExecution)
+	}
+	return m
+}
+
+func nonNilStats(m map[domain.ID]obs.Stats) map[domain.ID]obs.Stats {
+	if m == nil {
+		return make(map[domain.ID]obs.Stats)
 	}
 	return m
 }

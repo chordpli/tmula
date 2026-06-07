@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chordpli/tmula/internal/domain"
+	"github.com/chordpli/tmula/internal/obs"
 )
 
 func TestExperimentCRUD(t *testing.T) {
@@ -40,6 +42,36 @@ func TestRunCRUD(t *testing.T) {
 	_ = s.SaveRun(domain.RunExecution{ID: "r1", Status: domain.RunCompleted})
 	if r, _ := s.GetRun("r1"); r.Status != domain.RunCompleted {
 		t.Errorf("run not updated: %s", r.Status)
+	}
+}
+
+func TestStatsCRUD(t *testing.T) {
+	s := NewMemStore()
+	// Unknown run -> ErrNotFound, never a zero-value masquerading as real stats.
+	if _, err := s.Stats("r1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing stats should be ErrNotFound, got %v", err)
+	}
+	if err := s.SaveStats("", obs.Stats{}); err == nil {
+		t.Error("empty runId should error")
+	}
+
+	want := obs.Stats{Total: 20, Errors: 1, ErrorRate: 0.05, P95: 12.5, StatusCounts: map[int]int{200: 19, 500: 1}}
+	if err := s.SaveStats("r1", want); err != nil {
+		t.Fatalf("save stats: %v", err)
+	}
+	got, err := s.Stats("r1")
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+	if got.Total != 20 || got.Errors != 1 || got.P95 != 12.5 || got.StatusCounts[500] != 1 {
+		t.Fatalf("stats = %+v, want %+v", got, want)
+	}
+	// Replace.
+	if err := s.SaveStats("r1", obs.Stats{Total: 99}); err != nil {
+		t.Fatalf("replace stats: %v", err)
+	}
+	if again, _ := s.Stats("r1"); again.Total != 99 {
+		t.Errorf("stats not replaced: %+v", again)
 	}
 }
 
@@ -126,6 +158,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	s := NewMemStore()
 	_ = s.SaveExperiment(domain.Experiment{ID: "e1", Name: "smoke"})
 	_ = s.SaveRun(domain.RunExecution{ID: "r1", ExperimentID: "e1", Status: domain.RunCompleted})
+	_ = s.SaveStats("r1", obs.Stats{Total: 20, Errors: 1, P95: 7.5, StatusCounts: map[int]int{200: 20}})
 	_ = s.AppendMetric(domain.MetricSample{RunID: "r1", StatusCode: 200, LatencyMs: 12})
 	_ = s.SaveFindings("r1", []domain.Finding{{RunID: "r1", Category: domain.FindingThreshold}})
 
@@ -144,11 +177,74 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if r, err := loaded.GetRun("r1"); err != nil || r.Status != domain.RunCompleted {
 		t.Errorf("loaded run = %+v, %v", r, err)
 	}
+	if st, err := loaded.Stats("r1"); err != nil || st.Total != 20 || st.P95 != 7.5 || st.StatusCounts[200] != 20 {
+		t.Errorf("loaded stats = %+v, %v", st, err)
+	}
 	if ms, _ := loaded.Metrics("r1"); len(ms) != 1 || ms[0].LatencyMs != 12 {
 		t.Errorf("loaded metrics = %+v", ms)
 	}
 	if fs, _ := loaded.Findings("r1"); len(fs) != 1 {
 		t.Errorf("loaded findings = %+v", fs)
+	}
+}
+
+// TestReportSnapshotRoundTrip is the report-shaped round-trip the durable control
+// plane relies on: a run plus the exact run + stats + findings a report is rebuilt
+// from must survive a SaveToFile/LoadFromFile cycle byte-for-byte in the numbers
+// the operator sees, so a report served from a reloaded snapshot matches the live
+// one.
+func TestReportSnapshotRoundTrip(t *testing.T) {
+	end := time.Unix(1700, 0).UTC()
+	run := domain.RunExecution{
+		ID: "run-7", ExperimentID: "exp-1", Mode: domain.RunDistributed,
+		Status: domain.RunCompleted, StartedAt: time.Unix(1600, 0).UTC(),
+		EndedAt: &end, Workers: 3,
+	}
+	stats := obs.Stats{
+		Total: 1000, Errors: 25, Timeouts: 4, ErrorRate: 0.025,
+		StatusCounts: map[int]int{200: 975, 500: 25}, P50: 5, P95: 40, P99: 95, Max: 250,
+	}
+	findings := []domain.Finding{
+		{RunID: "run-7", Category: domain.FindingAvailability, Severity: domain.SeverityCritical, Description: "saturated"},
+		{RunID: "run-7", Category: domain.FindingThreshold, Severity: domain.SeverityWarning, Description: "p95 high"},
+	}
+
+	src := NewMemStore()
+	if err := src.SaveRun(run); err != nil {
+		t.Fatalf("save run: %v", err)
+	}
+	if err := src.SaveStats(run.ID, stats); err != nil {
+		t.Fatalf("save stats: %v", err)
+	}
+	if err := src.SaveFindings(run.ID, findings); err != nil {
+		t.Fatalf("save findings: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "report.json")
+	if err := src.SaveToFile(path); err != nil {
+		t.Fatalf("save file: %v", err)
+	}
+	dst := NewMemStore()
+	if err := dst.LoadFromFile(path); err != nil {
+		t.Fatalf("load file: %v", err)
+	}
+
+	gotRun, err := dst.GetRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if gotRun.Workers != 3 || gotRun.Mode != domain.RunDistributed || gotRun.EndedAt == nil || !gotRun.EndedAt.Equal(end) {
+		t.Errorf("run did not round-trip: %+v", gotRun)
+	}
+	gotStats, err := dst.Stats(run.ID)
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+	if gotStats.Total != 1000 || gotStats.Errors != 25 || gotStats.P99 != 95 || gotStats.StatusCounts[500] != 25 {
+		t.Errorf("stats did not round-trip: %+v", gotStats)
+	}
+	if gotFindings, _ := dst.Findings(run.ID); len(gotFindings) != 2 || gotFindings[0].Severity != domain.SeverityCritical {
+		t.Errorf("findings did not round-trip: %+v", gotFindings)
 	}
 }
 

@@ -244,6 +244,11 @@ type RunExecution struct {
 	StartedAt    time.Time  `json:"startedAt"`
 	EndedAt      *time.Time `json:"endedAt,omitempty"`
 	KillReason   string     `json:"killReason,omitempty"`
+	// Workers is the number of remote workers a distributed run fanned out to
+	// (0 for a local run). It is persisted on the run so a report rebuilt from the
+	// store (after eviction or a restart) can show the same topology the live one
+	// did, without recomputing it from a spec that may no longer be retained.
+	Workers int `json:"workers,omitempty"`
 }
 
 // MetricSample is one observed client-side data point.
