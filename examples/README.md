@@ -76,10 +76,14 @@ hit them (exact counts vary per run).
 ## Drive it from the UI instead
 
 ```bash
-go run ./examples/sample-api &           # sample API on :9000
-go run ./cmd/engine --role local &       # engine + UI on :8080
+go run ./examples/sample-api &   # sample API on :9000
+make web                         # build the UI into the binary + run on :8080
 open http://localhost:8080
 ```
+
+> `make web` is the one command for the browser console. A plain `go build`
+> embeds only a placeholder page; use `make dev` for UI hot-reload against a
+> running engine.
 
 In the form, set **Target base URL** = `http://127.0.0.1:9000`, **Allowlist** =
 `127.0.0.1`, paste `shop/graph.json` and `shop/templates.json`, **Start node** =

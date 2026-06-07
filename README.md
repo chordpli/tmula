@@ -70,19 +70,35 @@ details and how to point it at your own API. Requires `go`, `jq`, `curl`.
 - Node 20+ (only to build the web UI)
 - Docker + Postgres (optional — only for the distributed store integration test)
 
+## Web console (for PMs, designers — no command line)
+
+The control-plane UI runs in the browser. One command builds the React UI into
+the binary and starts it:
+
+```bash
+make web      # build the UI, embed it, run the engine on :8080
+```
+
+Then open <http://localhost:8080>: fill in the target, scenario and load
+(virtual users / arrival rate / personas), hit **Run**, watch live progress, and
+read the findings — with **View HTML report**, **Compare with previous run**, and
+read-only **share** links.
+
+> A plain `make build` / `go build` embeds only a lightweight placeholder page
+> (which just tells you to run `make web`). The CLI needs no UI build at all.
+
 ## Build & run
 
 ```bash
-make build        # build the single binary (embeds the UI placeholder)
-make test         # run Go unit tests
+make web          # build UI + embed + run the browser console on :8080  (web path)
+make build        # Go binary only — fast, UI is a placeholder (CLI path)
+make run          # build + run the engine on :8080 (placeholder UI)
+make dev          # UI hot-reload dev server (proxies /api to a running engine)
+make test         # Go unit tests
 make lint         # go vet + gofmt check
-make run          # run a local engine on :8080
-
-make web-build    # build the React UI
-make embed        # build the UI, embed it, then build the binary
 ```
 
-Then open <http://localhost:8080> (health: <http://localhost:8080/healthz>).
+Health check: <http://localhost:8080/healthz>.
 
 ## License
 

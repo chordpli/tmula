@@ -7,11 +7,13 @@
   </head>
   <body style="font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem;">
     <h1>tmula</h1>
-    <p>Real-user traffic simulator — the engine is running.</p>
-    <p>
-      This is the placeholder UI embedded in the binary. Build the React
-      control-plane with <code>make web-build</code> to embed the full UI.
-    </p>
-    <p><a href="/healthz">/healthz</a></p>
+    <p>Real-user traffic simulator — the engine is running, but the browser
+      console wasn't built into this binary.</p>
+    <p>To open the full control-plane UI, stop this and run:</p>
+    <pre style="background:#f4f4f4;padding:0.75rem 1rem;border-radius:6px;overflow:auto;"><code>make web</code></pre>
+    <p style="color:#555">(builds the React UI into the binary and serves it here on
+      <code>:8080</code>). Prefer the command line? Use
+      <code>tmula run scenario.yaml</code> — no server needed.</p>
+    <p><a href="/healthz">health check</a></p>
   </body>
 </html>

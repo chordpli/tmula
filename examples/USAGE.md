@@ -35,7 +35,7 @@ go build -o ./bin/tmula ./cmd/engine
 바이너리 하나가 세 역할을 합니다.
 
 ```bash
-./bin/tmula --role local  --addr :8080                                  # 엔진 + API + 웹 UI (기본)
+./bin/tmula --role local  --addr :8080                                  # 엔진 + API + 임베드된 웹 UI (UI는 make web/embed로 빌드)
 ./bin/tmula --role worker --addr :9101                                  # 분산용 워커 (gRPC)
 ./bin/tmula --role local  --addr :8080 --workers 127.0.0.1:9101,127.0.0.1:9102  # 워커 풀을 둔 마스터
 ```
@@ -194,17 +194,26 @@ tmula에 주는 건 결국 이 셋입니다.
 
 ---
 
-## Step 3 — 수동 기동 + 웹 UI
+## Step 3 — 웹 콘솔 (비개발직군용, 명령줄 없이)
+
+브라우저에서 폼으로 입력합니다. **한 줄**이면 됩니다 — React UI를 바이너리에
+임베드해서 엔진을 띄웁니다:
 
 ```bash
-go run ./examples/sample-api &        # 샘플 API :9000  (당신 서비스 URL로 교체 가능)
-go run ./cmd/engine --role local &    # 엔진 + UI :8080
-open http://localhost:8080
+go run ./examples/sample-api &    # (선택) 샘플 API :9000 — 당신 서비스면 생략
+make web                          # UI 빌드 + 임베드 + 엔진 :8080 기동
+# → http://localhost:8080
 ```
 
 UI 폼: **Target base URL** = `http://127.0.0.1:9000`, **Allowlist** = `127.0.0.1`,
-graph/templates JSON 붙여넣기, **Start node** = `browse`, **Run experiment**.
-실시간 진행을 보고, 끝나면 findings를 확인합니다.
+graph/templates JSON 붙여넣기(또는 워크로드 closed/open·페르소나 설정),
+**Start node** = `browse`, **Run experiment**. 실시간 진행을 보고, 끝나면 findings를
+확인하고 **View HTML report / Compare / share** 링크를 씁니다.
+
+> ⚠️ 그냥 `make build`/`go build`는 **플레이스홀더 페이지**만 임베드합니다(진짜 UI 아님,
+> 안내 문구가 뜸). 웹은 반드시 **`make web`**(= `make embed` 후 실행)로 띄우세요.
+> UI를 직접 고치며 핫리로드로 개발하려면 `make dev`(vite 개발서버, `/api`를 실행 중
+> 엔진으로 프록시).
 
 ---
 
