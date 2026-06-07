@@ -1,5 +1,5 @@
 // Package scenariofile turns a compact, human-authored scenario document into a
-// full api.RunSpec. It exists to lower the barrier to a first run: instead of
+// full runspec.RunSpec. It exists to lower the barrier to a first run: instead of
 // hand-writing the experiment, target, graph, templates and user list as
 // separate JSON blobs, an operator writes one short file —
 //
@@ -27,9 +27,9 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/chordpli/tmula/internal/api"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
+	"github.com/chordpli/tmula/internal/runspec"
 	"github.com/chordpli/tmula/internal/scenario"
 )
 
@@ -137,38 +137,38 @@ func Parse(data []byte) (Scenario, error) {
 // is generous enough not to throttle most local runs while still being a cap.
 var defaultRateCap = domain.RateCap{MaxRPS: 10000, MaxConcurrency: 1000}
 
-// Expand turns a Scenario into a complete api.RunSpec, filling every field the
+// Expand turns a Scenario into a complete runspec.RunSpec, filling every field the
 // control plane needs with defaults derived from the flow. It returns an error
 // if the scenario is missing something it cannot default (a target, a usable
 // flow, or a malformed request line).
-func Expand(s Scenario) (api.RunSpec, error) {
+func Expand(s Scenario) (runspec.RunSpec, error) {
 	if strings.TrimSpace(s.Target) == "" {
-		return api.RunSpec{}, fmt.Errorf("scenariofile: target is required")
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: target is required")
 	}
 	if len(s.Flow) == 0 {
-		return api.RunSpec{}, fmt.Errorf("scenariofile: flow must have at least one step")
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: flow must have at least one step")
 	}
 
 	templates, err := buildTemplates(s.Flow)
 	if err != nil {
-		return api.RunSpec{}, err
+		return runspec.RunSpec{}, err
 	}
 	graph, err := buildGraph(s.Flow)
 	if err != nil {
-		return api.RunSpec{}, err
+		return runspec.RunSpec{}, err
 	}
 	// Validate the generated graph with the stricter scenario rules (transition
 	// weights in [0,1], per-node outgoing sum <= 1, dependency edges form a DAG)
 	// so a malformed flow is rejected here rather than running a skewed walk.
 	if err := scenario.Validate(graph); err != nil {
-		return api.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
 	}
 
 	allow := s.Allow
 	if len(allow) == 0 {
 		host, err := hostOf(s.Target)
 		if err != nil {
-			return api.RunSpec{}, err
+			return runspec.RunSpec{}, err
 		}
 		allow = []string{host}
 	}
@@ -182,7 +182,7 @@ func Expand(s Scenario) (api.RunSpec, error) {
 		maxSteps = len(s.Flow)
 	}
 
-	spec := api.RunSpec{
+	spec := runspec.RunSpec{
 		Experiment: domain.Experiment{
 			Name: "cli-run", TargetEnvID: "env", ScenarioGraphID: graph.ID,
 			Params: domain.ExperimentParams{DeviationRate: 0, AuthStrategy: domain.CredPool},
@@ -200,7 +200,7 @@ func Expand(s Scenario) (api.RunSpec, error) {
 	if s.Open != nil {
 		model, err := buildWorkload(*s.Open)
 		if err != nil {
-			return api.RunSpec{}, err
+			return runspec.RunSpec{}, err
 		}
 		spec.Workload = &model
 		spec.Segments = s.Segments
@@ -209,7 +209,7 @@ func Expand(s Scenario) (api.RunSpec, error) {
 		spec.Experiment.Params.VirtualUserCount = 1
 	} else {
 		if len(s.Segments) > 0 {
-			return api.RunSpec{}, fmt.Errorf("scenariofile: segments require an open workload")
+			return runspec.RunSpec{}, fmt.Errorf("scenariofile: segments require an open workload")
 		}
 		n := s.Users
 		if n <= 0 {
@@ -222,7 +222,7 @@ func Expand(s Scenario) (api.RunSpec, error) {
 	if s.Auth != nil {
 		pool, err := buildCredentialPool(*s.Auth)
 		if err != nil {
-			return api.RunSpec{}, err
+			return runspec.RunSpec{}, err
 		}
 		spec.CredentialPool = &pool
 		spec.Experiment.Params.AuthStrategy = pool.Strategy

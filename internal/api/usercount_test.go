@@ -25,28 +25,28 @@ func specForCount(sutURL string, count int) RunSpec {
 // TestPoolSizeAndClosedUsers covers the pure pool helpers: an explicit Users list
 // always wins, and a count-only spec synthesizes a stable u0..u{N-1} pool.
 func TestPoolSizeAndClosedUsers(t *testing.T) {
-	// Explicit pool wins over any count: poolSize is its length, closedUsers
+	// Explicit pool wins over any count: PoolSize is its length, ClosedUsers
 	// returns it verbatim.
 	explicit := RunSpec{Users: []load.VirtualUser{{ID: "a"}, {ID: "b"}}, UserCount: 99}
-	if got := explicit.poolSize(); got != 2 {
-		t.Errorf("poolSize with explicit users = %d, want 2", got)
+	if got := explicit.PoolSize(); got != 2 {
+		t.Errorf("PoolSize with explicit users = %d, want 2", got)
 	}
-	if got := explicit.closedUsers(); len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" {
-		t.Errorf("closedUsers with explicit pool = %+v, want the sent pool", got)
+	if got := explicit.ClosedUsers(); len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" {
+		t.Errorf("ClosedUsers with explicit pool = %+v, want the sent pool", got)
 	}
 
-	// Count-only: poolSize is the count, closedUsers synthesizes u0..uN-1.
+	// Count-only: PoolSize is the count, ClosedUsers synthesizes u0..uN-1.
 	counted := RunSpec{UserCount: 3}
-	if got := counted.poolSize(); got != 3 {
-		t.Errorf("poolSize from count = %d, want 3", got)
+	if got := counted.PoolSize(); got != 3 {
+		t.Errorf("PoolSize from count = %d, want 3", got)
 	}
-	got := counted.closedUsers()
+	got := counted.ClosedUsers()
 	if len(got) != 3 {
-		t.Fatalf("closedUsers from count = %d users, want 3", len(got))
+		t.Fatalf("ClosedUsers from count = %d users, want 3", len(got))
 	}
 	for i, want := range []string{"u0", "u1", "u2"} {
 		if got[i].ID != want {
-			t.Errorf("closedUsers[%d].ID = %q, want %q", i, got[i].ID, want)
+			t.Errorf("ClosedUsers[%d].ID = %q, want %q", i, got[i].ID, want)
 		}
 	}
 }

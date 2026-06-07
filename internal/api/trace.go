@@ -23,13 +23,13 @@ const (
 
 // traceSmallEnough reports whether a run is small enough to trace per request.
 func traceSmallEnough(spec RunSpec) bool {
-	if spec.isOpen() {
+	if spec.IsOpen() {
 		c := spec.Workload.MaxConcurrency
 		return c > 0 && c <= traceMaxUsers
 	}
-	// Size off the effective pool (poolSize), so a small closed run requested as a
+	// Size off the effective pool (PoolSize), so a small closed run requested as a
 	// count — with no shipped Users array — still opts into per-request tracing.
-	n := spec.poolSize()
+	n := spec.PoolSize()
 	return n > 0 && n <= traceMaxUsers
 }
 
