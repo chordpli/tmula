@@ -19,7 +19,7 @@ export interface ExperimentForm {
   thinkMinMs: number // pause between a user's steps (uniform [min,max])
   thinkMaxMs: number
   segmentsJSON: string // open: persona mix as a JSON array (blank/[] = homogeneous)
-  traceEnabled: boolean // stream per-step events for the live graph (small runs only)
+  traceEnabled: boolean // visualize live traffic (per-request for small runs, heatmap for large)
 }
 
 // Segment is one persona in an open run: a weighted share of arrivals with its
@@ -53,7 +53,7 @@ export interface RunSpec {
   aggregateWorkers?: boolean
   workload?: WorkloadSpec
   segments?: Segment[]
-  trace?: boolean // opt the run into per-step trace frames (honored only for small runs)
+  trace?: boolean // opt the run into visualization (per-step events for small runs, per-edge aggregates at any scale)
 }
 
 // parseSegments reads the persona-mix JSON. A blank value means no personas
@@ -111,14 +111,17 @@ export interface Report {
   workers?: number
 }
 
-// MAX_TRACE_USERS is the run size above which the backend ignores tracing, so the
-// UI gates the toggle (and the spec field) to the same cap.
+// MAX_TRACE_USERS is the run size at or below which the backend additionally emits
+// per-request trace events. Above it, tracing is still honored but only as per-edge
+// aggregates, so the UI uses this cap to pick the render mode (events vs heatmap),
+// not whether to enable visualization.
 export const MAX_TRACE_USERS = 200
 
-// traceable reports whether a run is small enough that the backend will actually
-// stream per-request trace events. It mirrors the server's traceSmallEnough:
-// closed runs are capped on the user count, open runs on the back-pressure
-// max-concurrency (the open model ignores the user count).
+// traceable reports whether a run is small enough that the backend will additionally
+// stream per-request trace events — i.e. whether the live view should animate
+// individual requests ('events') or fall back to the aggregate heatmap. It mirrors
+// the server's traceSmallEnough: closed runs are capped on the user count, open runs
+// on the back-pressure max-concurrency (the open model ignores the user count).
 export function traceable(form: ExperimentForm): boolean {
   if (form.workloadKind === 'open') {
     return form.maxConcurrency > 0 && form.maxConcurrency <= MAX_TRACE_USERS
@@ -182,9 +185,10 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
     const segments = parseSegments(form.segmentsJSON)
     if (segments.length > 0) spec.segments = segments
   }
-  // Opt into tracing only for small runs; the backend ignores it above the cap,
-  // so attaching it there would be misleading.
-  if (form.traceEnabled && traceable(form)) spec.trace = true
+  // Opt into visualization whenever requested; the backend now honors it at any
+  // scale (small runs additionally get per-request events, all opted-in runs get
+  // per-edge aggregates). The render mode is chosen client-side via traceable().
+  if (form.traceEnabled) spec.trace = true
   return spec
 }
 
@@ -262,6 +266,105 @@ export function parseTraceFrame(line: string): TraceFrame | null {
   } catch {
     return null
   }
+}
+
+// HeatEdge is one edge's cumulative traffic in the aggregate heatmap stream: total
+// `requests` and `errors` (int64 counts) seen on the edge `from` -> `to`. `from` is
+// "" for the entry into a node (a user starting there), matching the trace contract.
+export interface HeatEdge {
+  from: string
+  to: string
+  requests: number
+  errors: number
+}
+
+// HeatFrame is one SSE frame of the per-edge heatmap stream: every edge that has
+// seen traffic so far, with cumulative counts. The final frame sets done === true,
+// then the server closes. Unlike the trace stream this scales to any run size
+// because the payload is bounded by the edge count, not the request count.
+export interface HeatFrame {
+  edges: HeatEdge[]
+  done?: boolean
+}
+
+// parseHeatFrame parses a single heatmap SSE "data:" line, mirroring parseTraceFrame:
+// it returns null for comments, blank lines, and malformed payloads.
+export function parseHeatFrame(line: string): HeatFrame | null {
+  if (!line.startsWith('data:')) return null
+  const payload = line.slice('data:'.length).trim()
+  if (!payload) return null
+  try {
+    return JSON.parse(payload) as HeatFrame
+  } catch {
+    return null
+  }
+}
+
+// --- Heatmap visual encoding (pure, unit-tested) -------------------------------
+// These map an edge's aggregate counts onto the stroke width and color the SVG
+// draws. They live here (next to layoutGraph) so they can be tested without the
+// React component, matching the project's "pure helpers in api.ts" convention.
+
+const clamp01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n)
+
+// HEAT_MIN_W / HEAT_MAX_W bound the edge stroke width (SVG units); the busiest
+// edge gets HEAT_MAX_W, an idle/zero edge HEAT_MIN_W.
+export const HEAT_MIN_W = 1.5
+export const HEAT_MAX_W = 14
+
+// heatWidth maps a request count onto a stroke width using a logarithmic scale so
+// the busiest edge is the thickest and a 12-request edge and a 12-million-request
+// edge stay legible in the same frame: width = MIN + (MAX-MIN)·ln(n+1)/ln(max+1).
+// It returns the floor when there is no traffic (n or max <= 0).
+export function heatWidth(requests: number, maxRequests: number): number {
+  if (requests <= 0 || maxRequests <= 0) return HEAT_MIN_W
+  const frac = Math.log(requests + 1) / Math.log(maxRequests + 1)
+  return HEAT_MIN_W + (HEAT_MAX_W - HEAT_MIN_W) * clamp01(frac)
+}
+
+// HEAT_OK / HEAT_ERR are the endpoints of the error-ratio color ramp (the same
+// GitHub-dark green/red used elsewhere in the live view).
+export const HEAT_OK = '#3fb950'
+export const HEAT_ERR = '#f85149'
+
+// heatColor tints an edge from healthy-green to error-red by its error ratio
+// (errors/requests). With no requests it is fully green (nothing has failed). The
+// result is an "rgb(r, g, b)" string interpolated in sRGB — good enough for a
+// status tint and dependency-free.
+export function heatColor(errors: number, requests: number): string {
+  const ratio = requests > 0 ? clamp01(errors / requests) : 0
+  return lerpColor(HEAT_OK, HEAT_ERR, ratio)
+}
+
+// lerpColor linearly interpolates between two "#rrggbb" colors; t is clamped to
+// [0,1]. Kept tiny to avoid pulling in a color dependency.
+export function lerpColor(a: string, b: string, t: number): string {
+  const ca = hexToRgb(a)
+  const cb = hexToRgb(b)
+  const k = clamp01(t)
+  const r = Math.round(ca.r + (cb.r - ca.r) * k)
+  const g = Math.round(ca.g + (cb.g - ca.g) * k)
+  const bl = Math.round(ca.b + (cb.b - ca.b) * k)
+  return `rgb(${r}, ${g}, ${bl})`
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const n = parseInt(hex.slice(1), 16)
+  return { r: (n >> 16) & 0xff, g: (n >> 8) & 0xff, b: n & 0xff }
+}
+
+// formatCount renders large cumulative counts compactly (1234 -> "1.2k",
+// 5_000_000 -> "5M") so per-edge labels stay short at any scale.
+export function formatCount(n: number): string {
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return trimZero(n / 1000) + 'k'
+  if (n < 1_000_000_000) return trimZero(n / 1_000_000) + 'M'
+  return trimZero(n / 1_000_000_000) + 'B'
+}
+
+// trimZero formats to one decimal but drops a trailing ".0" so "5.0k" reads "5k".
+function trimZero(n: number): string {
+  return n.toFixed(1).replace(/\.0$/, '')
 }
 
 // Layout spacing, in the SVG's own (unitless) coordinate space. The SVG scales to
@@ -370,6 +473,12 @@ export function streamURL(runId: string): string {
 // traceURL is the per-step live-trace SSE stream for a run (opt-in via spec.trace).
 export function traceURL(runId: string): string {
   return `${API}/runs/${runId}/trace`
+}
+
+// heatmapURL is the per-edge aggregate SSE stream for a run (opt-in via spec.trace),
+// used by the heatmap view for runs too large to animate request-by-request.
+export function heatmapURL(runId: string): string {
+  return `${API}/runs/${runId}/heatmap`
 }
 
 // reportHTMLURL is the server-rendered, standalone HTML report for a run.
