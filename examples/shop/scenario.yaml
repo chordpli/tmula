@@ -38,3 +38,17 @@ flow:
 # segments:
 #   - { name: browser, weight: 0.7, start: browse }
 #   - { name: buyer,   weight: 0.3, start: cart }
+#
+# Authenticate the run by injecting pre-created test accounts. Reference the
+# token from a step header (e.g. Authorization: "Bearer {{.token}}"); closed
+# users get a credential by index, open sessions by arrival index, wrapping when
+# there are more users than entries. The secret is never serialized or persisted,
+# so `tmula run` executes in-process for an authenticated run (a remote --engine
+# cannot receive the secret). bootstrap-signup is a follow-up; only `pool` works
+# here today.
+#
+# auth:
+#   strategy: pool
+#   users:
+#     - { subject: alice, token: jwt-aaa }
+#     - { subject: bob,   token: jwt-bbb }

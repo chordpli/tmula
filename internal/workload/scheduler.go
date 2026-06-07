@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/chordpli/tmula/internal/auth"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
 	"github.com/chordpli/tmula/internal/obs"
@@ -31,6 +32,11 @@ type Options struct {
 	// arrivals of (conceptually) the same principal; the per-session index is
 	// appended to the ID so observations remain distinguishable.
 	User load.VirtualUser
+	// Auth, when non-nil, supplies a credential per session keyed by the session's
+	// global arrival index, so each open-model arrival authenticates as a distinct
+	// principal (a pool wraps around its entries). Nil leaves every session
+	// unauthenticated (the User's credential as-is), exactly as before.
+	Auth auth.Provider
 	// Seed makes both the arrival process and per-session graph traversal
 	// reproducible: the sampler and the i-th session derive their RNG from it.
 	Seed int64
@@ -192,7 +198,11 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 
 		atomic.AddInt64(&live, 1)
 		atomic.AddInt64(&launched, 1)
-		sessionSeed := opts.Seed + atomic.AddInt64(&idx, 1)
+		// arrival is this session's global 1-based index. It seeds the session
+		// (so traversal stays reproducible) and, when an auth provider is set,
+		// keys the per-session credential so each arrival is a distinct principal.
+		arrival := atomic.AddInt64(&idx, 1)
+		sessionSeed := opts.Seed + arrival
 
 		// Per-session profile: start from the run defaults, then let the segment
 		// (persona) this arrival is drawn from override entry node, step bound and
@@ -217,6 +227,22 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		user := opts.User
 		user.ID = sessionUserID(opts.User.ID, segName, sessionSeed)
+		// Per-session credential: key it by the arrival index so each session
+		// authenticates as a distinct principal (a pool wraps around its entries).
+		// A failed acquire is treated as a setup error — the same all-or-nothing
+		// signal an unknown template raises — rather than silently running
+		// unauthenticated. The pool provider's Acquire is pure, so this stays
+		// deterministic. Use the zero index for the wrap math (arrival is 1-based).
+		if opts.Auth != nil {
+			cred, err := opts.Auth.Acquire(ctx, int(arrival-1))
+			if err != nil {
+				atomic.AddInt64(&setupErr, 1)
+				setupOnce.Do(func() { firstSetupErr = err })
+				atomic.AddInt64(&live, -1)
+				continue
+			}
+			user.Cred = cred
+		}
 
 		wg.Add(1)
 		go func() {

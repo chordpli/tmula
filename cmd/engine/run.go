@@ -118,19 +118,46 @@ func runScenario(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	base := *engine
-	if base == "" {
-		stop, b, err := startInProcessEngine()
+	// In-process is the default: drive the control plane through its Go API so a
+	// scenario's credential secrets never have to cross the wire (the credential
+	// secret carries json:"-", so an HTTP submission would silently strip it). Only
+	// when the operator points at a separate --engine do we go over HTTP, where the
+	// pool is not yet supported for exactly that reason.
+	var report cliReport
+	if *engine == "" {
+		if spec.CredentialPool == nil {
+			// No auth: keep the original behavior of booting a real loopback engine
+			// and driving it over HTTP, so the in-process and remote paths stay
+			// identical for the common (unauthenticated) case.
+			stop, base, err := startInProcessEngine()
+			if err != nil {
+				return err
+			}
+			defer stop()
+			report, err = driveRun(ctx, base, spec)
+			if err != nil {
+				return err
+			}
+		} else {
+			srv := api.NewServer(load.NewRESTAdapter(30 * time.Second))
+			defer func() {
+				sctx, sc := context.WithTimeout(context.Background(), 5*time.Second)
+				defer sc()
+				_ = srv.Shutdown(sctx)
+			}()
+			report, err = driveRunInProcess(ctx, srv, spec)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		if spec.CredentialPool != nil {
+			return fmt.Errorf("a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate")
+		}
+		report, err = driveRun(ctx, *engine, spec)
 		if err != nil {
 			return err
 		}
-		defer stop()
-		base = b
-	}
-
-	report, err := driveRun(ctx, base, spec)
-	if err != nil {
-		return err
 	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -276,6 +303,56 @@ func driveRun(ctx context.Context, base string, spec api.RunSpec) (cliReport, er
 		case <-ticker.C:
 		}
 	}
+}
+
+// driveRunInProcess creates, starts and polls a run entirely through the control
+// plane's Go API, so a spec carrying credential secrets never crosses the wire.
+// It mirrors driveRun's create→start→poll loop and converts the typed report into
+// the CLI's view via the same JSON shape the HTTP path serves, keeping the CLI's
+// report struct decoupled from the control-plane types.
+func driveRunInProcess(ctx context.Context, srv *api.Server, spec api.RunSpec) (cliReport, error) {
+	expID, err := srv.CreateExperiment(spec)
+	if err != nil {
+		return cliReport{}, fmt.Errorf("create experiment: %w", err)
+	}
+	runID, err := srv.StartRun(expID)
+	if err != nil {
+		return cliReport{}, fmt.Errorf("start run: %w", err)
+	}
+
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		rep, ok := srv.Report(runID)
+		if !ok {
+			return cliReport{}, fmt.Errorf("run %s not found", runID)
+		}
+		switch rep.Run.Status {
+		case "completed", "failed", "killed":
+			return toCLIReport(rep)
+		}
+		select {
+		case <-ctx.Done():
+			return cliReport{}, fmt.Errorf("run did not finish within the timeout")
+		case <-ticker.C:
+		}
+	}
+}
+
+// toCLIReport converts a typed control-plane report into the CLI's view by
+// round-tripping the exact JSON the HTTP report endpoint serves, so the in-process
+// and over-HTTP paths print identically. The report never contains a secret (the
+// credential secret is json:"-"), so this carries no sensitive data.
+func toCLIReport(rep api.Report) (cliReport, error) {
+	b, err := json.Marshal(rep)
+	if err != nil {
+		return cliReport{}, fmt.Errorf("encode report: %w", err)
+	}
+	var out cliReport
+	if err := json.Unmarshal(b, &out); err != nil {
+		return cliReport{}, fmt.Errorf("decode report: %w", err)
+	}
+	return out, nil
 }
 
 // cliReport is the slice of the report the CLI prints. It mirrors the control
