@@ -60,6 +60,11 @@ type RunSpec struct {
 	// applies to the open model; the closed path ignores it.
 	Segments []domain.Segment `json:"segments,omitempty"`
 
+	// Trace opts a small run (<= traceMaxUsers) into live per-request event
+	// streaming for the traffic graph (GET /runs/{id}/trace). Larger runs ignore
+	// it — it is an inspect view, not a millions-scale feature.
+	Trace bool `json:"trace,omitempty"`
+
 	id domain.ID
 }
 
@@ -155,9 +160,12 @@ type runState struct {
 	exec      domain.RunExecution
 	collector *obs.Collector
 	guard     *safety.Guard
-	cancel    context.CancelFunc
-	done      chan struct{}
-	findings  []domain.Finding
+	// trace, when non-nil, buffers live per-request events for the traffic graph
+	// (set only for small runs that opted in). Its methods are concurrency-safe.
+	trace    *traceBuf
+	cancel   context.CancelFunc
+	done     chan struct{}
+	findings []domain.Finding
 	// finalStats holds stats produced directly by a run (the open model returns
 	// an aggregate rather than feeding the collector). When nil, the live
 	// collector snapshot is used instead.
@@ -280,6 +288,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/report.html", s.getReportHTML)
 	s.mux.HandleFunc("GET /runs/compare", s.compareRuns)
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
+	s.mux.HandleFunc("GET /runs/{id}/trace", s.streamTrace)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
@@ -439,6 +448,10 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 		done:      make(chan struct{}),
 		workers:   len(spec.Workers),
 	}
+	// Small opted-in runs stream live per-request events for the traffic graph.
+	if spec.Trace && traceSmallEnough(spec) {
+		rs.trace = newTraceBuf()
+	}
 	s.mu.Lock()
 	s.registerRunLocked(runID, rs)
 	s.enforceRunCapLocked(maxRetainedRuns)
@@ -520,7 +533,7 @@ func (s *Server) finalizeRun(ctx context.Context, rs *runState, err error) {
 // the scheduler generates user sessions over time and returns the aggregate
 // stats + findings directly.
 func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (obs.Stats, []domain.Finding, error) {
-	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, load.WithGuard(rs.guard))
+	runner := s.runnerFor(rs, spec)
 	user := load.VirtualUser{ID: "user"}
 	if len(spec.Users) > 0 {
 		user = spec.Users[0]
@@ -546,10 +559,21 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 	return res.Stats, res.Findings, nil
 }
 
+// runnerFor builds the load.Runner for a run: always guarded by the run's
+// safety policy, and wired to stream live per-request events when the run opted
+// into tracing.
+func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
+	opts := []load.RunnerOption{load.WithGuard(rs.guard)}
+	if rs.trace != nil {
+		opts = append(opts, load.WithEventSink(rs.trace.add))
+	}
+	return load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, opts...)
+}
+
 // executeLocal runs the experiment in-process via the load.Runner, recording
 // each step into the run's collector and finding aggregator.
 func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
-	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, load.WithGuard(rs.guard))
+	runner := s.runnerFor(rs, spec)
 	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.Users, spec.Seed)
 	ts := s.now()
 	for _, res := range results {
