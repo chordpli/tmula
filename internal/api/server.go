@@ -213,9 +213,13 @@ type Server struct {
 	runOrder       []domain.ID
 	shareOrder     []string
 	defaultWorkers []string
-	seq            atomic.Int64
-	now            func() time.Time
-	mux            *http.ServeMux
+	// importFn, when set (WithImporter), converts an uploaded OpenAPI/HAR spec into
+	// a RunSpec for POST /import. Injected so the api package avoids the
+	// importer/scenariofile import cycle (both depend on api).
+	importFn ImportFunc
+	seq      atomic.Int64
+	now      func() time.Time
+	mux      *http.ServeMux
 }
 
 // maxRetainedRuns and maxRetainedShares bound the in-memory registries so a
@@ -300,6 +304,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
+	s.mux.HandleFunc("POST /import", s.handleImport)
 }
 
 // getCapacity estimates what a target population implies for a run via Little's
