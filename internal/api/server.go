@@ -635,18 +635,23 @@ func (s *Server) persistRun(rs *runState, spec RunSpec) {
 	if s.store == nil {
 		return
 	}
+	// A persist failure is logged at ERROR, not WARN: on a durable (master/Postgres)
+	// backend it means this run's report is lost the moment it leaves the cache, so
+	// it must be alertable. It stays non-fatal — a transient backend hiccup must not
+	// crash an in-flight engine — and the in-process MemStore (the local default)
+	// does not fail mid-run, so this never fires false alarms there.
 	rep := rs.report()
 	if err := s.store.SaveExperiment(spec.Experiment); err != nil {
-		slog.Warn("persist experiment failed", "run", rep.Run.ID, "err", err)
+		slog.Error("persist experiment failed", "run", rep.Run.ID, "err", err)
 	}
 	if err := s.store.SaveRun(rep.Run); err != nil {
-		slog.Warn("persist run failed", "run", rep.Run.ID, "err", err)
+		slog.Error("persist run failed", "run", rep.Run.ID, "err", err)
 	}
 	if err := s.store.SaveStats(rep.Run.ID, rep.Stats); err != nil {
-		slog.Warn("persist stats failed", "run", rep.Run.ID, "err", err)
+		slog.Error("persist stats failed", "run", rep.Run.ID, "err", err)
 	}
 	if err := s.store.SaveFindings(rep.Run.ID, rep.Findings); err != nil {
-		slog.Warn("persist findings failed", "run", rep.Run.ID, "err", err)
+		slog.Error("persist findings failed", "run", rep.Run.ID, "err", err)
 	}
 }
 
