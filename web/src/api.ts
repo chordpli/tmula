@@ -115,6 +115,17 @@ export interface Report {
 // UI gates the toggle (and the spec field) to the same cap.
 export const MAX_TRACE_USERS = 200
 
+// traceable reports whether a run is small enough that the backend will actually
+// stream per-request trace events. It mirrors the server's traceSmallEnough:
+// closed runs are capped on the user count, open runs on the back-pressure
+// max-concurrency (the open model ignores the user count).
+export function traceable(form: ExperimentForm): boolean {
+  if (form.workloadKind === 'open') {
+    return form.maxConcurrency > 0 && form.maxConcurrency <= MAX_TRACE_USERS
+  }
+  return form.users > 0 && form.users <= MAX_TRACE_USERS
+}
+
 // buildRunSpec turns the form into the RunSpec the API expects. It throws on
 // invalid JSON so the caller can surface a clear error.
 export function buildRunSpec(form: ExperimentForm): RunSpec {
@@ -173,7 +184,7 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
   }
   // Opt into tracing only for small runs; the backend ignores it above the cap,
   // so attaching it there would be misleading.
-  if (form.traceEnabled && form.users <= MAX_TRACE_USERS) spec.trace = true
+  if (form.traceEnabled && traceable(form)) spec.trace = true
   return spec
 }
 
