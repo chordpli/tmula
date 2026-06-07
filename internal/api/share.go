@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/chordpli/tmula/internal/domain"
@@ -16,6 +17,134 @@ import (
 type shareEntry struct {
 	runID     domain.ID
 	expiresAt *time.Time
+}
+
+// shareRegistry owns the share-token bookkeeping (the token->entry map and the
+// insertion-order slice) behind its own mutex, decoupling it from the Server's
+// coarse run-state lock. Share access never shares a critical section with run
+// state, so a dedicated mutex preserves behavior while narrowing the coupling.
+type shareRegistry struct {
+	mu    sync.Mutex
+	m     map[string]shareEntry
+	order []string
+	// now reads the live Server clock at call time (not a construction-time
+	// snapshot), so a test that reassigns s.now to drive expiry is honored.
+	now func() time.Time
+}
+
+// newShareRegistry builds an empty registry whose expiry checks read the given
+// clock. Pass a closure over the live Server clock (e.g. func() time.Time {
+// return s.now() }) so a later s.now reassignment is reflected here.
+func newShareRegistry(now func() time.Time) *shareRegistry {
+	return &shareRegistry{
+		m:   make(map[string]shareEntry),
+		now: now,
+	}
+}
+
+// add records a share token and then bounds the registry to cap — both under a
+// single lock, exactly as createShare did (register + enforceCap atomically), so
+// no eviction can interleave between the insert and the cap check.
+func (r *shareRegistry) add(token string, entry shareEntry, cap int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.registerLocked(token, entry)
+	r.enforceCapLocked(cap)
+}
+
+// getAndExpire looks up a token and, if it is found but expired, drops it — all
+// under one lock, exactly as getSharedReport did (lookup + expire-on-read
+// atomically). It returns the entry, whether the token was present, and whether
+// it was expired (and therefore deleted). Expiry is judged against r.now().
+func (r *shareRegistry) getAndExpire(token string) (entry shareEntry, ok bool, expired bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok = r.m[token]
+	if ok && entry.expiresAt != nil && r.now().After(*entry.expiresAt) {
+		// Drop the expired token on read so a one-shot link cannot linger in the
+		// map forever (this is also a small, steady source of share reclamation).
+		r.deleteLocked(token)
+		expired = true
+	}
+	return entry, ok, expired
+}
+
+// enforceCap bounds the registry to cap under the lock. Exposed for callers
+// (and tests) that register entries and then enforce a cap as a separate step.
+func (r *shareRegistry) enforceCap(cap int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enforceCapLocked(cap)
+}
+
+// has reports whether a token is present (without mutating expiry).
+func (r *shareRegistry) has(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.m[token]
+	return ok
+}
+
+// len returns the number of retained tokens.
+func (r *shareRegistry) len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.m)
+}
+
+// registerLocked records a share token and its insertion order. The caller must
+// hold r.mu.
+func (r *shareRegistry) registerLocked(token string, entry shareEntry) {
+	r.m[token] = entry
+	r.order = append(r.order, token)
+}
+
+// deleteLocked removes a share token from the registry and its order slice. The
+// caller must hold r.mu.
+func (r *shareRegistry) deleteLocked(token string) {
+	if _, ok := r.m[token]; !ok {
+		return
+	}
+	delete(r.m, token)
+	kept := r.order[:0:0]
+	for _, t := range r.order {
+		if t != token {
+			kept = append(kept, t)
+		}
+	}
+	r.order = kept
+}
+
+// enforceCapLocked bounds the share registry: while over cap it evicts the
+// oldest tokens, preferring already-expired ones. Unlike runs a share has no
+// in-flight state, so it can always be reclaimed. The caller must hold r.mu.
+func (r *shareRegistry) enforceCapLocked(cap int) {
+	if cap <= 0 || len(r.m) <= cap {
+		return
+	}
+	now := r.now()
+	// First pass: drop expired tokens (cheap, and the most stale).
+	for _, token := range append([]string(nil), r.order...) {
+		if len(r.m) <= cap {
+			break
+		}
+		if e, ok := r.m[token]; ok && e.expiresAt != nil && now.After(*e.expiresAt) {
+			r.deleteLocked(token)
+		}
+	}
+	// Second pass: still over cap -> evict oldest-first regardless of expiry.
+	kept := r.order[:0:0]
+	for _, token := range r.order {
+		if _, ok := r.m[token]; !ok {
+			continue
+		}
+		if len(r.m) > cap {
+			delete(r.m, token)
+			continue
+		}
+		kept = append(kept, token)
+	}
+	r.order = kept
 }
 
 // publicKillReason replaces a run's internal KillReason on the shared (PII-masked)
@@ -53,10 +182,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	s.mu.Lock()
-	s.registerShareLocked(token, entry)
-	s.enforceShareCapLocked(maxRetainedShares)
-	s.mu.Unlock()
+	s.shareReg.add(token, entry, maxRetainedShares)
 
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"token": token,
@@ -69,16 +195,7 @@ func (s *Server) createShare(w http.ResponseWriter, r *http.Request) {
 // run controls are exposed — viewers can read, nothing more.
 func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	expired := false
-	s.mu.Lock()
-	entry, ok := s.shares[token]
-	if ok && entry.expiresAt != nil && s.now().After(*entry.expiresAt) {
-		// Drop the expired token on read so a one-shot link cannot linger in the
-		// map forever (this is also a small, steady source of share reclamation).
-		s.deleteShareLocked(token)
-		expired = true
-	}
-	s.mu.Unlock()
+	entry, ok, expired := s.shareReg.getAndExpire(token)
 	if !ok {
 		writeErr(w, http.StatusNotFound, fmt.Errorf("share not found"))
 		return
@@ -113,61 +230,6 @@ func (s *Server) getSharedReport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(masked)
-}
-
-// registerShareLocked records a share token and its insertion order. The caller
-// must hold s.mu.
-func (s *Server) registerShareLocked(token string, entry shareEntry) {
-	s.shares[token] = entry
-	s.shareOrder = append(s.shareOrder, token)
-}
-
-// deleteShareLocked removes a share token from the registry and its order slice.
-// The caller must hold s.mu.
-func (s *Server) deleteShareLocked(token string) {
-	if _, ok := s.shares[token]; !ok {
-		return
-	}
-	delete(s.shares, token)
-	kept := s.shareOrder[:0:0]
-	for _, t := range s.shareOrder {
-		if t != token {
-			kept = append(kept, t)
-		}
-	}
-	s.shareOrder = kept
-}
-
-// enforceShareCapLocked bounds the share registry: while over cap it evicts the
-// oldest tokens, preferring already-expired ones. Unlike runs a share has no
-// in-flight state, so it can always be reclaimed. The caller must hold s.mu.
-func (s *Server) enforceShareCapLocked(cap int) {
-	if cap <= 0 || len(s.shares) <= cap {
-		return
-	}
-	now := s.now()
-	// First pass: drop expired tokens (cheap, and the most stale).
-	for _, token := range append([]string(nil), s.shareOrder...) {
-		if len(s.shares) <= cap {
-			break
-		}
-		if e, ok := s.shares[token]; ok && e.expiresAt != nil && now.After(*e.expiresAt) {
-			s.deleteShareLocked(token)
-		}
-	}
-	// Second pass: still over cap -> evict oldest-first regardless of expiry.
-	kept := s.shareOrder[:0:0]
-	for _, token := range s.shareOrder {
-		if _, ok := s.shares[token]; !ok {
-			continue
-		}
-		if len(s.shares) > cap {
-			delete(s.shares, token)
-			continue
-		}
-		kept = append(kept, token)
-	}
-	s.shareOrder = kept
 }
 
 func newToken() (string, error) {
