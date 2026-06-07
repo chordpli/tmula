@@ -377,6 +377,70 @@ export function heatWidth(requests: number, maxRequests: number): number {
   return HEAT_MIN_W + (HEAT_MAX_W - HEAT_MIN_W) * clamp01(frac)
 }
 
+// --- Terminal nodes & edge classification (pure, unit-tested) -------------------
+// The flow map reads as a forward funnel: requests enter on the left and fan
+// toward an outcome on the right. To keep that funnel legible at high volume the
+// view sorts edges into classes and treats the graph's endpoints specially. These
+// helpers encode that grammar without React so they can be tested in isolation.
+
+// terminalNodeIds is the set of node ids that are journey endpoints: a node with
+// no apiTemplateId fires no request, so reaching it means the user *finished*
+// (done) or *left* (exit) rather than made another call. The backend now emits a
+// "terminal" traversal into these, so the flow stream carries inflow edges to
+// them; the view styles those as completion/drop-off, not as requests.
+export function terminalNodeIds(nodes: { id: string; apiTemplateId?: string }[]): Set<string> {
+  const term = new Set<string>()
+  for (const n of nodes) {
+    if (!n.apiTemplateId) term.add(n.id)
+  }
+  return term
+}
+
+// EdgeKind sorts an edge by its role in the funnel so the view can weight it:
+//   'forward'  — advances the journey (drawn boldest; this is the main funnel).
+//   'back'     — returns to an earlier, already-visited node (a loop, e.g.
+//                category -> browse); de-emphasized so it doesn't fight forward.
+//   'terminal' — flows into a template-less endpoint (done/exit); rendered as a
+//                completion/drop-off, faded so endpoints read as outcomes.
+export type EdgeKind = 'forward' | 'back' | 'terminal'
+
+// classifyEdge labels one edge given the terminal set and each node's BFS depth
+// (its funnel column, as produced by layoutGraph). Terminal wins first (an edge
+// into done/exit is an outcome regardless of direction). Otherwise an edge whose
+// destination sits at an equal-or-shallower depth than its source is a back/loop
+// edge; everything else advances the funnel and is 'forward'. Missing depths
+// (unreachable nodes) default to forward so they still draw at full strength.
+export function classifyEdge(
+  from: string,
+  to: string,
+  terminals: Set<string>,
+  depth: Map<string, number>,
+): EdgeKind {
+  if (terminals.has(to)) return 'terminal'
+  const df = depth.get(from)
+  const dt = depth.get(to)
+  if (df !== undefined && dt !== undefined && dt <= df) return 'back'
+  return 'forward'
+}
+
+// requestTotal sums the request counts that represent real API calls — every edge
+// *except* those flowing into a terminal node. Completions and drop-offs into
+// done/exit are journey outcomes, not requests, so counting them would inflate the
+// "N requests" headline; they still render as completion flow, just outside this
+// total. Entry edges (from === "") into a non-terminal node are real first
+// requests and are included.
+export function requestTotal(
+  edges: { from: string; to: string; requests: number }[],
+  terminals: Set<string>,
+): number {
+  let total = 0
+  for (const e of edges) {
+    if (terminals.has(e.to)) continue
+    total += e.requests
+  }
+  return total
+}
+
 // HEAT_OK / HEAT_ERR are the endpoints of the error-ratio color ramp (the same
 // GitHub-dark green/red used elsewhere in the live view).
 export const HEAT_OK = '#3fb950'
@@ -427,17 +491,17 @@ function trimZero(n: number): string {
 const COL_GAP = 200 // horizontal distance between layers (columns)
 const ROW_GAP = 110 // vertical distance between nodes in the same column
 
-// layoutGraph computes a deterministic layered (DAG) layout: BFS depth from
-// `start` is the column (x); nodes sharing a depth are spread vertically (y) and
-// centered around a common midline so unbalanced columns still look tidy. Nodes
-// unreachable from `start` are parked together in a single trailing column. The
-// result is a plain id -> {x,y} map the SVG renders from; it is pure and stable
-// for a given input, so it is unit-tested.
-export function layoutGraph(
+// graphDepths runs the BFS that underlies the layout: from `start`, each reachable
+// node gets its shortest-path depth (its funnel column); unreachable nodes (and the
+// case where `start` is missing) are simply absent from the map. Only edges between
+// declared nodes are followed, in input order, so the result is deterministic. It
+// is exported (and reused by layoutGraph) so the flow view can classify edges as
+// forward vs back/loop from the same depths the layout draws.
+export function graphDepths(
   nodes: { id: string }[],
   edges: { from: string; to: string }[],
   start: string,
-): Record<string, { x: number; y: number }> {
+): Map<string, number> {
   const ids = nodes.map((n) => n.id)
   const known = new Set(ids)
 
@@ -464,6 +528,24 @@ export function layoutGraph(
       }
     }
   }
+  return depth
+}
+
+// layoutGraph computes a deterministic layered (DAG) layout: BFS depth from
+// `start` is the column (x); nodes sharing a depth are spread vertically (y) and
+// centered around a common midline so unbalanced columns still look tidy. Nodes
+// unreachable from `start` are parked together in a single trailing column. The
+// result is a plain id -> {x,y} map the SVG renders from; it is pure and stable
+// for a given input, so it is unit-tested.
+export function layoutGraph(
+  nodes: { id: string }[],
+  edges: { from: string; to: string }[],
+  start: string,
+): Record<string, { x: number; y: number }> {
+  const ids = nodes.map((n) => n.id)
+
+  // Shortest-path depth from start (the column); shared with the flow view.
+  const depth = graphDepths(nodes, edges, start)
 
   // Bucket reachable nodes by depth (discovery order within a column); collect the
   // rest (unreachable, incl. when start is missing) for one trailing column.

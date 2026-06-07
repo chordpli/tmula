@@ -238,6 +238,9 @@ const en: Record<string, string> = {
   'graph.aria.flow': 'Aggregate request traffic flow over the scenario graph',
   'graph.in': 'in',
   'graph.err': 'err',
+  // Terminal endpoints (done/exit): inflow is an outcome, not a request.
+  'graph.completed': 'completed',
+  'graph.left': 'left',
 
   // LatencyHeatmap
   'latheat.capMain': 'Requests per latency × time bucket',
@@ -430,6 +433,9 @@ const ko: Record<string, string> = {
   'graph.aria.flow': '시나리오 그래프 위의 집계 요청 트래픽 흐름',
   'graph.in': '유입',
   'graph.err': '오류',
+  // 종료 노드(done/exit): 유입은 요청이 아니라 결과(완료/이탈)입니다.
+  'graph.completed': '완료',
+  'graph.left': '이탈',
 
   // LatencyHeatmap
   'latheat.capMain': '지연 × 시간 구간별 요청 수',

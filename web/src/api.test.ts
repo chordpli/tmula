@@ -1,8 +1,10 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   buildRunSpec,
+  classifyEdge,
   compareURL,
   formatCount,
+  graphDepths,
   HEAT_ERR,
   HEAT_MAX_W,
   HEAT_MIN_W,
@@ -23,8 +25,10 @@ import {
   parseSegments,
   parseTraceFrame,
   reportHTMLURL,
+  requestTotal,
   runDisabled,
   shareTokenFromQuery,
+  terminalNodeIds,
   traceable,
   traceURL,
   type ExperimentForm,
@@ -666,5 +670,140 @@ describe('layoutGraph', () => {
     const pos = layoutGraph(nodes, edges, 'nope')
     // No start match → all nodes are unreachable but still placed.
     expect(Object.keys(pos).sort()).toEqual(['a', 'b'])
+  })
+})
+
+describe('graphDepths', () => {
+  it('assigns shortest-path BFS depth from the start', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }]
+    const edges = [
+      { from: 'a', to: 'b' },
+      { from: 'b', to: 'c' },
+      { from: 'a', to: 'd' },
+      { from: 'd', to: 'c' }, // c reachable at depth 2 via b and via d; BFS keeps 2
+    ]
+    const depth = graphDepths(nodes, edges, 'a')
+    expect(depth.get('a')).toBe(0)
+    expect(depth.get('b')).toBe(1)
+    expect(depth.get('d')).toBe(1)
+    expect(depth.get('c')).toBe(2)
+  })
+
+  it('omits nodes unreachable from the start (and all nodes when start is missing)', () => {
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'orphan' }]
+    const edges = [{ from: 'a', to: 'b' }]
+    const depth = graphDepths(nodes, edges, 'a')
+    expect(depth.has('orphan')).toBe(false)
+    // A missing start leaves every node unreachable.
+    expect(graphDepths(nodes, edges, 'nope').size).toBe(0)
+  })
+
+  it('agrees with the columns layoutGraph draws (same BFS)', () => {
+    // depth d maps to x = d * COL_GAP, so equal depth ⇒ equal x and a deeper node
+    // sits strictly to the right. This pins graphDepths to the layout it feeds.
+    const nodes = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    const edges = [
+      { from: 'a', to: 'b' },
+      { from: 'b', to: 'c' },
+    ]
+    const depth = graphDepths(nodes, edges, 'a')
+    const pos = layoutGraph(nodes, edges, 'a')
+    expect(depth.get('a')! < depth.get('b')!).toBe(pos.a.x < pos.b.x)
+    expect(depth.get('b')! < depth.get('c')!).toBe(pos.b.x < pos.c.x)
+  })
+})
+
+describe('terminalNodeIds', () => {
+  it('treats a node with no apiTemplateId as terminal, and one with a template as not', () => {
+    const term = terminalNodeIds([
+      { id: 'browse', apiTemplateId: 't_browse' },
+      { id: 'done' }, // no template → terminal
+      { id: 'exit', apiTemplateId: '' }, // empty template → terminal
+    ])
+    expect(term.has('done')).toBe(true)
+    expect(term.has('exit')).toBe(true)
+    expect(term.has('browse')).toBe(false)
+  })
+
+  it('is empty when every node has a template', () => {
+    const term = terminalNodeIds([
+      { id: 'a', apiTemplateId: 't_a' },
+      { id: 'b', apiTemplateId: 't_b' },
+    ])
+    expect(term.size).toBe(0)
+  })
+})
+
+describe('classifyEdge', () => {
+  // Mirrors the shop preset's funnel shape so the classes match what the UI draws.
+  const terminals = new Set(['done', 'exit'])
+  const depth = new Map<string, number>([
+    ['browse', 0],
+    ['search', 1],
+    ['category', 1],
+    ['product', 2],
+    ['cart', 3],
+    ['checkout', 4],
+    ['done', 5],
+    ['exit', 1],
+  ])
+
+  it('labels an edge into a terminal node as terminal (even from deep in the funnel)', () => {
+    expect(classifyEdge('checkout', 'done', terminals, depth)).toBe('terminal')
+    expect(classifyEdge('browse', 'exit', terminals, depth)).toBe('terminal')
+  })
+
+  it('labels an edge to an equal-or-shallower depth as a back/loop edge', () => {
+    // category (1) -> browse (0): a loop back to the entry.
+    expect(classifyEdge('category', 'browse', terminals, depth)).toBe('back')
+    // product (2) -> browse (0): another loop.
+    expect(classifyEdge('product', 'browse', terminals, depth)).toBe('back')
+  })
+
+  it('labels an edge that advances the funnel as forward', () => {
+    expect(classifyEdge('browse', 'search', terminals, depth)).toBe('forward')
+    expect(classifyEdge('search', 'product', terminals, depth)).toBe('forward')
+    expect(classifyEdge('cart', 'checkout', terminals, depth)).toBe('forward')
+  })
+
+  it('defaults to forward when a depth is unknown (so unreachable edges still draw bold)', () => {
+    expect(classifyEdge('mystery', 'browse', terminals, depth)).toBe('forward')
+    expect(classifyEdge('browse', 'mystery', terminals, depth)).toBe('forward')
+  })
+
+  it('treats a terminal destination as terminal regardless of depth ordering', () => {
+    // Even if a terminal somehow sat shallower than its source, terminal wins.
+    expect(classifyEdge('browse', 'exit', terminals, depth)).toBe('terminal')
+  })
+})
+
+describe('requestTotal', () => {
+  const terminals = new Set(['done', 'exit'])
+
+  it('sums request edges but excludes flow into terminal nodes', () => {
+    const edges = [
+      { from: '', to: 'browse', requests: 100 }, // entry request → counted
+      { from: 'browse', to: 'search', requests: 40 }, // request → counted
+      { from: 'browse', to: 'exit', requests: 20 }, // drop-off → excluded
+      { from: 'checkout', to: 'done', requests: 15 }, // completion → excluded
+    ]
+    // 100 + 40 = 140; the 20 + 15 terminal flow is not requests.
+    expect(requestTotal(edges, terminals)).toBe(140)
+  })
+
+  it('counts everything when there are no terminals', () => {
+    const edges = [
+      { from: '', to: 'a', requests: 5 },
+      { from: 'a', to: 'b', requests: 7 },
+    ]
+    expect(requestTotal(edges, new Set())).toBe(12)
+  })
+
+  it('is zero when every edge flows into a terminal', () => {
+    const edges = [
+      { from: 'a', to: 'done', requests: 9 },
+      { from: 'b', to: 'exit', requests: 3 },
+    ]
+    expect(requestTotal(edges, terminals)).toBe(0)
   })
 })
