@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -125,21 +126,43 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 	if gerr != nil {
 		return fmt.Errorf("cluster: worker build guard: %w", gerr)
 	}
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard))
 	users := buildUsers(offset, count)
+
+	// Stream each result as it is produced instead of materializing the whole
+	// shard: a result sink pushes every StepResult straight onto the gRPC stream,
+	// so the worker never holds tens of millions of results in RAM at headline RPS.
+	// A server stream's Send is NOT safe for concurrent calls and the sink fires
+	// from many session goroutines at once, so every Send is serialized under
+	// sendMu. The first Send failure is captured and the run context is cancelled
+	// so the remaining sessions unwind promptly rather than sending into a broken
+	// stream.
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	var (
+		sendMu  sync.Mutex
+		sendErr error
+	)
+	sink := func(r load.StepResult) {
+		sendMu.Lock()
+		defer sendMu.Unlock()
+		if sendErr != nil {
+			return // already failed; drop the rest, the error is recorded
+		}
+		if err := stream.Send(toShardResult(r)); err != nil {
+			sendErr = err
+			cancel() // stop the other sessions; the first error is recorded
+		}
+	}
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard), load.WithResultSink(sink))
 
 	// The Runner seeds user i (local) with seed+i. Offsetting the base seed by
 	// the global offset makes local i correspond to global user offset+i, so the
 	// per-user seed is exactly seed + global index regardless of the partition.
-	results, err := runner.Run(stream.Context(), spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset))
-	if err != nil {
+	if _, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset)); err != nil {
 		return fmt.Errorf("cluster: worker run shard: %w", err)
 	}
-
-	for i := range results {
-		if sendErr := stream.Send(toShardResult(results[i])); sendErr != nil {
-			return fmt.Errorf("cluster: worker stream result: %w", sendErr)
-		}
+	if sendErr != nil {
+		return fmt.Errorf("cluster: worker stream result: %w", sendErr)
 	}
 	return nil
 }
@@ -172,15 +195,18 @@ func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunSh
 	if gerr != nil {
 		return nil, fmt.Errorf("cluster: worker build guard: %w", gerr)
 	}
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard))
 	users := buildUsers(offset, count)
 
-	results, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset))
-	if err != nil {
+	// Fold each result straight into the shard's Summary as it completes instead
+	// of buffering the whole shard and summing afterward: Summary.Add is already
+	// mutex-guarded, so it is a concurrency-safe ResultSink, and the worker's
+	// memory stays flat (one fixed-size Summary) no matter how many requests the
+	// shard makes.
+	sink := func(r load.StepResult) { summary.Add(toObservation(r)) }
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard), load.WithResultSink(sink))
+
+	if _, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset)); err != nil {
 		return nil, fmt.Errorf("cluster: worker run shard summary: %w", err)
-	}
-	for i := range results {
-		summary.Add(toObservation(results[i]))
 	}
 	return toShardSummary(summary), nil
 }
