@@ -580,3 +580,96 @@ func equalCategorySets(a, b map[domain.FindingCategory]bool) bool {
 	}
 	return true
 }
+
+// down/up build one session step result for the same API "pay": a 503 counts as
+// unavailable, a 200 resets the consecutive-failure run.
+func down() load.StepResult {
+	return load.StepResult{NodeID: "pay", Resp: load.Response{StatusCode: 503}}
+}
+func up() load.StepResult {
+	return load.StepResult{NodeID: "pay", Resp: load.Response{StatusCode: 200}}
+}
+
+// TestRecordStampsPerResultRevealsAvailability proves the recording path stamps
+// each observation with its OWN completion time (now() is read per result), not a
+// single frozen run/session timestamp. The results arrive interleaved so that
+// walking them in arrival order resets the failure run on every success and never
+// reaches the threshold; only the per-result timestamps (failures stamped earlier
+// than the successes that separate them) expose the contiguous 5-long streak.
+//
+// This is non-vacuous: reverting record to stamp one fixed ts for the whole slice
+// makes every observation equal-timed, so classifyAvailability's stable tie-break
+// preserves the arrival interleave, the max run stays 1, and the availability
+// finding disappears — failing this test.
+func TestRecordStampsPerResultRevealsAvailability(t *testing.T) {
+	base := time.Unix(1000, 0)
+	at := func(sec int) time.Time { return base.Add(time.Duration(sec) * time.Second) }
+
+	// Arrival (slice) order: down,up,down,up,... — by arrival the run never exceeds 1.
+	results := []load.StepResult{
+		down(), up(), down(), up(), down(), up(), down(), up(), down(), up(),
+	}
+	// Per-result completion times, consumed in slice order by record's now(). The
+	// five downs land at ts 1..5 (contiguous in time); the five ups land at ts
+	// 100..104 (all later). So timestamp order is down,down,down,down,down,up,...
+	stamps := []time.Time{
+		at(100), at(1), at(101), at(2), at(102),
+		at(3), at(103), at(4), at(104), at(5),
+	}
+	if len(stamps) != len(results) {
+		t.Fatalf("test setup: %d stamps for %d results", len(stamps), len(results))
+	}
+	i := 0
+	now := func() time.Time {
+		ts := stamps[i]
+		i++
+		return ts
+	}
+
+	collector := obs.NewCollector()
+	agg := obs.NewAggregator()
+	record(collector, agg, results, now)
+	if i != len(results) {
+		t.Fatalf("now() called %d times, want one per result (%d)", i, len(results))
+	}
+
+	cfg := obs.ClassifyConfig{AvailabilityRun: 5}
+	got := findingCategoryCount(agg.Classify("r", cfg), domain.FindingAvailability)
+	if got != 1 {
+		t.Fatalf("per-result timestamps should reveal the 5-long availability streak hidden by arrival interleave, got %d availability findings", got)
+	}
+}
+
+// TestRecordReadsClockPerResult asserts record reads now() exactly once per
+// result rather than once for the whole slice — the direct signal that TS is
+// stamped per observation (its completion time) and no longer frozen per session.
+// A frozen-ts implementation reads the clock zero or one time regardless of the
+// result count, so this count check fails it.
+func TestRecordReadsClockPerResult(t *testing.T) {
+	results := []load.StepResult{up(), down(), up(), down(), up()}
+	calls := 0
+	base := time.Unix(2000, 0)
+	now := func() time.Time {
+		ts := base.Add(time.Duration(calls) * time.Millisecond) // strictly increasing
+		calls++
+		return ts
+	}
+	collector := obs.NewCollector()
+	agg := obs.NewAggregator()
+	record(collector, agg, results, now)
+	if calls != len(results) {
+		t.Fatalf("now() read %d times, want one read per result (%d): TS is not stamped per result", calls, len(results))
+	}
+}
+
+// findingCategoryCount tallies findings of one category (local to the workload
+// white-box tests; obs.findingsByCategory is unexported in its own package).
+func findingCategoryCount(fs []domain.Finding, cat domain.FindingCategory) int {
+	n := 0
+	for _, f := range fs {
+		if f.Category == cat {
+			n++
+		}
+	}
+	return n
+}
