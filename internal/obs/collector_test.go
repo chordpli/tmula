@@ -6,24 +6,27 @@ import (
 	"testing"
 )
 
-func TestPercentilesNearestRank(t *testing.T) {
+func TestPercentilesApprox(t *testing.T) {
 	c := NewCollector()
 	// latencies 1..100 ms, all 200 OK.
 	for i := 1; i <= 100; i++ {
 		c.Record(200, float64(i), "")
 	}
 	s := c.Snapshot()
-	if s.P50 != 50 {
-		t.Errorf("p50 = %v, want 50", s.P50)
+	// Percentiles come from the bounded HDR histogram, so they land within its
+	// ~1% relative bucket error of the true value rather than exactly on it.
+	approx := func(name string, got, want float64) {
+		t.Helper()
+		if math.Abs(got-want) > want*0.02 {
+			t.Errorf("%s = %v, want ~%v (within 2%%)", name, got, want)
+		}
 	}
-	if s.P95 != 95 {
-		t.Errorf("p95 = %v, want 95", s.P95)
-	}
-	if s.P99 != 99 {
-		t.Errorf("p99 = %v, want 99", s.P99)
-	}
+	approx("p50", s.P50, 50)
+	approx("p95", s.P95, 95)
+	approx("p99", s.P99, 99)
+	// Max is tracked exactly, not bucketed.
 	if s.Max != 100 {
-		t.Errorf("max = %v, want 100", s.Max)
+		t.Errorf("max = %v, want 100 (exact)", s.Max)
 	}
 }
 

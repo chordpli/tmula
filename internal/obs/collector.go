@@ -2,7 +2,6 @@ package obs
 
 import (
 	"math"
-	"sort"
 	"sync"
 
 	"github.com/chordpli/tmula/internal/domain"
@@ -24,11 +23,15 @@ type Stats struct {
 	Max          float64     `json:"max"`
 }
 
-// Collector ingests per-request observations and aggregates them. It is safe
-// for concurrent use by many virtual users.
+// Collector ingests per-request observations and aggregates them. It is safe for
+// concurrent use by many virtual users. Latencies fold into a bounded, HDR-style
+// Histogram rather than a growing slice, so a Collector's memory stays flat no
+// matter how many requests a run makes (a long high-RPS run previously grew an
+// unbounded []float64). It also means a local run's percentiles come from the
+// same Histogram the distributed Summary uses, so the two paths agree.
 type Collector struct {
 	mu           sync.Mutex
-	latencies    []float64
+	lat          *Histogram
 	statusCounts map[int]int
 	total        int
 	errors       int
@@ -37,7 +40,7 @@ type Collector struct {
 
 // NewCollector returns an empty collector.
 func NewCollector() *Collector {
-	return &Collector{statusCounts: make(map[int]int)}
+	return &Collector{lat: NewHistogram(), statusCounts: make(map[int]int)}
 }
 
 // Record ingests one request outcome. A result counts as an error when the
@@ -47,7 +50,7 @@ func (c *Collector) Record(statusCode int, latencyMs float64, errorClass string)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.total++
-	c.latencies = append(c.latencies, sanitizeLatency(latencyMs))
+	c.lat.Observe(sanitizeLatency(latencyMs))
 	if statusCode > 0 {
 		c.statusCounts[statusCode]++
 	}
@@ -60,12 +63,10 @@ func (c *Collector) Record(statusCode int, latencyMs float64, errorClass string)
 }
 
 // sanitizeLatency clamps a latency that cannot meaningfully enter the percentile
-// math to 0: a negative value would drag percentiles below zero and a NaN makes
-// the sort order undefined (poisoning every percentile), while +Inf would make
-// the max infinite. This mirrors the Histogram's clamping of degenerate samples
-// so the Collector and the Summary agree on how bad inputs are handled. The
-// request still counts toward total/errors/status; only the stored latency is
-// fixed up.
+// math to 0: a negative value would drag percentiles below zero and a NaN/±Inf
+// would poison the aggregate. This matches how the Histogram and Summary treat
+// degenerate samples. The request still counts toward total/errors/status; only
+// the stored latency is fixed up.
 func sanitizeLatency(latencyMs float64) float64 {
 	if math.IsNaN(latencyMs) || latencyMs < 0 || math.IsInf(latencyMs, 0) {
 		return 0
@@ -79,8 +80,12 @@ func (c *Collector) RecordSample(s domain.MetricSample) {
 }
 
 // Snapshot computes the current aggregate. The returned StatusCounts is a copy.
+// Quantiles read from the bounded histogram in O(buckets) — cheap enough to run
+// under the lock, replacing the old O(n log n) sort of a growing slice. Max is
+// tracked exactly; the percentiles carry the histogram's ~1% bucket error.
 func (c *Collector) Snapshot() Stats {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	st := Stats{
 		Total:        c.total,
 		Errors:       c.errors,
@@ -90,30 +95,22 @@ func (c *Collector) Snapshot() Stats {
 	for k, v := range c.statusCounts {
 		st.StatusCounts[k] = v
 	}
-	var sorted []float64
-	if len(c.latencies) > 0 {
-		sorted = make([]float64, len(c.latencies))
-		copy(sorted, c.latencies)
-	}
-	c.mu.Unlock()
-
-	// Sort + percentiles run on the copy, outside the lock, so a Snapshot does
-	// not block concurrent Record calls for O(n log n).
 	if st.Total > 0 {
 		st.ErrorRate = float64(st.Errors) / float64(st.Total)
 	}
-	if len(sorted) > 0 {
-		sort.Float64s(sorted)
-		st.P50 = percentile(sorted, 0.50)
-		st.P95 = percentile(sorted, 0.95)
-		st.P99 = percentile(sorted, 0.99)
-		st.Max = sorted[len(sorted)-1]
+	if c.lat.Count() > 0 {
+		st.P50 = c.lat.Quantile(0.50)
+		st.P95 = c.lat.Quantile(0.95)
+		st.P99 = c.lat.Quantile(0.99)
+		st.Max = c.lat.Max()
 	}
 	return st
 }
 
-// percentile returns the nearest-rank percentile of a sorted slice.
-// p is in [0,1]. The slice must be non-empty and ascending.
+// percentile returns the nearest-rank percentile of a sorted slice. p is in
+// [0,1]; the slice must be non-empty and ascending. It is retained for the
+// per-endpoint finding classifier (finding.go), which works on a bounded
+// per-endpoint sample rather than the whole run.
 func percentile(sorted []float64, p float64) float64 {
 	n := len(sorted)
 	rank := int(math.Ceil(p * float64(n)))
