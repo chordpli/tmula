@@ -10,6 +10,7 @@ import (
 
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
+	"github.com/chordpli/tmula/internal/obs"
 	"github.com/chordpli/tmula/internal/store"
 )
 
@@ -233,5 +234,69 @@ func TestDefaultStoreIsInMemory(t *testing.T) {
 	decode(t, resp, &rep)
 	if rep.Run.Status != domain.RunCompleted {
 		t.Errorf("default-store report after eviction = %q, want completed", rep.Run.Status)
+	}
+}
+
+// TestCompareRunsServedFromStore: the run-to-run comparison must still render
+// when one side has been evicted to the store, since compareRuns now rebuilds
+// each side through the same store fallback.
+func TestCompareRunsServedFromStore(t *testing.T) {
+	sut := sutOK()
+	defer sut.Close()
+	srv, cp, _, closeCP := newCPWithStore(t)
+	defer closeCP()
+
+	a := runOnce(t, cp.URL, sut.URL, 4)
+	b := runOnce(t, cp.URL, sut.URL, 3)
+	evict(srv, domain.ID(a)) // A is now store-only; B stays live.
+
+	resp, err := http.Get(cp.URL + "/runs/compare?a=" + a + "&b=" + b)
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("compare with a store-only run = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), a) || !strings.Contains(string(body), b) {
+		t.Errorf("compare HTML should name both runs %q and %q", a, b)
+	}
+}
+
+// TestSharedReportFromStoreScrubsKillReason: a run that FAILED with an internal
+// killReason, once served from the store (evicted / after restart) rather than
+// the live cache, must still have that reason scrubbed on the shared path.
+func TestSharedReportFromStoreScrubsKillReason(t *testing.T) {
+	const internalReason = `dial worker "10.0.0.5:7000": connection refused`
+	st := store.NewMemStore()
+	srv := NewServer(load.NewRESTAdapter(time.Second), WithStore(st))
+
+	// Persist a failed run directly to the store with no live runState — exactly
+	// the state after eviction or a restart of a run that failed mid-flight.
+	if err := st.SaveRun(domain.RunExecution{ID: "rf", Status: domain.RunFailed, KillReason: internalReason}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveStats("rf", obs.Stats{Total: 3}); err != nil {
+		t.Fatal(err)
+	}
+	srv.shares["tok"] = shareEntry{runID: "rf"}
+
+	cp := httptest.NewServer(srv.Handler())
+	defer cp.Close()
+	resp, err := http.Get(cp.URL + "/reports/shared/tok")
+	if err != nil {
+		t.Fatalf("shared report: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("shared report (store, failed run) = %d, want 200", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "10.0.0.5") || strings.Contains(string(body), internalReason) {
+		t.Errorf("shared report from store leaks internal killReason: %s", body)
+	}
+	if !strings.Contains(string(body), publicKillReason) {
+		t.Errorf("shared report from store should carry %q, got: %s", publicKillReason, body)
 	}
 }

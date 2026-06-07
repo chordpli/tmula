@@ -109,7 +109,7 @@ export interface Finding {
 }
 
 export interface Report {
-  run: { id: string; status: string; killReason?: string; mode?: string }
+  run: { id: string; status: string; killReason?: string; mode?: string; workers?: number }
   stats: Stats
   findings: Finding[]
   workers?: number
