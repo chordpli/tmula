@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"unicode"
 
 	"sigs.k8s.io/yaml"
 
@@ -46,11 +47,19 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 	flow := make([]scenariofile.Step, 0, len(ops))
 	ids := newIDSet()
 	for _, o := range ops {
+		// A path with a space or control char would yield a malformed request line
+		// ("METHOD /pa th"); drop it so the scenario stays runnable.
+		if !safeRequestPath(o.path) {
+			continue
+		}
 		flow = append(flow, scenariofile.Step{
 			ID:      ids.unique(stepID(o.op.OperationID, o.method, o.path)),
 			Request: strings.ToUpper(o.method) + " " + o.path,
 			Body:    bodyExample(o.op),
 		})
+	}
+	if len(flow) == 0 {
+		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no usable operations")
 	}
 
 	return scenariofile.Scenario{Target: openAPITarget(doc), Flow: flow}, nil
@@ -153,6 +162,12 @@ func FromHAR(data []byte) (scenariofile.Scenario, error) {
 		}
 		if u.RawQuery != "" {
 			path += "?" + u.RawQuery
+		}
+		// url.Parse decodes a percent-encoded control char (e.g. %0a) into a real
+		// newline in u.Path; together with spaces these break the "METHOD /path"
+		// request line, so drop the entry rather than emit a malformed step.
+		if !safeRequestPath(path) {
+			continue
 		}
 		method := strings.ToUpper(e.Request.Method)
 		var body string
@@ -279,6 +294,21 @@ func compactJSON(raw json.RawMessage) []byte {
 		return raw
 	}
 	return b
+}
+
+// safeRequestPath reports whether a path is usable in a "METHOD /path" request
+// line. The scenario request shorthand is split with strings.Fields, so any
+// whitespace (a literal space, or a control char like the newline a
+// percent-encoded %0a decodes into) would break the line into the wrong number
+// of fields and fail confusingly later at parse time. Such paths are dropped at
+// import so the generated scenario only ever carries well-formed request lines.
+func safeRequestPath(path string) bool {
+	for _, r := range path {
+		if r == ' ' || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // stepID builds a stable, sanitized id from an operationId (preferred) or the

@@ -182,3 +182,89 @@ func TestImportRejectsEmpty(t *testing.T) {
 		t.Error("har with no entries should error")
 	}
 }
+
+// TestHARDropsNewlineInPath covers a HAR URL whose percent-encoded control char
+// (%0a) decodes into a real newline in the path. Such a step would produce a
+// malformed "METHOD /path" request line, so it must be dropped while the clean
+// entry survives and the result still expands.
+func TestHARDropsNewlineInPath(t *testing.T) {
+	const har = `{"log":{"entries":[
+	    {"request":{"method":"GET","url":"http://app.test/ok"}},
+	    {"request":{"method":"GET","url":"http://app.test/bad%0apath"}}
+	  ]}}`
+	s, err := FromHAR([]byte(har))
+	if err != nil {
+		t.Fatalf("FromHAR: %v", err)
+	}
+	if len(s.Flow) != 1 {
+		t.Fatalf("flow = %d steps, want 1 (newline-in-path dropped): %+v", len(s.Flow), s.Flow)
+	}
+	if s.Flow[0].Request != "GET /ok" {
+		t.Errorf("kept step = %q, want GET /ok", s.Flow[0].Request)
+	}
+	if strings.ContainsAny(s.Flow[0].Request, "\r\n\t") {
+		t.Errorf("request line carries a control char: %q", s.Flow[0].Request)
+	}
+	// The sanitized scenario must still expand into a runnable spec.
+	if _, err := scenariofile.Expand(s); err != nil {
+		t.Errorf("expand sanitized scenario: %v", err)
+	}
+}
+
+// TestHARDropsSpaceInPath covers a HAR URL with a literal space in the path,
+// which would split the request line into too many fields. The clean entry is
+// kept.
+func TestHARDropsSpaceInPath(t *testing.T) {
+	const har = `{"log":{"entries":[
+	    {"request":{"method":"GET","url":"http://app.test/clean"}},
+	    {"request":{"method":"GET","url":"http://app.test/has space"}}
+	  ]}}`
+	s, err := FromHAR([]byte(har))
+	if err != nil {
+		t.Fatalf("FromHAR: %v", err)
+	}
+	if len(s.Flow) != 1 || s.Flow[0].Request != "GET /clean" {
+		t.Fatalf("flow = %+v, want only GET /clean (space-in-path dropped)", s.Flow)
+	}
+}
+
+// TestOpenAPIDropsSpaceInPath covers an OpenAPI path containing a space. The
+// operation is dropped; a clean sibling path survives and the result expands.
+func TestOpenAPIDropsSpaceInPath(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+paths:
+  "/good":
+    get: {}
+  "/bad path":
+    get: {}
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	if len(s.Flow) != 1 || s.Flow[0].Request != "GET /good" {
+		t.Fatalf("flow = %+v, want only GET /good (space-in-path dropped)", s.Flow)
+	}
+	if _, err := scenariofile.Expand(s); err != nil {
+		t.Errorf("expand sanitized scenario: %v", err)
+	}
+}
+
+// TestOpenAPIAllPathsUnsafeErrors covers the case where every path is malformed:
+// the importer must report no usable operations rather than return an empty flow.
+func TestOpenAPIAllPathsUnsafeErrors(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+paths:
+  "/bad path":
+    get: {}
+`
+	if _, err := FromOpenAPI([]byte(doc)); err == nil {
+		t.Error("openapi whose only path is malformed should error (no usable operations)")
+	}
+}

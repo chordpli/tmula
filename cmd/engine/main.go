@@ -124,10 +124,15 @@ func serve(args []string) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = apiSrv.Shutdown(shutdownCtx) // cancel and drain in-flight runs first
-		return srv.Shutdown(shutdownCtx)
+		// Each shutdown gets its own 5s budget: a shared context would let a slow
+		// in-flight-run drain consume the whole deadline, leaving srv.Shutdown no
+		// time and leaking the HTTP listener.
+		apiCtx, apiCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer apiCancel()
+		_ = apiSrv.Shutdown(apiCtx) // cancel and drain in-flight runs first
+		srvCtx, srvCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer srvCancel()
+		return srv.Shutdown(srvCtx)
 	case err := <-errCh:
 		return err
 	}
@@ -149,7 +154,9 @@ func runWorker(addr string) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := gs.Serve(lis); err != nil {
+		// GracefulStop makes Serve return grpc.ErrServerStopped; that is the normal
+		// shutdown path, not a failure, so don't surface it as a serve error.
+		if err := gs.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			errCh <- err
 		}
 	}()

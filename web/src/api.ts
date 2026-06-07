@@ -55,13 +55,31 @@ export interface RunSpec {
 }
 
 // parseSegments reads the persona-mix JSON. A blank value means no personas
-// (homogeneous run); anything else must be a JSON array or it throws, so the
-// caller surfaces a clear error — same contract as the graph/templates fields.
+// (homogeneous run); anything else must be a JSON array of objects each with a
+// string `name` and numeric `weight`, or it throws, so a malformed mix is caught
+// here rather than rejected confusingly by the server — same contract as the
+// graph/templates fields.
 export function parseSegments(json: string): Segment[] {
   if (!json.trim()) return []
   const parsed = JSON.parse(json)
   if (!Array.isArray(parsed)) throw new Error('segments must be a JSON array')
+  parsed.forEach((seg, i) => {
+    if (typeof seg !== 'object' || seg === null) {
+      throw new Error(`segment ${i} must be an object with a name and weight`)
+    }
+    const { name, weight } = seg as { name?: unknown; weight?: unknown }
+    if (typeof name !== 'string') throw new Error(`segment ${i} name must be a string`)
+    if (typeof weight !== 'number') throw new Error(`segment ${i} weight must be a number`)
+  })
   return parsed as Segment[]
+}
+
+// runDisabled reports whether the Run button should be disabled for a given run
+// status — i.e. while a run is in flight. 'pending' is included alongside
+// 'starting' and 'running' because the SSE stream can emit it before 'running';
+// omitting it briefly re-enables the button mid-run.
+export function runDisabled(status: string): boolean {
+  return status === 'starting' || status === 'pending' || status === 'running'
 }
 
 export interface Stats {

@@ -38,6 +38,47 @@ func TestWorkloadModelValidate(t *testing.T) {
 	}
 }
 
+// TestRampSpikeNeedPositivePeak covers the ramp/spike peak rule: a ramp/spike
+// with PeakRate == 0 would climb to zero and then generate no traffic, so it is
+// rejected even when StartRate > 0 (ramp/spike read PeakRate directly and, unlike
+// constant/soak, do not fall back to StartRate). A positive peak is accepted.
+func TestRampSpikeNeedPositivePeak(t *testing.T) {
+	for _, shape := range []RateShape{RateRamp, RateSpike} {
+		// PeakRate == 0 with a positive StartRate must be rejected.
+		zeroPeak := WorkloadModel{
+			Kind:            WorkloadOpen,
+			Arrival:         ArrivalProfile{Shape: shape, StartRate: 50, PeakRate: 0, RampSeconds: 30},
+			DurationSeconds: 60,
+		}
+		if err := zeroPeak.Validate(); err == nil {
+			t.Errorf("%s with peakRate=0 (startRate>0) should be rejected", shape)
+		}
+
+		// A positive peak is accepted.
+		ok := WorkloadModel{
+			Kind:            WorkloadOpen,
+			Arrival:         ArrivalProfile{Shape: shape, StartRate: 50, PeakRate: 200, RampSeconds: 30},
+			DurationSeconds: 60,
+		}
+		if err := ok.Validate(); err != nil {
+			t.Errorf("%s with peakRate>0 should be accepted: %v", shape, err)
+		}
+	}
+
+	// constant/soak are unchanged: PeakRate=0 with StartRate>0 stays valid, since
+	// they fall back to StartRate as the level.
+	for _, shape := range []RateShape{RateConstant, RateSoak} {
+		w := WorkloadModel{
+			Kind:            WorkloadOpen,
+			Arrival:         ArrivalProfile{Shape: shape, StartRate: 50, PeakRate: 0},
+			DurationSeconds: 60,
+		}
+		if err := w.Validate(); err != nil {
+			t.Errorf("%s with startRate>0, peakRate=0 should remain valid: %v", shape, err)
+		}
+	}
+}
+
 func TestThinkTimeValidate(t *testing.T) {
 	if err := (ThinkTime{MinMs: 100, MaxMs: 500}).Validate(); err != nil {
 		t.Errorf("valid think time rejected: %v", err)

@@ -112,6 +112,14 @@ func (w WorkloadModel) Validate() error {
 		if w.Arrival.StartRate <= 0 && w.Arrival.PeakRate <= 0 {
 			return fmt.Errorf("workload: open model needs a positive arrival rate")
 		}
+		// A ramp/spike is defined by its peak: it climbs from StartRate toward
+		// PeakRate. With PeakRate == 0 it would ramp (or spike) to zero and then
+		// generate no traffic for the rest of the run. Unlike constant/soak, these
+		// shapes do not fall back to StartRate, so require a positive peak. (NaN/Inf
+		// and negatives are already rejected above.)
+		if (w.Arrival.Shape == RateRamp || w.Arrival.Shape == RateSpike) && w.Arrival.PeakRate <= 0 {
+			return fmt.Errorf("workload: %s arrival needs peakRate > 0", w.Arrival.Shape)
+		}
 		if w.DurationSeconds <= 0 {
 			return fmt.Errorf("workload: open model needs durationSeconds > 0")
 		}

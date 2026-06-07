@@ -3,7 +3,9 @@ import {
   buildRunSpec,
   compareURL,
   parseSSEData,
+  parseSegments,
   reportHTMLURL,
+  runDisabled,
   shareTokenFromQuery,
   type ExperimentForm,
 } from './api'
@@ -149,5 +151,49 @@ describe('shareTokenFromQuery', () => {
     expect(shareTokenFromQuery('')).toBeNull()
     expect(shareTokenFromQuery('?foo=1')).toBeNull()
     expect(shareTokenFromQuery('?share=')).toBeNull()
+  })
+})
+
+describe('parseSegments', () => {
+  it('returns an empty array for blank input', () => {
+    expect(parseSegments('')).toEqual([])
+    expect(parseSegments('   ')).toEqual([])
+  })
+
+  it('parses a well-formed persona mix', () => {
+    const segs = parseSegments('[{"name":"a","weight":0.7,"start":"x"},{"name":"b","weight":0.3}]')
+    expect(segs).toEqual([
+      { name: 'a', weight: 0.7, start: 'x' },
+      { name: 'b', weight: 0.3 },
+    ])
+  })
+
+  it('throws when the JSON is not an array', () => {
+    expect(() => parseSegments('{"name":"a","weight":1}')).toThrow()
+  })
+
+  it('throws when an element is missing or mistypes name/weight', () => {
+    // weight is a string, not a number.
+    expect(() => parseSegments('[{"name":"a","weight":"1"}]')).toThrow()
+    // name is missing.
+    expect(() => parseSegments('[{"weight":1}]')).toThrow()
+    // element is not an object.
+    expect(() => parseSegments('[42]')).toThrow()
+    expect(() => parseSegments('[null]')).toThrow()
+  })
+})
+
+describe('runDisabled', () => {
+  it('disables the Run button while a run is in flight', () => {
+    expect(runDisabled('starting')).toBe(true)
+    expect(runDisabled('pending')).toBe(true) // SSE can emit pending before running
+    expect(runDisabled('running')).toBe(true)
+  })
+
+  it('enables the Run button when idle or terminal', () => {
+    expect(runDisabled('')).toBe(false)
+    expect(runDisabled('completed')).toBe(false)
+    expect(runDisabled('failed')).toBe(false)
+    expect(runDisabled('killed')).toBe(false)
   })
 })

@@ -28,8 +28,18 @@ import (
 //
 // A *pgxpool.Pool backs the store; pgxpool is safe for concurrent use, so
 // PostgresStore is safe to share across goroutines without additional locking.
+//
+// The Store interface methods take no context (so the in-memory and Postgres
+// backends share one signature and callers stay backend-agnostic), yet every
+// pgx call needs one. Rather than detach each query with context.Background()
+// (no deadline, no cancel), the store carries a base context tied to its own
+// lifetime: derived from the constructor's context but independent of its
+// deadline, and cancelled by Close. Queries thus stop promptly when the store
+// is closed instead of running on after shutdown.
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // compile-time assertion that *PostgresStore implements Store.
@@ -47,12 +57,20 @@ func NewPostgresStore(ctx context.Context, dsn string) (*PostgresStore, error) {
 		pool.Close()
 		return nil, fmt.Errorf("store: ping postgres: %w", err)
 	}
-	return &PostgresStore{pool: pool}, nil
+	// Base context for all queries: drop the constructor ctx's deadline (it may be
+	// a short connect/ping timeout that should not bound later operations) but keep
+	// it cancellable so Close stops in-flight work.
+	baseCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	return &PostgresStore{pool: pool, ctx: baseCtx, cancel: cancel}, nil
 }
 
-// Close releases the underlying connection pool. It is safe to call once; the
-// store must not be used afterward.
+// Close releases the underlying connection pool and cancels the store's base
+// context, stopping any in-flight queries. It is safe to call once; the store
+// must not be used afterward.
 func (s *PostgresStore) Close() {
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.pool != nil {
 		s.pool.Close()
 	}
@@ -116,7 +134,7 @@ func (s *PostgresStore) SaveExperiment(e domain.Experiment) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal experiment %q: %w", e.ID, err)
 	}
-	ctx := context.Background()
+	ctx := s.ctx
 	const q = `INSERT INTO experiments (id, body) VALUES ($1, $2)
                ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body`
 	if _, err := s.pool.Exec(ctx, q, string(e.ID), body); err != nil {
@@ -127,7 +145,7 @@ func (s *PostgresStore) SaveExperiment(e domain.Experiment) error {
 
 // GetExperiment returns an experiment or ErrNotFound.
 func (s *PostgresStore) GetExperiment(id domain.ID) (domain.Experiment, error) {
-	ctx := context.Background()
+	ctx := s.ctx
 	var body []byte
 	const q = `SELECT body FROM experiments WHERE id = $1`
 	if err := s.pool.QueryRow(ctx, q, string(id)).Scan(&body); err != nil {
@@ -152,7 +170,7 @@ func (s *PostgresStore) SaveRun(r domain.RunExecution) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal run %q: %w", r.ID, err)
 	}
-	ctx := context.Background()
+	ctx := s.ctx
 	const q = `INSERT INTO runs (id, experiment_id, body) VALUES ($1, $2, $3)
                ON CONFLICT (id) DO UPDATE SET experiment_id = EXCLUDED.experiment_id, body = EXCLUDED.body`
 	if _, err := s.pool.Exec(ctx, q, string(r.ID), string(r.ExperimentID), body); err != nil {
@@ -163,7 +181,7 @@ func (s *PostgresStore) SaveRun(r domain.RunExecution) error {
 
 // GetRun returns a run or ErrNotFound.
 func (s *PostgresStore) GetRun(id domain.ID) (domain.RunExecution, error) {
-	ctx := context.Background()
+	ctx := s.ctx
 	var body []byte
 	const q = `SELECT body FROM runs WHERE id = $1`
 	if err := s.pool.QueryRow(ctx, q, string(id)).Scan(&body); err != nil {
@@ -189,7 +207,7 @@ func (s *PostgresStore) AppendMetric(m domain.MetricSample) error {
 	if err != nil {
 		return fmt.Errorf("store: marshal metric for run %q: %w", m.RunID, err)
 	}
-	ctx := context.Background()
+	ctx := s.ctx
 	if _, err := s.pool.Exec(ctx, insertMetricQ, string(m.RunID), m.TS, body); err != nil {
 		return fmt.Errorf("store: append metric for run %q: %w", m.RunID, err)
 	}
@@ -221,7 +239,7 @@ func (s *PostgresStore) AppendMetrics(ms []domain.MetricSample) error {
 		bodies[i] = body
 	}
 
-	ctx := context.Background()
+	ctx := s.ctx
 	batch := &pgx.Batch{}
 	for i := range ms {
 		batch.Queue(insertMetricQ, string(ms[i].RunID), ms[i].TS, bodies[i])
@@ -254,7 +272,7 @@ func (s *PostgresStore) AppendMetrics(ms []domain.MetricSample) error {
 // Metrics returns the metric samples for a run ordered by timestamp then insertion
 // sequence. The slice is never nil; an unknown run yields an empty slice.
 func (s *PostgresStore) Metrics(runID domain.ID) ([]domain.MetricSample, error) {
-	ctx := context.Background()
+	ctx := s.ctx
 	const q = `SELECT body FROM metrics WHERE run_id = $1 ORDER BY ts, seq`
 	rows, err := s.pool.Query(ctx, q, string(runID))
 	if err != nil {
@@ -286,7 +304,7 @@ func (s *PostgresStore) SaveFindings(runID domain.ID, findings []domain.Finding)
 	if runID == "" {
 		return fmt.Errorf("store: findings runId is required")
 	}
-	ctx := context.Background()
+	ctx := s.ctx
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("store: begin findings tx for run %q: %w", runID, err)
@@ -316,7 +334,7 @@ func (s *PostgresStore) SaveFindings(runID domain.ID, findings []domain.Finding)
 // Findings returns the findings for a run ordered by insertion sequence. The
 // slice is never nil; an unknown run yields an empty slice.
 func (s *PostgresStore) Findings(runID domain.ID) ([]domain.Finding, error) {
-	ctx := context.Background()
+	ctx := s.ctx
 	const q = `SELECT body FROM findings WHERE run_id = $1 ORDER BY seq`
 	rows, err := s.pool.Query(ctx, q, string(runID))
 	if err != nil {
