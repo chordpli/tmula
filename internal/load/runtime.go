@@ -45,9 +45,13 @@ type Runner struct {
 	eventSink EventSink                        // optional; nil = no per-step events
 }
 
-// StepEvent is one request a virtual user made, emitted live for visualization.
-// From is the node the user came from ("" at the entry); To is the node that
-// made the request. OK is true on a non-error response below 400.
+// StepEvent is one step a virtual user took, emitted live for visualization.
+// From is the node the user came from ("" at the entry); To is the node reached.
+// OK is true on a non-error response below 400. Most events are a request (To
+// made an API call); a Terminal event marks reaching a template-less terminal
+// node (e.g. done/exit) where no request fires — it has no Status/LatencyMs and
+// exists so the live view can show how many users ended there (completion vs
+// drop-off).
 type StepEvent struct {
 	UserID    string
 	From      string
@@ -55,6 +59,7 @@ type StepEvent struct {
 	Status    int
 	LatencyMs float64
 	OK        bool
+	Terminal  bool
 }
 
 // EventSink receives a StepEvent for every request a session makes. It is called
@@ -204,7 +209,14 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		prevNode = nodeID // advance even for pure-state nodes, so edges are correct
 		tmpl, ok := nodeTmpl[nodeID]
 		if !ok {
-			continue // pure state node, no request
+			// Pure-state node (a terminal like done/exit): no request fires, but
+			// emit a terminal transition so the live view can show how many users
+			// ended here (completion vs drop-off). Skip the synthetic entry hop
+			// (from == "") since "ending" only makes sense after a real step.
+			if r.eventSink != nil && from != "" {
+				r.eventSink(StepEvent{UserID: u.ID, From: string(from), To: string(nodeID), OK: true, Terminal: true})
+			}
+			continue
 		}
 		// Think time is the pause a real user takes between actions; apply it
 		// before each request after the first, and make it cancellable so the

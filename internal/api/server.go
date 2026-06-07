@@ -595,7 +595,9 @@ func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
 			if trace != nil {
 				trace.add(e)
 			}
-			if latency != nil {
+			// Terminal events mark reaching a no-request node (done/exit); they
+			// carry no latency, so keep them out of the latency grid.
+			if latency != nil && !e.Terminal {
 				latency.record(e.LatencyMs, time.Now())
 			}
 		}))
