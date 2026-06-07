@@ -38,11 +38,16 @@ type StepResult struct {
 // Runner drives many virtual users concurrently through a scenario graph,
 // calling the system under test through an adapter.
 type Runner struct {
-	adapter   Adapter
-	baseURL   string
-	templates map[domain.ID]domain.APITemplate // keyed by APITemplate ID
-	guard     *safety.Guard                    // optional; nil = no enforcement
-	eventSink EventSink                        // optional; nil = no per-step events
+	adapter    Adapter
+	baseURL    string
+	templates  map[domain.ID]domain.APITemplate // keyed by APITemplate ID
+	guard      *safety.Guard                    // optional; nil = no enforcement
+	eventSink  EventSink                        // optional; nil = no per-step events
+	resultSink ResultSink                       // optional; nil = accumulate and return
+	// maxConcurrency caps how many sessions Run drives at once; 0 means use the
+	// maxConcurrentSessions default. It exists so tests can assert the fan-out is
+	// actually bounded without spawning the full production-sized pool.
+	maxConcurrency int
 }
 
 // StepEvent is one step a virtual user took, emitted live for visualization.
@@ -67,6 +72,17 @@ type StepEvent struct {
 // use; it should also be cheap (it runs on the request hot path).
 type EventSink func(StepEvent)
 
+// ResultSink receives one StepResult as each request completes, the streaming
+// counterpart to Run's returned slice. Setting one (WithResultSink) makes the
+// Runner hand every result to the sink the moment it is produced and NOT retain
+// the full []StepResult — so a worker can fold each result into a summary or push
+// it onto a gRPC stream without ever buffering tens of millions of structs in
+// RAM. Like EventSink it fires concurrently from many session goroutines, so it
+// MUST be safe for concurrent use (every caller's sink guards its shared state
+// with a mutex or atomic); it should also be cheap, as it runs on the request hot
+// path.
+type ResultSink func(StepResult)
+
 // NewRunner builds a Runner. templates is keyed by APITemplate ID; a node with
 // an empty or unknown APITemplateID is treated as a pure state (no request).
 func NewRunner(adapter Adapter, baseURL string, templates map[domain.ID]domain.APITemplate, opts ...RunnerOption) *Runner {
@@ -89,6 +105,21 @@ func WithGuard(g *safety.Guard) RunnerOption { return func(r *Runner) { r.guard 
 // WithEventSink streams a StepEvent for every request, so a caller (the control
 // plane) can show live per-user traffic. Leave it unset for normal runs.
 func WithEventSink(s EventSink) RunnerOption { return func(r *Runner) { r.eventSink = s } }
+
+// WithResultSink streams every StepResult to s as it is produced instead of
+// accumulating them; when set, Run feeds each result to the sink and returns an
+// empty slice, so the caller never holds the whole run in memory (the path that
+// scales to tens of millions of requests per worker). The sink fires from many
+// session goroutines concurrently, so it must be safe for concurrent use — see
+// ResultSink. Leave it unset to keep Run's slice-returning behavior for small
+// runs and existing callers.
+func WithResultSink(s ResultSink) RunnerOption { return func(r *Runner) { r.resultSink = s } }
+
+// withMaxConcurrency overrides the session fan-out cap (default
+// maxConcurrentSessions). It is unexported because production always wants the
+// tuned default; tests use it to bound the pool small enough to assert the cap
+// holds without launching thousands of goroutines.
+func withMaxConcurrency(n int) RunnerOption { return func(r *Runner) { r.maxConcurrency = n } }
 
 // throttleInterval is how long a session waits before retrying a reservation the
 // rate/concurrency cap is currently refusing.
@@ -132,33 +163,84 @@ func (r *Runner) reserve(ctx context.Context) error {
 	}
 }
 
-// Run executes every virtual user as its own goroutine. Each user walks the
-// graph from start and calls the API bound to each visited node. The run stops
-// promptly when ctx is cancelled (the kill switch path). It returns every step
-// result; failures are recorded per step rather than aborting the run.
+// maxConcurrentSessions bounds how many virtual-user sessions Run drives at once.
+// Run used to spawn one goroutine per user with no cap, so a closed pool of a few
+// hundred thousand users (the ~270k-per-node ceiling) meant a few hundred thousand
+// live goroutines and their stacks at once. A fixed worker pool of this size keeps
+// the goroutine (and stack) footprint flat regardless of pool size while still
+// running every user; a pool smaller than this just uses one goroutine per user.
+// It is sized to comfortably saturate the request path without the scheduler and
+// memory cost of an unbounded fan-out.
+const maxConcurrentSessions = 4096
+
+// Run executes the virtual users through a bounded worker pool: at most
+// maxConcurrentSessions sessions run concurrently rather than one goroutine per
+// user, so a huge closed pool no longer spawns a goroutine (and stack) per user.
+// Each user walks the graph from start and calls the API bound to each visited
+// node. The run stops promptly when ctx is cancelled (the kill switch path).
+//
+// Determinism is preserved exactly: user i is still seeded with seed+i regardless
+// of which pool worker happens to run it, so the bound changes only the
+// concurrency, never the per-user traversal.
+//
+// By default Run returns every step result (failures are recorded per step rather
+// than aborting the run). When a ResultSink is configured (WithResultSink) each
+// result is instead handed to the sink as it completes and Run returns an empty
+// slice, so a caller folding millions of requests never holds them all in memory.
 func (r *Runner) Run(ctx context.Context, g domain.ScenarioGraph, start domain.ID, maxSteps int, users []VirtualUser, seed int64) ([]StepResult, error) {
 	nodeTmpl, err := r.resolveNodeTemplates(g)
 	if err != nil {
 		return nil, err
 	}
 
+	// emit routes each result either to the configured sink (streaming, no
+	// retention) or into the accumulated slice under mu. It is shared by every pool
+	// worker, so the slice path guards with mu and the sink path relies on the
+	// sink's own documented concurrency-safety.
 	var (
 		mu      sync.Mutex
 		results []StepResult
-		wg      sync.WaitGroup
 	)
+	emit := r.resultSink
+	if emit == nil {
+		emit = func(sr StepResult) {
+			mu.Lock()
+			results = append(results, sr)
+			mu.Unlock()
+		}
+	}
 
+	// Bound the fan-out with a counting semaphore: a buffered channel sized to the
+	// concurrency target (capped at the user count so a small pool is not
+	// over-provisioned). Acquiring a slot before launching a session and releasing
+	// it on completion caps live session goroutines at the buffer size while still
+	// scheduling every user. No new dependency — the channel is the semaphore.
+	limit := r.maxConcurrency
+	if limit <= 0 {
+		limit = maxConcurrentSessions
+	}
+	if len(users) < limit {
+		limit = len(users)
+	}
+	sem := make(chan struct{}, limit)
+
+	var wg sync.WaitGroup
 	for i := range users {
+		// Stop launching new sessions once cancelled (kill switch); in-flight
+		// sessions observe ctx themselves and unwind promptly.
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{} // blocks once limit sessions are in flight
 		wg.Add(1)
 		go func(i int, u VirtualUser) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			// Closed model: no think time, each user seeded by Seed+i so the
-			// traversal is reproducible. runSession reuses the shared node→template
-			// map so it is resolved exactly once for the whole run.
-			sr := r.runSession(ctx, g, nodeTmpl, start, maxSteps, u, seed+int64(i), nil)
-			mu.Lock()
-			results = append(results, sr...)
-			mu.Unlock()
+			// traversal is reproducible no matter which pool worker runs it.
+			// runSession reuses the shared node→template map so it is resolved
+			// exactly once for the whole run, and emits each result through emit.
+			r.runSession(ctx, g, nodeTmpl, start, maxSteps, u, seed+int64(i), nil, emit)
 		}(i, users[i])
 	}
 
@@ -181,24 +263,38 @@ func (r *Runner) RunSession(ctx context.Context, g domain.ScenarioGraph, start d
 	if err != nil {
 		return nil, err
 	}
-	return r.runSession(ctx, g, nodeTmpl, start, maxSteps, user, seed, think), nil
+	// One arrival's results are bounded by its own walk length, so RunSession
+	// always materializes them for its caller (the open-model scheduler) via a
+	// local accumulator — independent of any Runner-wide ResultSink, which targets
+	// the closed Run fan-out.
+	var results []StepResult
+	r.runSession(ctx, g, nodeTmpl, start, maxSteps, user, seed, think, func(sr StepResult) {
+		results = append(results, sr)
+	})
+	return results, nil
 }
 
 // runSession is the shared session body used by both Run (fanned out per user)
 // and RunSession (one arrival). nodeTmpl is the already-resolved node→template
 // map, so callers driving many sessions resolve templates once rather than per
-// session.
-func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmpl map[domain.ID]domain.APITemplate, start domain.ID, maxSteps int, u VirtualUser, seed int64, think ThinkFunc) []StepResult {
+// session. Each produced StepResult is handed to emit the moment it is known
+// (including the single error result when the walk itself fails) rather than
+// returned, so the caller chooses whether to accumulate them or stream them to a
+// sink. emit must not be nil; for one session it is called only from this
+// goroutine, but Run's shared emit is invoked from many sessions at once, so that
+// emit is responsible for its own concurrency-safety.
+func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmpl map[domain.ID]domain.APITemplate, start domain.ID, maxSteps int, u VirtualUser, seed int64, think ThinkFunc, emit func(StepResult)) {
 	walker, err := engine.NewWalker(g, seed)
 	if err != nil {
-		return []StepResult{{UserID: u.ID, Err: err}}
+		emit(StepResult{UserID: u.ID, Err: err})
+		return
 	}
 	path, err := walker.Walk(start, maxSteps)
 	if err != nil {
-		return []StepResult{{UserID: u.ID, Err: err}}
+		emit(StepResult{UserID: u.ID, Err: err})
+		return
 	}
 
-	var results []StepResult
 	sent := false
 	var prevNode domain.ID // the node the user came from; "" at the entry
 	for _, nodeID := range path {
@@ -228,11 +324,11 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		}
 		req, err := Render(tmpl, r.baseURL, u.Cred, u.Vars)
 		if err != nil {
-			results = append(results, StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
+			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
 			continue
 		}
 		resp, sErr := r.send(ctx, req)
-		results = append(results, StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
+		emit(StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
 		if r.eventSink != nil {
 			r.eventSink(StepEvent{
 				UserID:    u.ID,
@@ -245,7 +341,6 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		}
 		sent = true
 	}
-	return results
 }
 
 // sleep pauses for d or until ctx is done, whichever comes first. It reports

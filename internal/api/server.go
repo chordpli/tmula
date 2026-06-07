@@ -687,8 +687,10 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 
 // runnerFor builds the load.Runner for a run: always guarded by the run's
 // safety policy, and wired to stream live per-request events when the run opted
-// into tracing.
-func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
+// into tracing. Extra options (e.g. a WithResultSink that folds each result into
+// the collector incrementally) are appended last so callers can layer on behavior
+// without duplicating the guard/event-sink wiring.
+func (s *Server) runnerFor(rs *runState, spec RunSpec, extra ...load.RunnerOption) *load.Runner {
 	opts := []load.RunnerOption{load.WithGuard(rs.guard)}
 	if rs.heat != nil || rs.trace != nil || rs.latency != nil {
 		heat, trace, latency := rs.heat, rs.trace, rs.latency
@@ -706,18 +708,20 @@ func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
 			}
 		}))
 	}
+	opts = append(opts, extra...)
 	return load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, opts...)
 }
 
-// executeLocal runs the experiment in-process via the load.Runner, recording
-// each step into the run's collector and finding aggregator.
+// executeLocal runs the experiment in-process via the load.Runner, folding each
+// step into the run's collector and finding aggregator as it completes rather
+// than materializing the whole run first. The result sink fires from many session
+// goroutines at once; both the collector's Record and the aggregator's Add are
+// mutex-guarded, so the sink is safe for concurrent use. Every observation shares
+// one start-of-run timestamp, exactly as the previous slice loop assigned it, so
+// findings and stats are identical.
 func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, agg *obs.Aggregator) error {
-	runner := s.runnerFor(rs, spec)
-	// closedUsers synthesizes the pool from UserCount when the client sent only a
-	// count (the large-run path), or returns the explicit pool as-is.
-	results, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.closedUsers(), spec.Seed)
 	ts := s.now()
-	for _, res := range results {
+	sink := func(res load.StepResult) {
 		cls := errorClass(res)
 		rs.collector.Record(res.Resp.StatusCode, res.Resp.LatencyMs, cls)
 		agg.Add(obs.RequestObservation{
@@ -728,6 +732,12 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 			TS:         ts,
 		})
 	}
+	// Wiring the sink at construction makes the Runner stream each result into the
+	// collector + aggregator and return nothing, so a huge in-process run never
+	// buffers its results. closedUsers synthesizes the pool from UserCount when the
+	// client sent only a count (the large-run path), or returns the explicit pool.
+	runner := s.runnerFor(rs, spec, load.WithResultSink(sink))
+	_, err := runner.Run(ctx, spec.Graph, spec.Start, spec.MaxSteps, spec.closedUsers(), spec.Seed)
 	return err
 }
 
@@ -749,13 +759,14 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 
 	shardSpec := shardSpecFor(spec)
 	ts := s.now()
-	// The coordinator splits the pool by count and each worker synthesizes its own
-	// shard of users, so only poolSize crosses here — never the materialized array.
-	_, steps, err := coord.Distribute(ctx, shardSpec, spec.poolSize())
-	if err != nil {
-		return fmt.Errorf("api: distribute run: %w", err)
-	}
-	for _, st := range steps {
+	// Fold each shard step into the collector + aggregator as it streams in via
+	// DistributeInto, rather than receiving one ShardStep per request for the whole
+	// run and looping it: bounded master memory at any request volume. The sink
+	// fires concurrently from every shard's receive loop; collector.Record and
+	// agg.Add are both mutex-guarded, so it is safe for concurrent use. The
+	// coordinator splits the pool by count and each worker synthesizes its own shard
+	// of users, so only poolSize crosses here — never a materialized user array.
+	sink := func(st cluster.ShardStep) {
 		rs.collector.Record(st.StatusCode, st.LatencyMs, st.ErrorClass)
 		agg.Add(obs.RequestObservation{
 			APIID:      domain.ID(st.APIID),
@@ -764,6 +775,9 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 			ErrorClass: st.ErrorClass,
 			TS:         ts,
 		})
+	}
+	if _, err := coord.DistributeInto(ctx, shardSpec, spec.poolSize(), sink); err != nil {
+		return fmt.Errorf("api: distribute run: %w", err)
 	}
 	return nil
 }

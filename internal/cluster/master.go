@@ -59,17 +59,47 @@ func (c *Coordinator) WorkerCount() int { return len(c.workers) }
 // inspect the raw stream. Distribute blocks until all shards complete; if any
 // worker fails, it returns the first error after the others have been allowed to
 // finish, so no shard goroutine is leaked.
+//
+// This form materializes every step for the caller; a master folding a
+// millions-request run into an aggregator should prefer DistributeInto, which
+// streams each step to a sink and never buffers the whole run.
 func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers int) (obs.Stats, []ShardStep, error) {
-	if err := spec.Validate(); err != nil {
+	var (
+		mu    sync.Mutex
+		steps []ShardStep
+	)
+	// The accumulating sink guards the slice because DistributeInto invokes it
+	// concurrently from every shard's stream.
+	stats, err := c.DistributeInto(ctx, spec, totalUsers, func(s ShardStep) {
+		mu.Lock()
+		steps = append(steps, s)
+		mu.Unlock()
+	})
+	if err != nil {
 		return obs.Stats{}, nil, err
 	}
+	return stats, steps, nil
+}
+
+// DistributeInto is Distribute without the per-run buffer: it streams each shard
+// step to sink as it arrives and returns only the aggregated Collector stats, so
+// a master can fold a run of arbitrary size into an aggregator at bounded memory
+// instead of accumulating one ShardStep per request for the whole run. sink is
+// called concurrently from every shard's receive loop, so it must be safe for
+// concurrent use. It is the master-side counterpart to the worker's ResultSink.
+// Like Distribute it blocks until all shards finish and returns the first worker
+// error after the rest unwind.
+func (c *Coordinator) DistributeInto(ctx context.Context, spec ShardSpec, totalUsers int, sink func(ShardStep)) (obs.Stats, error) {
+	if err := spec.Validate(); err != nil {
+		return obs.Stats{}, err
+	}
 	if totalUsers <= 0 {
-		return obs.Stats{}, nil, fmt.Errorf("cluster: distribute: totalUsers must be > 0")
+		return obs.Stats{}, fmt.Errorf("cluster: distribute: totalUsers must be > 0")
 	}
 
 	specJSON, err := encodeSpec(spec)
 	if err != nil {
-		return obs.Stats{}, nil, err
+		return obs.Stats{}, err
 	}
 
 	// Cancel sibling shards as soon as one fails so a doomed distributed run stops
@@ -83,15 +113,9 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 
 	var (
 		mu       sync.Mutex
-		steps    []ShardStep
 		firstErr error
 		wg       sync.WaitGroup
 	)
-	record := func(s ShardStep) {
-		mu.Lock()
-		steps = append(steps, s)
-		mu.Unlock()
-	}
 	failOnce := func(err error) {
 		mu.Lock()
 		if firstErr == nil {
@@ -114,7 +138,7 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 				MaxSteps:   int32(spec.MaxSteps),
 				StartNode:  string(spec.Start),
 			}
-			if err := runShard(ctx, idx, worker, req, collector, record); err != nil {
+			if err := runShard(ctx, idx, worker, req, collector, sink); err != nil {
 				failOnce(err)
 			}
 		}(i, c.workers[i], a)
@@ -122,9 +146,9 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 	wg.Wait()
 
 	if firstErr != nil {
-		return obs.Stats{}, nil, firstErr
+		return obs.Stats{}, firstErr
 	}
-	return collector.Snapshot(), steps, nil
+	return collector.Snapshot(), nil
 }
 
 // DistributeSummary fans the run's users across workers like Distribute, but
@@ -236,16 +260,18 @@ type ShardStep struct {
 	ErrorClass  string
 }
 
-// runShard drives one worker's RunShard stream to completion, recording every
-// result into the shared collector and the caller's sink. The collector is
-// concurrency-safe, so many shards may record into it in parallel.
+// runShard drives one worker's RunShard stream to completion, folding every
+// result into the shared collector and handing it to sink as it arrives — it
+// never buffers the shard. The collector is concurrency-safe, so many shards may
+// record into it in parallel; sink is shared across shards too and so must be
+// concurrency-safe (its callers ensure that).
 func runShard(
 	ctx context.Context,
 	workerIndex int,
 	worker clusterpb.ClusterServiceClient,
 	req *clusterpb.RunShardRequest,
 	collector *obs.Collector,
-	record func(ShardStep),
+	sink func(ShardStep),
 ) error {
 	stream, err := worker.RunShard(ctx, req)
 	if err != nil {
@@ -260,7 +286,7 @@ func runShard(
 			return fmt.Errorf("cluster: receive shard result: %w", err)
 		}
 		collector.Record(int(res.GetStatusCode()), res.GetLatencyMs(), res.GetErrorClass())
-		record(ShardStep{
+		sink(ShardStep{
 			WorkerIndex: workerIndex,
 			UserID:      res.GetUserId(),
 			APIID:       res.GetApiId(),
