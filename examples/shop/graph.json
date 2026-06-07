@@ -2,13 +2,29 @@
   "id": "shop",
   "nodes": [
     { "id": "browse",   "apiTemplateId": "t_browse" },
-    { "id": "products", "apiTemplateId": "t_products" },
+    { "id": "search",   "apiTemplateId": "t_search" },
+    { "id": "category", "apiTemplateId": "t_category" },
+    { "id": "product",  "apiTemplateId": "t_product" },
     { "id": "cart",     "apiTemplateId": "t_cart" },
-    { "id": "checkout", "apiTemplateId": "t_checkout" }
+    { "id": "checkout", "apiTemplateId": "t_checkout" },
+    { "id": "done" },
+    { "id": "exit" }
   ],
   "edges": [
-    { "from": "browse",   "to": "products", "weight": 0.9, "dependency": false },
-    { "from": "products", "to": "cart",     "weight": 0.7, "dependency": false },
-    { "from": "cart",     "to": "checkout", "weight": 0.8, "dependency": true }
+    { "from": "browse",   "to": "search",   "weight": 0.4 },
+    { "from": "browse",   "to": "category", "weight": 0.4 },
+    { "from": "browse",   "to": "exit",     "weight": 0.2 },
+    { "from": "search",   "to": "product",  "weight": 0.65 },
+    { "from": "search",   "to": "category", "weight": 0.15 },
+    { "from": "search",   "to": "exit",     "weight": 0.2 },
+    { "from": "category", "to": "product",  "weight": 0.7 },
+    { "from": "category", "to": "browse",   "weight": 0.15 },
+    { "from": "category", "to": "exit",     "weight": 0.15 },
+    { "from": "product",  "to": "cart",     "weight": 0.45 },
+    { "from": "product",  "to": "browse",   "weight": 0.25 },
+    { "from": "product",  "to": "exit",     "weight": 0.3 },
+    { "from": "cart",     "to": "checkout", "weight": 0.6, "dependency": true },
+    { "from": "cart",     "to": "exit",     "weight": 0.4 },
+    { "from": "checkout", "to": "done",     "weight": 1.0 }
   ]
 }

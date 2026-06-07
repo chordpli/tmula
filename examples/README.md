@@ -11,7 +11,7 @@ recruiting real users**.
 | [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** — REST API, open (arrival-rate) model, personas, distributed runs |
 | `shop/scenario.yaml` | A **compact scenario file** for the `tmula run` CLI (one doc → a full run) |
 | `sample-api/` | A tiny "shop" API (stdlib Go) with a few **deliberate bugs** to find |
-| `shop/graph.json` | The behavior graph: `browse → products → cart → checkout` (checkout *depends on* cart) |
+| `shop/graph.json` | The behavior graph: branching shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs at each stage |
 | `shop/templates.json` | The API request templates each node calls |
 | `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
 
@@ -56,22 +56,24 @@ cleans up.
 
 The sample API is healthy on the happy path but has planted bugs:
 
-- `POST /cart` fails ~10% of the time (an intermittent 500)
-- `POST /checkout` is flaky, then **falls over under load** and stays down (503)
-- `GET /products` has an occasional slow response (a latency tail)
+- `GET /search` has an occasional slow response (~5% tail latency, ~180 ms)
+- `GET /product` returns 404 ~2% of the time (broken product link)
+- `POST /cart` fails ~8% of the time (an intermittent 500)
+- `POST /checkout` **saturates under concurrent load** but **recovers when traffic drops** — unlike a permanent outage
 
 So the run reports something like:
 
 ```
+• [CRITICAL] contract: 6 contract violation(s) on product (unexpected 404 on the happy path)
 • [CRITICAL] contract: 8 contract violation(s) on cart (unexpected error on the happy path)
 • [CRITICAL] contract: 90 contract violation(s) on checkout (unexpected error on the happy path)
-• [CRITICAL] availability: 76 consecutive failures on checkout (saturation or downtime)
+• [CRITICAL] availability: 53 consecutive failures on checkout (saturation or downtime)
 • [WARNING]  threshold: error rate 0.24 exceeded threshold 0.20
 ```
 
-That's the point: a developer/PM/designer finds the cart hiccup, the checkout
-that **collapses under traffic**, and the latency tail **before** real users
-hit them (exact counts vary per run).
+That's the point: a developer/PM/designer finds the broken product links, the
+cart hiccup, and the checkout that **saturates under traffic but recovers**
+**before** real users hit them (exact counts vary per run).
 
 ## Drive it from the UI instead
 
