@@ -95,14 +95,14 @@ func (s *Summary) tallyFindings(o RequestObservation) {
 	switch {
 	case o.Mutated:
 		// Mutation testing: a mutated input that errors is a mutation signal.
-		if o.failed() {
+		if o.mutationSignal() {
 			s.findingCounts[domain.FindingMutation]++
 		}
 	default:
 		// Non-mutated happy-path request: a 5xx or assertion failure is a
 		// contract violation; non-mutated failures also feed the threshold
 		// error-rate signal.
-		if o.StatusCode >= 500 || o.ErrorClass == "assertion" {
+		if o.contractSignal() {
 			s.findingCounts[domain.FindingContract]++
 		}
 		if o.failed() {
@@ -316,17 +316,10 @@ func FindingsFromSummary(runID domain.ID, s *Summary, cfg ClassifyConfig) []doma
 			Description: fmt.Sprintf("%d unavailable response(s) across the run (saturation or downtime)", n),
 		})
 	}
-	if cfg.ErrorRateThreshold > 0 && st.ErrorRate > cfg.ErrorRateThreshold {
-		out = append(out, domain.Finding{
-			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
-			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", st.ErrorRate, cfg.ErrorRateThreshold),
-		})
-	}
-	if cfg.P95LatencyMs > 0 && st.P95 > cfg.P95LatencyMs {
-		out = append(out, domain.Finding{
-			RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
-			Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", st.P95, cfg.P95LatencyMs),
-		})
-	}
+	// Threshold findings come last (after mutation/contract/availability). Error
+	// rate/p95 come from st (all observations) — the documented divergence from
+	// Aggregator.classifyThreshold's mutated-exclusion is intentional; the shared
+	// builder only guarantees the messages and comparisons cannot drift.
+	out = append(out, thresholdFindings(runID, st.ErrorRate, st.P95, cfg)...)
 	return out
 }
