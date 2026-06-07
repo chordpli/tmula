@@ -24,6 +24,7 @@ import (
 	"github.com/chordpli/tmula/internal/cluster/clusterpb"
 	"github.com/chordpli/tmula/internal/domain"
 	"github.com/chordpli/tmula/internal/load"
+	"github.com/chordpli/tmula/internal/scenariofile"
 	"github.com/chordpli/tmula/internal/web"
 )
 
@@ -102,7 +103,19 @@ func serve(args []string) error {
 	if len(defaultWorkers) > 0 {
 		slog.Info("default worker pool configured", "workers", defaultWorkers)
 	}
-	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second), api.WithDefaultWorkers(defaultWorkers))
+	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second),
+		api.WithDefaultWorkers(defaultWorkers),
+		// Let the UI prefill an experiment from an uploaded OpenAPI/HAR spec. The
+		// conversion lives in cmd/engine (which already depends on importer +
+		// scenariofile) and is injected so the api package avoids the cycle.
+		api.WithImporter(func(data []byte, format string) (api.RunSpec, error) {
+			sc, err := importScenario(data, format, "")
+			if err != nil {
+				return api.RunSpec{}, err
+			}
+			return scenariofile.Expand(sc)
+		}),
+	)
 	mux.Handle("/api/", http.StripPrefix("/api", apiSrv.Handler()))
 	mux.Handle("/", web.Handler())
 

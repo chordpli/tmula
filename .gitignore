@@ -34,3 +34,4 @@ Thumbs.db
 .codex/
 .vills-lock.json
 /engine
+/sample-api
