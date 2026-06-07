@@ -9,11 +9,26 @@ recruiting real users**.
 | Path | What it is |
 |---|---|
 | [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** — REST API, open (arrival-rate) model, personas, distributed runs |
-| `shop/scenario.yaml` | A **compact scenario file** for the `tmula run` CLI (one doc → a full run) |
-| `sample-api/` | A tiny "shop" API (stdlib Go) with a few **deliberate bugs** to find |
-| `shop/graph.json` | The behavior graph: branching shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs at each stage |
-| `shop/templates.json` | The API request templates each node calls |
+| `sample-api/` | A tiny **"shop"** API (stdlib Go) with a few **deliberate bugs** to find (:9000) |
+| `shop/{graph,templates}.json`, `shop/scenario.yaml` | The shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs |
+| `ticketing-api/` | A second tiny API: **concert ticketing** — seat-contention 409s, a payment rush, sold-out 404s (:9100) |
+| `ticketing/{graph,templates}.json`, `ticketing/scenario.yaml` | The ticketing journey (`events → detail → seats → hold → pay`) with exit drop-offs |
+| `imports/` | Importable **OpenAPI + HAR** samples for both domains (web UI → *Import from OpenAPI / HAR*, or `tmula init --from`) |
 | `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
+
+### Two example domains
+
+There are two complete demos so it's clear how to swap tmula onto your own API —
+a **shop** and a **concert-ticketing** site. Each ships a sample API server, a
+behavior graph + templates, and an importable OpenAPI/HAR. In the web console
+they're one-click **presets** ("Branching shop" / "Concert tickets"): picking one
+fills the scenario *and* points the target at that API's port. Run the matching
+server first:
+
+```bash
+go run ./examples/sample-api      # shop       → :9000
+go run ./examples/ticketing-api   # ticketing  → :9100
+```
 
 ## Easiest: the `tmula run` CLI
 

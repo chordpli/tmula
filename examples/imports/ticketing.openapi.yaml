@@ -1,0 +1,41 @@
+openapi: 3.0.0
+info:
+  title: Ticketing API
+  version: "1.0.0"
+  description: >
+    The demo concert-ticketing API (examples/ticketing-api): list shows, view one,
+    check seats, hold a seat, pay. Import it from the web UI (Scenario card ->
+    Import from OpenAPI / HAR) or with
+    `tmula init --from examples/imports/ticketing.openapi.yaml` to scaffold a
+    runnable scenario instead of hand-writing the graph + templates.
+servers:
+  - url: http://localhost:9100
+paths:
+  /events:
+    get:
+      operationId: listEvents
+      summary: List upcoming shows
+  /events/{id}:
+    get:
+      operationId: getEvent
+      summary: Show detail
+  /seats:
+    get:
+      operationId: seatMap
+      summary: Seat availability
+  /hold:
+    post:
+      operationId: reserveSeat
+      summary: Hold a seat
+      requestBody:
+        content:
+          application/json:
+            example: { eventId: "e7", seat: "A12" }
+  /pay:
+    post:
+      operationId: payment
+      summary: Pay for the held seats
+      requestBody:
+        content:
+          application/json:
+            example: { total: 120 }
