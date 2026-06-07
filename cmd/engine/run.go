@@ -144,9 +144,13 @@ func runScenario(args []string) error {
 
 	// A run that did not complete cleanly (failed or killed — e.g. a timeout or
 	// circuit-breaker trip) is a non-zero exit regardless of findings, so it
-	// never silently passes a CI gate.
+	// never silently passes a CI gate. A "failed" run often has no kill reason, so
+	// only append the reason when there is one (avoids a dangling "run failed: ").
 	if s := report.Run.Status; s == "failed" || s == "killed" {
-		return fmt.Errorf("run %s: %s", s, report.Run.KillReason)
+		if report.Run.KillReason != "" {
+			return fmt.Errorf("run %s: %s", s, report.Run.KillReason)
+		}
+		return fmt.Errorf("run %s", s)
 	}
 	if n := gatingFindings(report.Findings, *failOnFindings, strings.ToLower(*failOnSeverity)); n > 0 {
 		return fmt.Errorf("%w (%d)", errFindings, n)
@@ -225,10 +229,15 @@ func startInProcessEngine() (stop func(), base string, err error) {
 	go func() { _ = httpSrv.Serve(ln) }()
 
 	stop = func() {
-		sctx, c := context.WithTimeout(context.Background(), 5*time.Second)
-		defer c()
-		_ = apiSrv.Shutdown(sctx)
-		_ = httpSrv.Shutdown(sctx)
+		// Each shutdown gets its own budget: sharing one context means a slow API
+		// drain could consume the whole deadline and leave the HTTP server's
+		// Shutdown zero time, leaking the listener.
+		actx, ac := context.WithTimeout(context.Background(), 5*time.Second)
+		defer ac()
+		_ = apiSrv.Shutdown(actx)
+		hctx, hc := context.WithTimeout(context.Background(), 5*time.Second)
+		defer hc()
+		_ = httpSrv.Shutdown(hctx)
 	}
 	return stop, "http://" + ln.Addr().String(), nil
 }
@@ -375,13 +384,24 @@ func getJSON(ctx context.Context, url string, out any) error {
 	return doJSON(req, out)
 }
 
+// httpClient bounds each report-poll request on its own. The outer ctx still
+// bounds the whole run, but without a per-request timeout a single stalled
+// connection (a half-open socket that never sends bytes) could hang the poll
+// loop until the run timeout — far longer than any one request should take.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
+
 func doJSON(req *http.Request, out any) error {
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// Surface a truncated/partial read as the network error it is, rather than
+		// letting a half-read body fall through into a confusing JSON decode error.
+		return fmt.Errorf("read response from %s: %w", req.URL.Path, err)
+	}
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("%s %s: %s: %s", req.Method, req.URL.Path, resp.Status, strings.TrimSpace(string(body)))
 	}

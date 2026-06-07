@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,9 +9,32 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
+
+// fakeEngine emulates the slice of the control-plane API that driveRun calls
+// (create experiment, start run, poll report) and always reports the run with
+// the given status and killReason. It lets the CLI's terminal-state handling be
+// tested without a real engine or SUT.
+func fakeEngine(status, killReason string) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/experiments", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "exp-1"})
+	})
+	mux.HandleFunc("/api/experiments/exp-1/run", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"runId": "run-1"})
+	})
+	mux.HandleFunc("/api/runs/run-1/report", func(w http.ResponseWriter, _ *http.Request) {
+		var rep cliReport
+		rep.Run.ID = "run-1"
+		rep.Run.Status = status
+		rep.Run.KillReason = killReason
+		_ = json.NewEncoder(w).Encode(rep)
+	})
+	return httptest.NewServer(mux)
+}
 
 // captureStdoutErr runs fn with os.Stdout redirected to a pipe and returns what
 // it printed along with fn's error.
@@ -166,5 +190,75 @@ func TestRunScenarioArgErrors(t *testing.T) {
 	}
 	if err := runScenario([]string{"--get", "/"}); err == nil {
 		t.Error("single-endpoint mode without --target should error")
+	}
+}
+
+// TestRunFailedStatusNoKillReason covers the failed/killed terminal-state error:
+// a "failed" run usually carries no kill reason, so the error must read "run
+// failed" with no dangling colon; a "killed" run with a reason keeps it.
+func TestRunFailedStatusNoKillReason(t *testing.T) {
+	failed := fakeEngine("failed", "")
+	defer failed.Close()
+	_, err := captureStdoutErr(t, func() error {
+		return runScenario([]string{"--target", "http://sut.invalid", "--get", "/", "--engine", failed.URL})
+	})
+	if err == nil {
+		t.Fatal("failed run should return an error")
+	}
+	if got := err.Error(); got != "run failed" {
+		t.Errorf("error = %q, want %q (no dangling colon for an empty kill reason)", got, "run failed")
+	}
+
+	killed := fakeEngine("killed", "circuit breaker tripped")
+	defer killed.Close()
+	_, err = captureStdoutErr(t, func() error {
+		return runScenario([]string{"--target", "http://sut.invalid", "--get", "/", "--engine", killed.URL})
+	})
+	if err == nil {
+		t.Fatal("killed run should return an error")
+	}
+	if got := err.Error(); got != "run killed: circuit breaker tripped" {
+		t.Errorf("error = %q, want the reason appended", got)
+	}
+}
+
+// TestHTTPClientHasTimeout guards fix: the report-poll loop must use a dedicated
+// client with a per-request timeout, not http.DefaultClient (which has none), so
+// a single stalled connection cannot hang the poll past the run timeout.
+func TestHTTPClientHasTimeout(t *testing.T) {
+	if httpClient == http.DefaultClient {
+		t.Fatal("poll loop must not use http.DefaultClient (no timeout)")
+	}
+	if httpClient.Timeout <= 0 {
+		t.Errorf("httpClient.Timeout = %v, want a positive per-request bound", httpClient.Timeout)
+	}
+}
+
+// TestDoJSONReadErrorIsNetworkError covers fix: a body read that fails midway
+// must surface as a clear "read response" network error, not fall through into a
+// confusing JSON decode error. A handler that under-delivers its Content-Length
+// (then the connection drops) triggers an io.ReadAll error.
+func TestDoJSONReadErrorIsNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1024") // promise more than we send
+		_, _ = io.WriteString(w, `{"id":"x"`)    // partial body, then close
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close() // abrupt close mid-body -> ReadAll errors
+			}
+		}
+	}))
+	defer srv.Close()
+
+	var out struct {
+		ID string `json:"id"`
+	}
+	err := getJSON(context.Background(), srv.URL, &out)
+	if err == nil {
+		t.Fatal("a truncated body should error")
+	}
+	if !strings.Contains(err.Error(), "read response") {
+		t.Errorf("error = %q, want a clear read/network error (not a decode error)", err)
 	}
 }

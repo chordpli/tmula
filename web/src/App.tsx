@@ -7,6 +7,7 @@ import {
   getReport,
   killRun,
   reportHTMLURL,
+  runDisabled,
   shareTokenFromQuery,
   startRun,
   streamURL,
@@ -286,8 +287,8 @@ function Operator() {
         <div>
           <button
             onClick={run}
-            disabled={status === 'starting' || status === 'running'}
-            style={{ ...btn, opacity: status === 'starting' || status === 'running' ? 0.5 : 1 }}
+            disabled={runDisabled(status)}
+            style={{ ...btn, opacity: runDisabled(status) ? 0.5 : 1 }}
           >
             Run experiment
           </button>

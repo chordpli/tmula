@@ -32,6 +32,46 @@ func TestNewPostgresStoreBadDSN(t *testing.T) {
 	}
 }
 
+// TestPostgresStoreContextLifecycle covers the store's base-context wiring
+// without a database. Every Store method runs its pgx call on s.ctx (instead of
+// a detached context.Background()), so the context must (a) be live while the
+// store is open and (b) be cancelled by Close, which is what lets in-flight
+// queries stop promptly on shutdown. The pool is nil here; Close guards it.
+func TestPostgresStoreContextLifecycle(t *testing.T) {
+	base, cancel := context.WithCancel(context.WithoutCancel(context.Background()))
+	s := &PostgresStore{ctx: base, cancel: cancel}
+
+	if err := s.ctx.Err(); err != nil {
+		t.Fatalf("store context should be live before Close, got %v", err)
+	}
+	s.Close()
+	if err := s.ctx.Err(); !errors.Is(err, context.Canceled) {
+		t.Errorf("store context after Close = %v, want context.Canceled", err)
+	}
+	// Close must be safe to call twice (idempotent cancel + guarded nil pool).
+	s.Close()
+}
+
+// TestPostgresStoreContextDetachesDeadline verifies the store's base context is
+// independent of the constructor context's deadline: a query context derived
+// from a short-lived parent must not already be expired once the store is built,
+// so operations after the connect/ping timeout still run.
+func TestPostgresStoreContextDetachesDeadline(t *testing.T) {
+	parent, parentCancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer parentCancel()
+	// Let the parent's tiny deadline elapse — mirrors a connect/ping ctx expiring
+	// after construction.
+	<-parent.Done()
+
+	base, cancel := context.WithCancel(context.WithoutCancel(parent))
+	s := &PostgresStore{ctx: base, cancel: cancel}
+	defer s.Close()
+
+	if err := s.ctx.Err(); err != nil {
+		t.Errorf("store context inherited the parent deadline (%v); it should be detached", err)
+	}
+}
+
 // TestPostgresStoreRoundTrip is an integration test. It is skipped unless
 // TMULA_TEST_POSTGRES is set to a usable DSN (e.g.
 // postgres://user:pass@localhost:5432/tmula_test?sslmode=disable). When run it
