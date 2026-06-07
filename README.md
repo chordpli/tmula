@@ -1,118 +1,185 @@
-# tmula
+<h1 align="center">tmula</h1>
 
-A real-user **traffic simulator**. Instead of plain load generation, tmula
-drives many virtual users through an explicit **behavior graph** — they move
-like real people, occasionally deviate (probabilistic skips, reordering and
-payload mutation, but never violating dependency edges), and can be funneled to
-hammer a specific API. It surfaces issues in three modes — scenario-following,
-deviation, and load-concentration — so developers, PMs and designers can find
-problems **without recruiting real users**.
+<p align="center">
+  <b>A real-user traffic simulator — find the issues real users would hit, without recruiting them.</b><br>
+  Drive virtual users through an explicit <i>behavior graph</i> against your API: they move like
+  real people, deviate within the rules, and can swarm a single endpoint — surfacing bugs that
+  plain load generation and manual testing miss.
+</p>
 
-**👉 New here? See [`examples/`](examples/)** — one command starts a sample API
-with planted bugs and shows tmula finding them. Design docs (requirements,
-brief, tech spec, issue breakdown) live in `context/001-user-traffic-simulator/`.
+---
 
-## Architecture (one-liner)
+## What is tmula?
 
-A single Go binary (engine + load workers, with an embedded React control-plane
-UI) that runs **locally first** and **scales out** to distributed master/worker
-mode for large traffic. Client-side observation is the core; server-side
-metrics are opt-in.
+Plain load tools fire identical requests at one endpoint. Real users don't — they follow a
+journey, branch, hesitate, occasionally go off-script, and pile onto whatever's hot. **tmula**
+models that: virtual users walk an explicit **behavior graph** (nodes = API calls, weighted edges
+= transitions, dependency edges that are never skipped), and it surfaces issues in three modes:
 
-```
-cmd/engine           entrypoint: serve (--role local|master|worker), run, init
-internal/domain      core model: experiments, scenario graphs, virtual users, ...
-internal/engine      scenario graph execution (dependency edges inviolable)
-internal/load        virtual users, load profiles, protocol adapters
-internal/workload    open-model (arrival-rate) scheduler + capacity planning
-internal/obs         observation collector, finding classification, mergeable summary
-internal/safety      allowlist, rate cap, kill switch
-internal/store       in-memory (local) + Postgres (distributed) persistence
-internal/cluster     gRPC master/worker for distributed runs
-internal/pipeline    buffered metric ingest for high-frequency persistence
-internal/scenariofile  compact scenario file (YAML/JSON) -> RunSpec
-internal/importer    OpenAPI / HAR -> scenario scaffold
-internal/report      standalone HTML report + run-to-run comparison
-internal/web         embedded React UI
-web/                 React + Vite control-plane UI
-examples/            sample API, scenario, one-command demo, USAGE guide
-```
+- **Scenario-following** — does the happy path hold up under realistic, branching traffic?
+- **Deviation** — probabilistic skips, step reordering, and payload mutation (never violating a
+  dependency) shake out the off-script bugs.
+- **Load-concentration** — funnel virtual users onto one API and watch where it degrades.
 
-## Install
+Observation is **client-side first** (status codes, latency tails, and error / availability /
+contract findings); server-side metrics are opt-in. A single Go binary with the web console baked
+in runs **locally first** and **scales out** to distributed master/worker mode for large traffic.
 
-One line — downloads a prebuilt single binary (web UI baked in) for macOS/Linux,
-or builds from source if you have Go + Node:
+> tmula는 **행동 그래프** 기반 실사용자 트래픽 시뮬레이터입니다. 가상 사용자가 실제 사람처럼
+> 시나리오를 따라 이동하고, 규칙 안에서 이탈하고, 특정 API에 부하를 집중시켜 — **실제 사용자를
+> 모으지 않고도** 평소 부하 도구나 수동 테스트가 놓치는 문제를 찾아냅니다. 단일 Go 바이너리(웹 UI
+> 내장)로 로컬에서 바로 돌리고, 필요하면 분산 마스터/워커로 확장합니다.
+
+---
+
+## Quickstart
+
+Requirements: macOS / Linux. (Building from source needs Go 1.25+ and Node 20+.)
+
+**Install it (recommended)** — one line downloads a prebuilt single binary with the web UI baked in:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
 ```
 
-Then run `tmula --role local --addr :8080` and open <http://localhost:8080>, or
-`tmula run scenario.yaml`. (Prebuilt binaries are published per release tag; see
-[`Build & run`](#build--run) to build it yourself.)
-
-## Quick start — the `tmula run` CLI
-
-One binary, one command — no curl, no jq, no separately running server:
+Then start the browser console, or run a scenario straight from the CLI:
 
 ```bash
-go build -o ./bin/tmula ./cmd/engine
-
-./bin/tmula run --target http://localhost:9000 --get /health --users 20  # one endpoint
-./bin/tmula run examples/shop/scenario.yaml --users 80                   # a whole scenario
-./bin/tmula init --from openapi.yaml --out scenario.yaml                 # scaffold from a spec
+tmula --role local --addr :8080      # open http://localhost:8080
+tmula run scenario.yaml              # run a scenario, print the findings
 ```
 
-It boots an in-process engine, runs the experiment, and prints the findings.
-`--fail-on-findings` turns it into a CI gate (exit 2 on issues). See
-[`examples/USAGE.md`](examples/USAGE.md) for the full 0→100 guide.
-
-## Full demo (sample API with planted bugs)
+**Or build from source** — needs Go + Node:
 
 ```bash
-./examples/run-demo.sh
+git clone https://github.com/chordpli/tmula.git && cd tmula
+make web                             # build UI + embed + run the console on :8080
+# CLI only (fast, placeholder UI):   make build
 ```
 
-Starts a sample shop API (with a few deliberate bugs) and the engine, runs an
-experiment, and prints the issues it found — see [`examples/`](examples/) for
-details and how to point it at your own API. Requires `go`, `jq`, `curl`.
+**Or just watch it find bugs** — one command, a sample API with planted bugs:
+
+```bash
+./examples/run-demo.sh               # needs go, jq, curl
+```
+
+It starts a sample shop API (with deliberate bugs) + the engine, runs an experiment, and prints
+the issues it found. See [`examples/`](examples/) for the full walkthrough.
+
+---
+
+## How virtual users behave
+
+| Mode | What it does | Finds |
+|------|--------------|-------|
+| **Scenario-following** | Users walk the behavior graph by edge weight, honoring dependency edges | Whether the happy path survives realistic, branching traffic |
+| **Deviation** | Probabilistic skips, step reordering, payload mutation — never breaking a dependency | Off-script bugs manual testing misses |
+| **Load-concentration** | Funnel users onto a single API | Where it degrades or saturates under pressure |
+
+Two workload models drive arrivals: **closed** (a fixed pool of looping users) and **open** (users
+arrive at a rate over time — organic concurrency, the realistic default, with optional persona
+mixes). A safety layer — host **allowlist** + **rate cap** + **kill switch** — keeps a run from
+escaping its target.
+
+---
+
+## Commands
+
+The `tmula` CLI — one binary, no curl/jq, no separately running server:
+
+| Command | What it does |
+|---------|--------------|
+| `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
+| `tmula run <scenario.yaml>` | Run a scenario and print findings — `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues) |
+| `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
+| `tmula init --from <openapi.yaml\|session.har>` | Scaffold a scenario from an API spec or HAR recording |
+
+Build & run from source:
+
+| Make target | What it does |
+|-------------|--------------|
+| `make web` | Build the React UI, embed it, run the console on :8080 |
+| `make build` | Go binary only — fast, UI is a placeholder (CLI path) |
+| `make dev` | UI hot-reload dev server (proxies `/api` to a running engine) |
+| `make test` · `make lint` | Go unit tests · `go vet` + gofmt check |
+
+Health check: <http://localhost:8080/healthz>.
+
+---
+
+## Web console — for PMs & designers, no command line
+
+`make web` builds the React control-plane UI into the binary and serves it at
+<http://localhost:8080>. Fill in the target, scenario, and load (virtual users / arrival rate /
+personas), hit **Run**, and watch it live:
+
+- a **Traffic flow** map of requests moving across your scenario, with completion / drop-off,
+- a **latency heatmap** (time × latency band),
+- findings, a standalone **HTML report**, **compare with previous run**, and read-only **share** links,
+- a one-click **OpenAPI / HAR import** and scenario **presets**, in a bilingual UI (English / 한국어).
+
+> A plain `make build` / `go build` embeds only a placeholder page that tells you to run
+> `make web`. The CLI needs no UI build at all.
+
+---
+
+## Example domains
+
+Two complete, runnable demos make it clear how to point tmula at your own API — pick one as a
+**preset** in the web console (it fills the scenario *and* the target) or run it from the CLI.
+
+| Example | What it is | Planted bugs it surfaces |
+|---------|-----------|--------------------------|
+| **shop** — `examples/sample-api` (`:9000`) | A branching store journey: `browse → search / category → product → cart → checkout` | ~8% cart 500s, a checkout that degrades under load, product 404s, a search latency tail |
+| **ticketing** — `examples/ticketing-api` (`:9100`) | A concert-seat purchase: `events → detail → seats → hold → pay` | Seat-contention 409s, a payment gateway that buckles in the on-sale rush, sold-out 404s |
+
+Each ships a sample API server, a behavior graph + templates, and an importable **OpenAPI / HAR**
+([`examples/imports/`](examples/imports)). Full 0→100 guide: [`examples/USAGE.md`](examples/USAGE.md).
+
+---
+
+## Architecture
+
+A single Go binary (engine + load workers, with an embedded React control-plane UI). Local-first;
+scales out to gRPC master/worker for large runs. Client-side observation is the core; server-side
+metrics are opt-in.
+
+```
+cmd/engine             entrypoint: serve (--role local|master|worker), run, init
+internal/domain        core model: experiments, scenario graphs, virtual users, ...
+internal/engine        scenario graph execution (dependency edges inviolable)
+internal/load          virtual users, load profiles, protocol adapters
+internal/workload      open-model (arrival-rate) scheduler + capacity planning
+internal/obs           observation collector, finding classification, mergeable summary
+internal/safety        allowlist, rate cap, kill switch
+internal/store         in-memory (local) + Postgres (distributed) persistence
+internal/cluster       gRPC master/worker for distributed runs
+internal/pipeline      buffered metric ingest for high-frequency persistence
+internal/scenariofile  compact scenario file (YAML/JSON) -> RunSpec
+internal/importer      OpenAPI / HAR -> scenario scaffold
+internal/report        standalone HTML report + run-to-run comparison
+internal/web           embedded React UI
+web/                   React + Vite control-plane UI
+examples/              sample APIs, scenarios, one-command demo, USAGE guide
+```
+
+Design docs — requirements, brief, tech spec, plan — live in
+[`context/001-user-traffic-simulator/`](context/001-user-traffic-simulator).
+
+---
 
 ## Requirements
 
-- Go 1.25+
-- Node 20+ (only to build the web UI)
-- Docker + Postgres (optional — only for the distributed store integration test)
-
-## Web console (for PMs, designers — no command line)
-
-The control-plane UI runs in the browser. One command builds the React UI into
-the binary and starts it:
-
-```bash
-make web      # build the UI, embed it, run the engine on :8080
-```
-
-Then open <http://localhost:8080>: fill in the target, scenario and load
-(virtual users / arrival rate / personas), hit **Run**, watch live progress, and
-read the findings — with **View HTML report**, **Compare with previous run**, and
-read-only **share** links.
-
-> A plain `make build` / `go build` embeds only a lightweight placeholder page
-> (which just tells you to run `make web`). The CLI needs no UI build at all.
-
-## Build & run
-
-```bash
-make web          # build UI + embed + run the browser console on :8080  (web path)
-make build        # Go binary only — fast, UI is a placeholder (CLI path)
-make run          # build + run the engine on :8080 (placeholder UI)
-make dev          # UI hot-reload dev server (proxies /api to a running engine)
-make test         # Go unit tests
-make lint         # go vet + gofmt check
-```
-
-Health check: <http://localhost:8080/healthz>.
+- macOS / Linux for the prebuilt binary, **or** Go 1.25+ and Node 20+ to build from source
+- `jq` + `curl` for the one-command demo
+- Docker + Postgres — optional, only for the distributed-store integration test
 
 ## License
 
 TBD.
+
+---
+
+<p align="center">
+  Built by <a href="https://github.com/chordpli">chordpli</a>
+</p>
