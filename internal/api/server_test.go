@@ -118,6 +118,55 @@ func TestExperimentLifecycle(t *testing.T) {
 	}
 }
 
+// TestRunCapEvictsTerminalRuns drives the retention bound directly: with a small
+// cap, exceeding it evicts the oldest TERMINAL runs (and their specs) while
+// keeping a still-running run and the most recently inserted runs. A running run
+// is never evicted even if it is the oldest.
+func TestRunCapEvictsTerminalRuns(t *testing.T) {
+	s := NewServer(load.NewRESTAdapter(time.Second))
+
+	mkRun := func(id domain.ID, status domain.RunStatus) {
+		s.mu.Lock()
+		s.specs[id] = RunSpec{}
+		s.registerRunLocked(id, &runState{
+			exec: domain.RunExecution{ID: id, Status: status},
+			done: make(chan struct{}),
+		})
+		// Bound to a small cap so the test does not need 1000 entries.
+		s.enforceRunCapLocked(3)
+		s.mu.Unlock()
+	}
+
+	// Oldest is a still-RUNNING run; it must survive eviction despite its age.
+	mkRun("run-running", domain.RunRunning)
+	mkRun("run-old1", domain.RunCompleted)
+	mkRun("run-old2", domain.RunFailed)
+	mkRun("run-old3", domain.RunKilled)
+	mkRun("run-new", domain.RunCompleted)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.runs) > 3 {
+		t.Fatalf("runs = %d, want <= cap 3", len(s.runs))
+	}
+	// The running run is never evicted.
+	if _, ok := s.runs["run-running"]; !ok {
+		t.Error("running run was evicted; must never evict a non-terminal run")
+	}
+	// The most recent run is retained.
+	if _, ok := s.runs["run-new"]; !ok {
+		t.Error("most recent run was evicted")
+	}
+	// The oldest terminal run is gone, along with its spec.
+	if _, ok := s.runs["run-old1"]; ok {
+		t.Error("oldest terminal run should have been evicted")
+	}
+	if _, ok := s.specs["run-old1"]; ok {
+		t.Error("evicted run's spec should be removed too")
+	}
+}
+
 func waitForStatus(t *testing.T, reportURL string, want domain.RunStatus, timeout time.Duration) Report {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

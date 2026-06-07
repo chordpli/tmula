@@ -36,6 +36,22 @@ func guardForSpec(spec ShardSpec) (*safety.Guard, error) {
 // caller does not supply a custom adapter.
 const defaultRequestTimeout = 30 * time.Second
 
+// validateShardRequest checks the walk parameters that travel as authoritative
+// proto fields rather than inside spec_json, so spec.Validate() never sees them:
+// max_steps drives the walk length (0 would yield a degenerate single-node walk)
+// and user_offset positions the shard's user range (a negative offset would name
+// users below user-0 and misseed them). Rejecting them up front turns a silent
+// degenerate run into a clear error.
+func validateShardRequest(req *clusterpb.RunShardRequest) error {
+	if req.GetMaxSteps() <= 0 {
+		return fmt.Errorf("cluster: worker: maxSteps must be > 0, got %d", req.GetMaxSteps())
+	}
+	if req.GetUserOffset() < 0 {
+		return fmt.Errorf("cluster: worker: userOffset must be >= 0, got %d", req.GetUserOffset())
+	}
+	return nil
+}
+
 // WorkerServer executes load shards on behalf of a master. It implements the
 // generated clusterpb.ClusterServiceServer: RunShard builds a load.Runner from
 // the decoded spec, runs the shard's slice of virtual users, and streams one
@@ -85,6 +101,9 @@ func (w *WorkerServer) Ping(_ context.Context, req *clusterpb.PingRequest) (*clu
 // failures are streamed as results (with an error_class) rather than aborting
 // the shard; the stream ends when every user finishes or the context is done.
 func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.ServerStreamingServer[clusterpb.ShardResult]) error {
+	if err := validateShardRequest(req); err != nil {
+		return err
+	}
 	spec, err := decodeSpec(req.GetSpecJson())
 	if err != nil {
 		return err
@@ -132,6 +151,9 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 // master can fold per-worker summaries into run-wide stats at a fixed network and
 // memory cost regardless of request volume.
 func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunShardRequest) (*clusterpb.ShardSummary, error) {
+	if err := validateShardRequest(req); err != nil {
+		return nil, err
+	}
 	spec, err := decodeSpec(req.GetSpecJson())
 	if err != nil {
 		return nil, err

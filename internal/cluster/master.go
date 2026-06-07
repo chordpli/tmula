@@ -72,6 +72,12 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 		return obs.Stats{}, nil, err
 	}
 
+	// Cancel sibling shards as soon as one fails so a doomed distributed run stops
+	// hammering the SUT instead of letting the healthy workers run to completion.
+	// Workers honor the streamed context, so cancellation propagates to them.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	assignments := splitUsers(totalUsers, len(c.workers))
 	collector := obs.NewCollector()
 
@@ -92,6 +98,8 @@ func (c *Coordinator) Distribute(ctx context.Context, spec ShardSpec, totalUsers
 			firstErr = err
 		}
 		mu.Unlock()
+		// Stop the other shards; the first error is already recorded.
+		cancel()
 	}
 
 	for i, a := range assignments {
@@ -138,6 +146,11 @@ func (c *Coordinator) DistributeSummary(ctx context.Context, spec ShardSpec, tot
 		return nil, err
 	}
 
+	// Cancel sibling shards on the first failure so a doomed run stops loading the
+	// SUT rather than letting the healthy workers finish. Workers honor ctx.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	assignments := splitUsers(totalUsers, len(c.workers))
 	var (
 		mu        sync.Mutex
@@ -173,6 +186,8 @@ func (c *Coordinator) DistributeSummary(ctx context.Context, spec ShardSpec, tot
 				firstErr = fmt.Errorf("cluster: run shard summary: %w", err)
 			}
 			mu.Unlock()
+			// Stop the other shards; the first error is already recorded.
+			cancel()
 		}(c.workers[i], a)
 	}
 	wg.Wait()

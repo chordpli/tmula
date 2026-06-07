@@ -155,12 +155,20 @@ func (h *Histogram) Observe(ms float64) {
 	idx := bucketIndex(ms)
 	h.buckets[idx]++
 	h.count++
-	if ms > h.max && !math.IsInf(ms, 1) {
-		h.max = ms
-	} else if math.IsInf(ms, 1) && h.max < maxValueMs {
-		// An infinite sample saturates max at the top representable boundary
-		// rather than poisoning it with +Inf.
-		h.max = maxValueMs
+	if math.IsNaN(ms) {
+		return // NaN can neither be a max nor enter the comparison
+	}
+	// A sample at or above maxValueMs (finite or +Inf) lands in the overflow
+	// bucket, where Quantile saturates at maxValueMs. Cap max to that same
+	// boundary so Max() never exceeds the representable range or the top
+	// quantile; an over-range finite value (e.g. 1e9) would otherwise poison
+	// max just like +Inf would.
+	cand := ms
+	if cand > maxValueMs {
+		cand = maxValueMs
+	}
+	if cand > h.max {
+		h.max = cand
 	}
 }
 
