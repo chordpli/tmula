@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"math"
 	"sync"
 	"testing"
 )
@@ -23,6 +24,43 @@ func TestPercentilesNearestRank(t *testing.T) {
 	}
 	if s.Max != 100 {
 		t.Errorf("max = %v, want 100", s.Max)
+	}
+}
+
+// TestRecordSanitizesLatency feeds non-finite and negative latencies alongside
+// good ones. A NaN makes sort order undefined and a negative value would drag
+// percentiles below zero, so Record must clamp them to 0 before storing. The
+// request still counts toward total/errors, only the stored latency is fixed.
+func TestRecordSanitizesLatency(t *testing.T) {
+	c := NewCollector()
+	c.Record(200, 10, "")
+	c.Record(200, math.NaN(), "")
+	c.Record(200, 20, "")
+	c.Record(200, -5, "")
+	c.Record(200, math.Inf(1), "")
+	c.Record(200, math.Inf(-1), "")
+
+	s := c.Snapshot()
+	if s.Total != 6 {
+		t.Fatalf("total = %d, want 6", s.Total)
+	}
+	// Every percentile and the max must be finite and non-negative despite the
+	// poisoned inputs.
+	for _, p := range []struct {
+		name string
+		val  float64
+	}{{"p50", s.P50}, {"p95", s.P95}, {"p99", s.P99}, {"max", s.Max}} {
+		if math.IsNaN(p.val) || math.IsInf(p.val, 0) {
+			t.Errorf("%s = %v, want finite", p.name, p.val)
+		}
+		if p.val < 0 {
+			t.Errorf("%s = %v, want non-negative", p.name, p.val)
+		}
+	}
+	// The two finite good samples (10, 20) survive; the rest clamp to 0, so the
+	// max stays the largest real latency.
+	if s.Max != 20 {
+		t.Errorf("max = %v, want 20", s.Max)
 	}
 }
 

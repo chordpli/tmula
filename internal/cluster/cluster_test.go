@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -303,10 +304,119 @@ func TestSplitUsers(t *testing.T) {
 	}
 }
 
+// fakeSummaryClient is a minimal ClusterServiceClient used to test sibling
+// cancellation on the summary path. RunShardSummary runs the injected behavior;
+// Ping and RunShard are unused here.
+type fakeSummaryClient struct {
+	summary func(ctx context.Context) (*clusterpb.ShardSummary, error)
+}
+
+func (f *fakeSummaryClient) Ping(context.Context, *clusterpb.PingRequest, ...grpc.CallOption) (*clusterpb.PingReply, error) {
+	return &clusterpb.PingReply{}, nil
+}
+
+func (f *fakeSummaryClient) RunShard(context.Context, *clusterpb.RunShardRequest, ...grpc.CallOption) (grpc.ServerStreamingClient[clusterpb.ShardResult], error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
+func (f *fakeSummaryClient) RunShardSummary(ctx context.Context, _ *clusterpb.RunShardRequest, _ ...grpc.CallOption) (*clusterpb.ShardSummary, error) {
+	return f.summary(ctx)
+}
+
+// TestDistributeSummaryCancelsSiblingsOnError: when one shard fails, the others
+// must observe context cancellation so a doomed run stops loading the SUT. A
+// failing worker returns an error immediately; a sibling blocks until its context
+// is cancelled and records that it was — which only happens if Distribute cancels
+// siblings on the first error.
+func TestDistributeSummaryCancelsSiblingsOnError(t *testing.T) {
+	t.Parallel()
+
+	siblingCancelled := make(chan struct{})
+	failing := &fakeSummaryClient{summary: func(context.Context) (*clusterpb.ShardSummary, error) {
+		return nil, fmt.Errorf("shard boom")
+	}}
+	sibling := &fakeSummaryClient{summary: func(ctx context.Context) (*clusterpb.ShardSummary, error) {
+		select {
+		case <-ctx.Done():
+			close(siblingCancelled)
+			return nil, ctx.Err()
+		case <-time.After(5 * time.Second):
+			return nil, fmt.Errorf("sibling was never cancelled")
+		}
+	}}
+
+	coord, err := NewCoordinatorFromClients(failing, sibling)
+	if err != nil {
+		t.Fatalf("new coordinator: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if _, err := coord.DistributeSummary(ctx, linearSpec("http://sut.invalid"), 4); err == nil {
+		t.Fatal("expected an error from the failing shard")
+	}
+	select {
+	case <-siblingCancelled:
+		// good: the sibling observed cancellation triggered by the first error.
+	case <-time.After(2 * time.Second):
+		t.Fatal("sibling shard was not cancelled after a sibling failed")
+	}
+}
+
 // TestNewCoordinatorRequiresWorker rejects an empty worker set.
 func TestNewCoordinatorRequiresWorker(t *testing.T) {
 	t.Parallel()
 	if _, err := NewCoordinator(); err == nil {
 		t.Fatal("expected error for zero workers, got nil")
+	}
+}
+
+// TestRunShardRejectsZeroMaxSteps: spec.Validate() checks spec.MaxSteps but the
+// walk is driven by the proto's max_steps, which it does not see. maxSteps==0
+// would yield a degenerate single-node walk, so both shard RPCs must reject it
+// explicitly. A negative user_offset is likewise rejected.
+func TestRunShardRejectsZeroMaxSteps(t *testing.T) {
+	t.Parallel()
+
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(sut.Close)
+
+	conn := startWorker(t, WithAdapter(load.NewRESTAdapter(2*time.Second)))
+	client := clusterpb.NewClusterServiceClient(conn)
+
+	specJSON, err := encodeSpec(linearSpec(sut.URL))
+	if err != nil {
+		t.Fatalf("encode spec: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// maxSteps == 0 -> rejected on the streaming RPC.
+	stream, err := client.RunShard(ctx, &clusterpb.RunShardRequest{
+		SpecJson: specJSON, UserOffset: 0, UserCount: 1, Seed: 1, MaxSteps: 0, StartNode: "n1",
+	})
+	if err == nil {
+		_, err = stream.Recv() // a server-side reject surfaces on first Recv
+	}
+	if err == nil {
+		t.Error("RunShard with maxSteps=0 should be rejected")
+	}
+
+	// maxSteps == 0 -> rejected on the summary RPC.
+	if _, err := client.RunShardSummary(ctx, &clusterpb.RunShardRequest{
+		SpecJson: specJSON, UserOffset: 0, UserCount: 1, Seed: 1, MaxSteps: 0, StartNode: "n1",
+	}); err == nil {
+		t.Error("RunShardSummary with maxSteps=0 should be rejected")
+	}
+
+	// negative user_offset -> rejected on the summary RPC.
+	if _, err := client.RunShardSummary(ctx, &clusterpb.RunShardRequest{
+		SpecJson: specJSON, UserOffset: -1, UserCount: 1, Seed: 1, MaxSteps: 5, StartNode: "n1",
+	}); err == nil {
+		t.Error("RunShardSummary with negative userOffset should be rejected")
 	}
 }

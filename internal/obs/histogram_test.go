@@ -197,6 +197,26 @@ func TestHistogramDegenerateInput(t *testing.T) {
 	}
 }
 
+// TestHistogramHugeFiniteMaxConsistency guards the Max/Quantile invariant for a
+// finite sample above the representable range. Such a value lands in the overflow
+// bucket, so Quantile(1.0) reports maxValueMs; Max() must not exceed that or it
+// would claim a value the quantiles can never reach. It is clamped to the same
+// saturating boundary as +Inf.
+func TestHistogramHugeFiniteMaxConsistency(t *testing.T) {
+	h := NewHistogram()
+	h.Observe(1e9) // finite but >> maxValueMs
+	if h.Max() > maxValueMs {
+		t.Errorf("Max() = %v, want <= maxValueMs (%v)", h.Max(), maxValueMs)
+	}
+	if q := h.Quantile(1.0); h.Max() < q {
+		t.Errorf("Max() = %v should be >= Quantile(1.0) = %v", h.Max(), q)
+	}
+	// The saturating boundary is exactly maxValueMs for an over-range sample.
+	if h.Max() != maxValueMs {
+		t.Errorf("Max() = %v, want %v", h.Max(), maxValueMs)
+	}
+}
+
 func TestHistogramQuantileClamping(t *testing.T) {
 	h := NewHistogram()
 	for i := 1; i <= 100; i++ {

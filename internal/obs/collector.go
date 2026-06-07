@@ -47,7 +47,7 @@ func (c *Collector) Record(statusCode int, latencyMs float64, errorClass string)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.total++
-	c.latencies = append(c.latencies, latencyMs)
+	c.latencies = append(c.latencies, sanitizeLatency(latencyMs))
 	if statusCode > 0 {
 		c.statusCounts[statusCode]++
 	}
@@ -57,6 +57,20 @@ func (c *Collector) Record(statusCode int, latencyMs float64, errorClass string)
 	if statusCode >= 400 || errorClass != "" {
 		c.errors++
 	}
+}
+
+// sanitizeLatency clamps a latency that cannot meaningfully enter the percentile
+// math to 0: a negative value would drag percentiles below zero and a NaN makes
+// the sort order undefined (poisoning every percentile), while +Inf would make
+// the max infinite. This mirrors the Histogram's clamping of degenerate samples
+// so the Collector and the Summary agree on how bad inputs are handled. The
+// request still counts toward total/errors/status; only the stored latency is
+// fixed up.
+func sanitizeLatency(latencyMs float64) float64 {
+	if math.IsNaN(latencyMs) || latencyMs < 0 || math.IsInf(latencyMs, 0) {
+		return 0
+	}
+	return latencyMs
 }
 
 // RecordSample ingests a domain MetricSample.

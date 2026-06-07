@@ -188,17 +188,31 @@ func (rs *runState) snapshotStatus() (domain.RunStatus, string) {
 // Server holds the in-memory registries and serves the control plane. The
 // store is intentionally in-memory; the persistent store (#14) plugs in later.
 type Server struct {
-	mu             sync.Mutex
-	specs          map[domain.ID]RunSpec
-	runs           map[domain.ID]*runState
-	shares         map[string]shareEntry
-	adapter        load.Adapter
-	masker         *mask.Masker
+	mu      sync.Mutex
+	specs   map[domain.ID]RunSpec
+	runs    map[domain.ID]*runState
+	shares  map[string]shareEntry
+	adapter load.Adapter
+	masker  *mask.Masker
+	// runOrder records run IDs in insertion order so the retention bound can evict
+	// the oldest terminal runs first. shareOrder does the same for share tokens.
+	runOrder       []domain.ID
+	shareOrder     []string
 	defaultWorkers []string
 	seq            atomic.Int64
 	now            func() time.Time
 	mux            *http.ServeMux
 }
+
+// maxRetainedRuns and maxRetainedShares bound the in-memory registries so a
+// long-lived control plane cannot grow without limit. When exceeded the oldest
+// TERMINAL runs (and their specs) are evicted; a running or pending run is never
+// evicted, so the live set can briefly exceed the cap if every old run is still
+// in flight. Shares are capped the same way, oldest-first.
+const (
+	maxRetainedRuns   = 1000
+	maxRetainedShares = 1000
+)
 
 // Option customizes a Server at construction.
 type Option func(*Server)
@@ -304,6 +318,54 @@ func (s *Server) nextID(prefix string) domain.ID {
 	return domain.ID(fmt.Sprintf("%s-%d", prefix, s.seq.Add(1)))
 }
 
+// registerRunLocked records a run in the registry and its insertion order. The
+// caller must hold s.mu.
+func (s *Server) registerRunLocked(id domain.ID, rs *runState) {
+	s.runs[id] = rs
+	s.runOrder = append(s.runOrder, id)
+}
+
+// enforceRunCapLocked evicts the oldest TERMINAL runs (and their specs) until the
+// retained-run count is at or below cap. A running or pending run is skipped and
+// never evicted, so when the oldest runs are all still in flight the set may stay
+// above cap until they finish. The caller must hold s.mu.
+func (s *Server) enforceRunCapLocked(cap int) {
+	if cap <= 0 || len(s.runs) <= cap {
+		return
+	}
+	kept := s.runOrder[:0:0] // fresh backing array; we rewrite the order slice
+	for _, id := range s.runOrder {
+		rs, ok := s.runs[id]
+		if !ok {
+			continue // already gone: drop the stale order entry
+		}
+		// Evict the oldest terminal runs first, but only while still over cap.
+		// len(s.runs) shrinks with each delete, so the guard tracks the live count.
+		if len(s.runs) > cap && runStateTerminal(rs) {
+			delete(s.runs, id)
+			delete(s.specs, id)
+			continue
+		}
+		kept = append(kept, id)
+	}
+	s.runOrder = kept
+}
+
+// runStateTerminal reports whether a run has reached a terminal status and is
+// therefore safe to evict. It briefly takes rs.mu; callers already hold s.mu, and
+// no path holds rs.mu before acquiring s.mu, so the s.mu -> rs.mu order is safe.
+func runStateTerminal(rs *runState) bool {
+	rs.mu.Lock()
+	st := rs.exec.Status
+	rs.mu.Unlock()
+	switch st {
+	case domain.RunCompleted, domain.RunKilled, domain.RunFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) createExperiment(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	var spec RunSpec
@@ -378,7 +440,8 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 		workers:   len(spec.Workers),
 	}
 	s.mu.Lock()
-	s.runs[runID] = rs
+	s.registerRunLocked(runID, rs)
+	s.enforceRunCapLocked(maxRetainedRuns)
 	s.mu.Unlock()
 
 	go s.execute(ctx, rs, spec)

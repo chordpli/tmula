@@ -13,6 +13,15 @@ import (
 // ship that instead of streaming every observation. The master then Merges the
 // per-worker summaries and renders the existing Stats shape.
 //
+// One deliberate difference from the single-node Aggregator: a Summary's
+// total/errors/histogram — and therefore the threshold error-rate and p95
+// findings derived in FindingsFromSummary — count ALL observations, including
+// mutated requests, whereas Aggregator.classifyThreshold excludes mutated
+// requests. So on a run that carries mutated observations those two threshold
+// findings can differ between the two paths. (It is latent today because the
+// only FindingsFromSummary caller is the distributed path, where observations
+// are always Mutated=false.)
+//
 // Concurrency model: Summary is safe for concurrent Add from many goroutines
 // (it owns an internal mutex, mirroring Collector/Aggregator). Merge and Stats
 // also take the lock. The embedded Histogram is single-writer by itself; all of
@@ -49,8 +58,14 @@ func NewSummary() *Summary {
 // Counting rules match the rest of the package: a result is an error when its
 // status is >= 400 or it carries an error class (RequestObservation.failed());
 // a timeout additionally bumps the timeout counter. Latency always enters the
-// histogram. Finding-category tallies follow the same predicates the Aggregator
-// uses to classify, so a Summary's tallies preview which findings a run trips.
+// histogram.
+//
+// Note that total/errors/the histogram count EVERY observation, including
+// mutated requests, whereas the single-node Aggregator's threshold error-rate
+// and p95 deliberately exclude mutated requests (mutation testing fails on
+// purpose). So on a mutation-bearing run the threshold/p95 signals a Summary
+// surfaces can differ from the Aggregator's — see FindingsFromSummary. The
+// per-category finding tallies kept here follow the Aggregator's classifiers.
 func (s *Summary) Add(o RequestObservation) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,8 +85,12 @@ func (s *Summary) Add(o RequestObservation) {
 }
 
 // tallyFindings increments per-category signal counts for o. Must hold s.mu.
-// The predicates mirror obs/finding.go's classifiers so the tallies line up
-// with what Aggregator.Classify would surface.
+// The mutation/contract/availability predicates mirror obs/finding.go's
+// classifiers. The threshold signals derived later (error-rate and p95 in
+// FindingsFromSummary) come from total/errors/the histogram, which count all
+// observations including mutated ones — unlike Aggregator.classifyThreshold,
+// which excludes mutated requests — so those two can diverge from the
+// single-node Aggregator on a mutation-bearing run.
 func (s *Summary) tallyFindings(o RequestObservation) {
 	switch {
 	case o.Mutated:
@@ -266,6 +285,15 @@ func LoadSummary(d SummaryData) (*Summary, error) {
 // classification the worker-aggregated distributed path uses, where trading that
 // fidelity for bounded memory is the entire point. The category order matches
 // Aggregator.Classify (mutation, contract, availability, threshold).
+//
+// The threshold signals here (error rate and p95) are computed from the
+// Summary's Stats, i.e. from total/errors/the histogram, which count ALL
+// observations including mutated requests. Aggregator.classifyThreshold instead
+// excludes mutated requests, so on a mutation-bearing run these two threshold
+// findings can differ from the single-node Aggregator's. This is latent on the
+// only current caller (the distributed path, where observations are always
+// Mutated=false) but is the correct contract once mutated observations can reach
+// a Summary.
 func FindingsFromSummary(runID domain.ID, s *Summary, cfg ClassifyConfig) []domain.Finding {
 	st := s.Stats()
 	counts := s.FindingCounts()
