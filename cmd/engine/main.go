@@ -55,6 +55,8 @@ func run(args []string) error {
 			return runScenario(args[1:])
 		case "init":
 			return initScenario(args[1:])
+		case "bench":
+			return runBench(args[1:])
 		}
 	}
 	return serve(args)
