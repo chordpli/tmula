@@ -162,7 +162,10 @@ type runState struct {
 	guard     *safety.Guard
 	// trace, when non-nil, buffers live per-request events for the traffic graph
 	// (set only for small runs that opted in). Its methods are concurrency-safe.
-	trace    *traceBuf
+	trace *traceBuf
+	// heat, when non-nil, aggregates per-edge traffic for the large-scale heatmap
+	// (set for any opted-in run). Its methods are concurrency-safe.
+	heat     *heatAgg
 	cancel   context.CancelFunc
 	done     chan struct{}
 	findings []domain.Finding
@@ -289,6 +292,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/compare", s.compareRuns)
 	s.mux.HandleFunc("GET /runs/{id}/stream", s.streamRun)
 	s.mux.HandleFunc("GET /runs/{id}/trace", s.streamTrace)
+	s.mux.HandleFunc("GET /runs/{id}/heatmap", s.streamHeatmap)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
@@ -448,9 +452,14 @@ func (s *Server) runExperiment(w http.ResponseWriter, r *http.Request) {
 		done:      make(chan struct{}),
 		workers:   len(spec.Workers),
 	}
-	// Small opted-in runs stream live per-request events for the traffic graph.
-	if spec.Trace && traceSmallEnough(spec) {
-		rs.trace = newTraceBuf()
+	// Visualization opt-in: aggregate per-edge traffic (any scale) for the
+	// heatmap, and additionally buffer per-request events for the live-dot graph
+	// when the run is small enough.
+	if spec.Trace {
+		rs.heat = newHeatAgg(spec.Graph)
+		if traceSmallEnough(spec) {
+			rs.trace = newTraceBuf()
+		}
 	}
 	s.mu.Lock()
 	s.registerRunLocked(runID, rs)
@@ -564,8 +573,16 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // into tracing.
 func (s *Server) runnerFor(rs *runState, spec RunSpec) *load.Runner {
 	opts := []load.RunnerOption{load.WithGuard(rs.guard)}
-	if rs.trace != nil {
-		opts = append(opts, load.WithEventSink(rs.trace.add))
+	if rs.heat != nil || rs.trace != nil {
+		heat, trace := rs.heat, rs.trace
+		opts = append(opts, load.WithEventSink(func(e load.StepEvent) {
+			if heat != nil {
+				heat.record(e)
+			}
+			if trace != nil {
+				trace.add(e)
+			}
+		}))
 	}
 	return load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, spec.Templates, opts...)
 }
