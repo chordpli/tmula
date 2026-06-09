@@ -80,6 +80,53 @@ export function parseSegments(json: string): Segment[] {
   return parsed as Segment[]
 }
 
+// parseAllowlist mirrors the backend contract: comma-separated host patterns,
+// trimmed, with empty entries ignored.
+export function parseAllowlist(value: string): string[] {
+  return value
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+// hostFromBaseUrl extracts the hostname the safety guard will see. It accepts a
+// bare host during editing by temporarily adding http://, but returns null for
+// incomplete or malformed input so the UI can avoid noisy warnings mid-typing.
+export function hostFromBaseUrl(baseUrl: string): string | null {
+  const raw = baseUrl.trim()
+  if (!raw) return null
+  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(raw) ? raw : `http://${raw}`
+  try {
+    const host = new URL(candidate).hostname
+    return host || null
+  } catch {
+    return null
+  }
+}
+
+// allowlistMatchesHost implements the same exact / leading-wildcard semantics
+// as the backend guard, so the console warns only when a run would really be
+// blocked by the configured allowlist.
+export function allowlistMatchesHost(allowlist: string[], host: string): boolean {
+  const normalized = host.trim().toLowerCase()
+  if (!normalized) return false
+  return allowlist.some((pattern) => {
+    const p = pattern.trim().toLowerCase()
+    return p === normalized || (p.startsWith('*.') && normalized.endsWith(p.slice(1)))
+  })
+}
+
+// addBaseUrlHostToAllowlist appends the Base URL host if the current allowlist
+// does not already cover it. It preserves the existing comma-separated style and
+// is safe to call on every Base URL change.
+export function addBaseUrlHostToAllowlist(baseUrl: string, allowlistValue: string): string {
+  const host = hostFromBaseUrl(baseUrl)
+  if (!host) return allowlistValue
+  const allowlist = parseAllowlist(allowlistValue)
+  if (allowlistMatchesHost(allowlist, host)) return allowlistValue
+  return [...allowlist, host].join(', ')
+}
+
 // runDisabled reports whether the Run button should be disabled for a given run
 // status — i.e. while a run is in flight. 'pending' is included alongside
 // 'starting' and 'running' because the SSE stream can emit it before 'running';
@@ -138,10 +185,7 @@ export function traceable(form: ExperimentForm): boolean {
 export function buildRunSpec(form: ExperimentForm): RunSpec {
   const graph = JSON.parse(form.graphJSON)
   const templates = JSON.parse(form.templatesJSON)
-  const allowlist = form.allowlist
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const allowlist = parseAllowlist(form.allowlist)
   const workers = form.workers
     .split(',')
     .map((s) => s.trim())

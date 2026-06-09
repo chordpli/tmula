@@ -163,7 +163,7 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // the collector incrementally) are appended last so callers can layer on behavior
 // without duplicating the guard/event-sink wiring.
 func (s *Server) runnerFor(rs *runState, spec RunSpec, extra ...load.RunnerOption) *load.Runner {
-	opts := []load.RunnerOption{load.WithGuard(rs.guard)}
+	opts := []load.RunnerOption{load.WithGuard(rs.guard), load.WithCorrelationIDs(rs.exec.ID, scenarioIDForSpec(spec))}
 	if rs.heat != nil || rs.trace != nil || rs.latency != nil {
 		heat, trace, latency := rs.heat, rs.trace, rs.latency
 		opts = append(opts, load.WithEventSink(func(e load.StepEvent) {
@@ -259,7 +259,7 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 		return fmt.Errorf("api: build coordinator: %w", err)
 	}
 
-	shardSpec := shardSpecFor(spec)
+	shardSpec := shardSpecFor(spec, rs.exec.ID)
 	// Fold each shard step into the collector + aggregator as it streams in via
 	// DistributeInto, rather than receiving one ShardStep per request for the whole
 	// run and looping it: bounded master memory at any request volume. The sink
@@ -304,7 +304,7 @@ func (s *Server) executeDistributedSummary(ctx context.Context, rs *runState, sp
 		return obs.Stats{}, nil, fmt.Errorf("api: build coordinator: %w", err)
 	}
 
-	summary, err := coord.DistributeSummary(ctx, shardSpecFor(spec), spec.PoolSize())
+	summary, err := coord.DistributeSummary(ctx, shardSpecFor(spec, rs.exec.ID), spec.PoolSize())
 	if err != nil {
 		return obs.Stats{}, nil, fmt.Errorf("api: distribute summary: %w", err)
 	}
@@ -339,8 +339,10 @@ func dialWorkers(addrs []string) ([]grpc.ClientConnInterface, func(), error) {
 // shardSpecFor maps a control-plane RunSpec onto the cluster.ShardSpec shipped
 // to each worker. The per-worker user partition is computed by the Coordinator,
 // so only the run-wide fields cross here.
-func shardSpecFor(spec RunSpec) cluster.ShardSpec {
+func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 	return cluster.ShardSpec{
+		RunID:         runID,
+		ScenarioID:    scenarioIDForSpec(spec),
 		Graph:         spec.Graph,
 		Templates:     spec.Templates,
 		TargetBaseURL: spec.TargetEnv.BaseURL,
@@ -353,6 +355,13 @@ func shardSpecFor(spec RunSpec) cluster.ShardSpec {
 		RateCap:   spec.TargetEnv.RateCap,
 		EnvClass:  spec.TargetEnv.EnvClass,
 	}
+}
+
+func scenarioIDForSpec(spec RunSpec) domain.ID {
+	if spec.Graph.ID != "" {
+		return spec.Graph.ID
+	}
+	return spec.Experiment.ScenarioGraphID
 }
 
 func errorClass(res load.StepResult) string {

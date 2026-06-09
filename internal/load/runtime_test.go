@@ -159,6 +159,54 @@ func TestRunIndependentCredentials(t *testing.T) {
 	}
 }
 
+func TestRunAddsCorrelationHeadersPerStep(t *testing.T) {
+	seen := map[string]http.Header{}
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		seen[req.URL.Path] = req.Header.Clone()
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g, tmpls := linearGraph()
+	r := NewRunner(NewRESTAdapter(2*time.Second), srv.URL, tmpls, WithCorrelationIDs("run-1", "scenario-1"))
+
+	if _, err := r.Run(context.Background(), g, "a", 5, []VirtualUser{{ID: "u1"}}, 1); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertHeader(t, seen["/a"], HeaderRunID, "run-1")
+	assertHeader(t, seen["/a"], HeaderScenarioID, "scenario-1")
+	assertHeader(t, seen["/a"], HeaderSessionID, "u1")
+	assertHeader(t, seen["/a"], HeaderNodeID, "a")
+	assertHeader(t, seen["/b"], HeaderRunID, "run-1")
+	assertHeader(t, seen["/b"], HeaderScenarioID, "scenario-1")
+	assertHeader(t, seen["/b"], HeaderSessionID, "u1")
+	assertHeader(t, seen["/b"], HeaderNodeID, "b")
+}
+
+func TestRunCorrelationDefaultsScenarioIDFromGraph(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		got = req.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g := domain.ScenarioGraph{
+		ID:    "graph-default",
+		Nodes: []domain.Node{{ID: "a", APITemplateID: "ta"}},
+	}
+	tmpls := map[domain.ID]domain.APITemplate{"ta": {Method: "GET", Path: "/a"}}
+	r := NewRunner(NewRESTAdapter(2*time.Second), srv.URL, tmpls, WithCorrelationIDs("run-1", ""))
+
+	if _, err := r.Run(context.Background(), g, "a", 1, []VirtualUser{{ID: "u1"}}, 1); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertHeader(t, got, HeaderScenarioID, "graph-default")
+}
+
 func TestRunUnknownTemplateErrors(t *testing.T) {
 	g := domain.ScenarioGraph{
 		Nodes: []domain.Node{{ID: "a", APITemplateID: "missing"}},

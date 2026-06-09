@@ -1,5 +1,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
+  addBaseUrlHostToAllowlist,
+  allowlistMatchesHost,
   buildRunSpec,
   classifyEdge,
   compareURL,
@@ -12,6 +14,7 @@ import {
   heatColor,
   heatmapURL,
   heatWidth,
+  hostFromBaseUrl,
   importScenario,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
@@ -21,6 +24,7 @@ import {
   lerpColor,
   parseHeatFrame,
   parseLatencyFrame,
+  parseAllowlist,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
@@ -65,6 +69,34 @@ const form: ExperimentForm = {
   segmentsJSON: '',
   traceEnabled: false,
 }
+
+describe('allowlist helpers', () => {
+  it('extracts the host from full URLs and bare hosts without keeping the port', () => {
+    expect(hostFromBaseUrl('http://localhost:9000')).toBe('localhost')
+    expect(hostFromBaseUrl('https://api.example.com:8443/v1')).toBe('api.example.com')
+    expect(hostFromBaseUrl('sample-api:9000')).toBe('sample-api')
+    expect(hostFromBaseUrl('')).toBeNull()
+  })
+
+  it('trims allowlist entries and ignores blanks', () => {
+    expect(parseAllowlist(' localhost, , 127.0.0.1 ')).toEqual(['localhost', '127.0.0.1'])
+  })
+
+  it('matches exact hosts and leading wildcard hosts like the backend guard', () => {
+    expect(allowlistMatchesHost(['localhost'], 'LOCALHOST')).toBe(true)
+    expect(allowlistMatchesHost(['*.example.com'], 'api.example.com')).toBe(true)
+    expect(allowlistMatchesHost(['*.example.com'], 'example.com')).toBe(false)
+  })
+
+  it('adds the Base URL host when the allowlist does not already cover it', () => {
+    expect(addBaseUrlHostToAllowlist('http://sample-api:9000', 'localhost, 127.0.0.1')).toBe(
+      'localhost, 127.0.0.1, sample-api',
+    )
+    expect(addBaseUrlHostToAllowlist('http://api.example.com', '*.example.com')).toBe(
+      '*.example.com',
+    )
+  })
+})
 
 describe('buildRunSpec', () => {
   it('sends the closed pool as a count, not a per-user array', () => {

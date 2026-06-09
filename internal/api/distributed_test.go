@@ -198,8 +198,14 @@ func TestShardSpecForMapping(t *testing.T) {
 		Workers:   []string{"w1", "w2"},
 	}
 
-	got := shardSpecFor(spec)
+	got := shardSpecFor(spec, "run-123")
 
+	if got.RunID != "run-123" {
+		t.Errorf("RunID = %q, want run-123", got.RunID)
+	}
+	if got.ScenarioID != "g" {
+		t.Errorf("ScenarioID = %q, want graph id g", got.ScenarioID)
+	}
 	if got.TargetBaseURL != "http://sut.example" {
 		t.Errorf("TargetBaseURL = %q, want from TargetEnv.BaseURL", got.TargetBaseURL)
 	}

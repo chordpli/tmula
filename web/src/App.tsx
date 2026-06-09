@@ -1,13 +1,17 @@
 import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import {
+  addBaseUrlHostToAllowlist,
+  allowlistMatchesHost,
   buildRunSpec,
   compareURL,
   createExperiment,
   getReport,
+  hostFromBaseUrl,
   importScenario,
   killRun,
   MAX_TRACE_USERS,
+  parseAllowlist,
   reportHTMLURL,
   runDisabled,
   shareTokenFromQuery,
@@ -18,12 +22,14 @@ import {
   type Report,
   type Stats,
 } from './api'
+import GraphEditor from './GraphEditor'
 import HelpTip from './HelpTip'
 import { LANGS, useI18n } from './i18n'
 import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
 import ReportView, { StatsView } from './ReportView'
+import { doctorForm, type DoctorIssue } from './scenarioDoctor'
 import Viewer from './Viewer'
 
 // stringify renders a preset's graph/templates the same way the Scenario card's
@@ -105,6 +111,24 @@ function Operator() {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
+  function setBaseUrl(value: string) {
+    set('baseUrl', value)
+  }
+
+  function syncBaseHostToAllowlist() {
+    setForm((f) => ({
+      ...f,
+      allowlist: addBaseUrlHostToAllowlist(f.baseUrl, f.allowlist),
+    }))
+  }
+
+  function addBaseHostToAllowlist() {
+    setForm((f) => ({
+      ...f,
+      allowlist: addBaseUrlHostToAllowlist(f.baseUrl, f.allowlist),
+    }))
+  }
+
   // applyScenario fills the scenario fields from a loaded template or import,
   // pretty-printing the graph/templates and carrying over start/maxSteps (and an
   // optional baseUrl). It is the one place both presets and imports converge so
@@ -122,7 +146,9 @@ function Operator() {
       templatesJSON: stringify(s.templates),
       start: s.start,
       maxSteps: s.maxSteps,
-      ...(s.baseUrl ? { baseUrl: s.baseUrl } : {}),
+      ...(s.baseUrl
+        ? { baseUrl: s.baseUrl, allowlist: addBaseUrlHostToAllowlist(s.baseUrl, f.allowlist) }
+        : {}),
     }))
   }
 
@@ -137,6 +163,18 @@ function Operator() {
     setStats(null)
     setStatus('starting')
     try {
+      const blocking = doctorForm(form).find((i) => i.severity === 'error')
+      if (blocking) {
+        setStatus('')
+        setError(t(blocking.messageKey, blocking.vars))
+        return
+      }
+      const host = hostFromBaseUrl(form.baseUrl)
+      if (host && !allowlistMatchesHost(parseAllowlist(form.allowlist), host)) {
+        setStatus('')
+        setError(t('run.allowlistBlocked', { host }))
+        return
+      }
       const spec = buildRunSpec(form)
       const workerCount = spec.workers?.length ?? 0
       setRunMode(
@@ -199,6 +237,9 @@ function Operator() {
   const openModel = form.workloadKind === 'open'
   const hasWorkers = form.workers.trim().length > 0
   const isRunning = status === 'running'
+  const baseHost = hostFromBaseUrl(form.baseUrl)
+  const allowlistCoversBase = !baseHost || allowlistMatchesHost(parseAllowlist(form.allowlist), baseHost)
+  const doctorIssues = doctorForm(form)
   const sizeUnit = openModel ? t('unit.maxConcurrency') : t('unit.users')
   const liveCopy =
     liveMode === 'events'
@@ -239,7 +280,8 @@ function Operator() {
               <input
                 className="input"
                 value={form.baseUrl}
-                onChange={(e) => set('baseUrl', e.target.value)}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                onBlur={syncBaseHostToAllowlist}
                 placeholder="http://localhost:9000"
               />
             </Field>
@@ -254,6 +296,14 @@ function Operator() {
                 onChange={(e) => set('allowlist', e.target.value)}
                 placeholder="localhost, 127.0.0.1"
               />
+              {!allowlistCoversBase && baseHost && (
+                <div className="field-warning" role="status">
+                  <span>{t('allowlist.missingHost', { host: baseHost })}</span>
+                  <button className="field-warning__button" type="button" onClick={addBaseHostToAllowlist}>
+                    {t('allowlist.addHost')}
+                  </button>
+                </div>
+              )}
             </Field>
             <Field label={t('field.workers')} help={t('help.workers')}>
               <input
@@ -404,6 +454,14 @@ function Operator() {
           <div className="stack" style={{ gap: 16 }}>
             {/* Presets (Feature A): one-click starting points. */}
             <PresetRow onPick={applyPreset} loadedKey={loadedPresetKey} />
+            <ScenarioDoctorPanel issues={doctorIssues} />
+            <GraphEditor
+              graphJSON={form.graphJSON}
+              templatesJSON={form.templatesJSON}
+              start={form.start}
+              onGraphJSONChange={(json) => set('graphJSON', json)}
+              onStartChange={(next) => set('start', next)}
+            />
 
             <div className="field-row">
               <Field label={t('field.start')} help={t('help.start')}>
@@ -623,6 +681,36 @@ function PresetRow({ onPick, loadedKey }: { onPick: (p: Preset) => void; loadedK
           <CheckMini />
           {t('presets.loaded', { name: t(loadedKey) })}
         </p>
+      )}
+    </div>
+  )
+}
+
+function ScenarioDoctorPanel({ issues }: { issues: DoctorIssue[] }) {
+  const { t } = useI18n()
+  const errors = issues.filter((i) => i.severity === 'error').length
+  const warnings = issues.filter((i) => i.severity === 'warning').length
+  const level = errors > 0 ? 'error' : warnings > 0 ? 'warning' : 'ok'
+  const visible = issues.slice(0, 8)
+  const hidden = Math.max(0, issues.length - visible.length)
+  return (
+    <div className={`doctor doctor--${level}`}>
+      <div className="doctor__head">
+        <span className="doctor__title">{t('doctor.title')}</span>
+        <span className="doctor__summary">
+          {issues.length === 0 ? t('doctor.clean') : t('doctor.summary', { errors, warnings })}
+        </span>
+      </div>
+      {visible.length > 0 && (
+        <ul className="doctor__list">
+          {visible.map((item, i) => (
+            <li key={`${item.code}-${i}`} className={`doctor__item doctor__item--${item.severity}`}>
+              <span className="doctor__severity">{t(`doctor.severity.${item.severity}`)}</span>
+              <span>{t(item.messageKey, item.vars)}</span>
+            </li>
+          ))}
+          {hidden > 0 && <li className="doctor__more">{t('doctor.more', { count: hidden })}</li>}
+        </ul>
       )}
     </div>
   )

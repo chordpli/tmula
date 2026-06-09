@@ -44,6 +44,8 @@ type Runner struct {
 	guard      *safety.Guard                    // optional; nil = no enforcement
 	eventSink  EventSink                        // optional; nil = no per-step events
 	resultSink ResultSink                       // optional; nil = accumulate and return
+	runID      domain.ID
+	scenarioID domain.ID
 	// maxConcurrency caps how many sessions Run drives at once; 0 means use the
 	// maxConcurrentSessions default. It exists so tests can assert the fan-out is
 	// actually bounded without spawning the full production-sized pool.
@@ -114,6 +116,15 @@ func WithEventSink(s EventSink) RunnerOption { return func(r *Runner) { r.eventS
 // ResultSink. Leave it unset to keep Run's slice-returning behavior for small
 // runs and existing callers.
 func WithResultSink(s ResultSink) RunnerOption { return func(r *Runner) { r.resultSink = s } }
+
+// WithCorrelationIDs stamps every outbound request with run/scenario metadata.
+// Per-request node and session ids are filled in by runSession.
+func WithCorrelationIDs(runID, scenarioID domain.ID) RunnerOption {
+	return func(r *Runner) {
+		r.runID = runID
+		r.scenarioID = scenarioID
+	}
+}
 
 // withMaxConcurrency overrides the session fan-out cap (default
 // maxConcurrentSessions). It is unexported because production always wants the
@@ -297,6 +308,10 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 
 	sent := false
 	var prevNode domain.ID // the node the user came from; "" at the entry
+	scenarioID := r.scenarioID
+	if scenarioID == "" {
+		scenarioID = g.ID
+	}
 	for _, nodeID := range path {
 		if ctx.Err() != nil {
 			break // cancelled (kill switch): stop this user's journey
@@ -326,6 +341,12 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		if err != nil {
 			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
 			continue
+		}
+		req.Correlation = RequestCorrelation{
+			RunID:      r.runID,
+			ScenarioID: scenarioID,
+			NodeID:     nodeID,
+			SessionID:  u.ID,
 		}
 		resp, sErr := r.send(ctx, req)
 		emit(StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})

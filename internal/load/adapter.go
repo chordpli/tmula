@@ -13,6 +13,13 @@ import (
 	"github.com/chordpli/tmula/internal/domain"
 )
 
+const (
+	HeaderRunID      = "X-Tmula-Run-ID"
+	HeaderScenarioID = "X-Tmula-Scenario-ID"
+	HeaderNodeID     = "X-Tmula-Node-ID"
+	HeaderSessionID  = "X-Tmula-Session-ID"
+)
+
 // Response is the protocol-agnostic result of one call to the system under test.
 type Response struct {
 	StatusCode int
@@ -20,13 +27,23 @@ type Response struct {
 	Body       []byte
 }
 
+// RequestCorrelation identifies the synthetic traffic in downstream logs and
+// traces. The REST adapter turns these fields into X-Tmula-* headers.
+type RequestCorrelation struct {
+	RunID      domain.ID
+	ScenarioID domain.ID
+	NodeID     domain.ID
+	SessionID  string
+}
+
 // RenderedRequest is a concrete request produced from an API template after
 // variable substitution, ready for an adapter to send.
 type RenderedRequest struct {
-	Method  string
-	URL     string
-	Headers map[string]string
-	Body    []byte
+	Method      string
+	URL         string
+	Headers     map[string]string
+	Body        []byte
+	Correlation RequestCorrelation
 }
 
 // Adapter sends a rendered request to the system under test. REST is the first
@@ -123,6 +140,7 @@ func (a *RESTAdapter) Send(ctx context.Context, r RenderedRequest) (Response, er
 	for k, v := range r.Headers {
 		req.Header.Set(k, v)
 	}
+	setCorrelationHeaders(req.Header, r.Correlation)
 
 	start := time.Now()
 	resp, err := a.client.Do(req)
@@ -137,4 +155,18 @@ func (a *RESTAdapter) Send(ctx context.Context, r RenderedRequest) (Response, er
 		return Response{StatusCode: resp.StatusCode, LatencyMs: latency}, fmt.Errorf("load: read body: %w", err)
 	}
 	return Response{StatusCode: resp.StatusCode, LatencyMs: latency, Body: body}, nil
+}
+
+func setCorrelationHeaders(h http.Header, c RequestCorrelation) {
+	setHeaderIfSafe(h, HeaderRunID, string(c.RunID))
+	setHeaderIfSafe(h, HeaderScenarioID, string(c.ScenarioID))
+	setHeaderIfSafe(h, HeaderNodeID, string(c.NodeID))
+	setHeaderIfSafe(h, HeaderSessionID, c.SessionID)
+}
+
+func setHeaderIfSafe(h http.Header, key, value string) {
+	if value == "" || strings.ContainsAny(value, "\r\n") {
+		return
+	}
+	h.Set(key, value)
 }

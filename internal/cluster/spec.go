@@ -19,6 +19,10 @@ import (
 // per-worker user partition (offset/count) travels in the proto, not here, so a
 // single spec is shared verbatim by every shard.
 type ShardSpec struct {
+	// RunID and ScenarioID are stamped onto every outbound request so downstream
+	// logs and traces can be filtered back to this tmula execution.
+	RunID      domain.ID `json:"runId,omitempty"`
+	ScenarioID domain.ID `json:"scenarioId,omitempty"`
 	// Graph is the scenario graph every virtual user traverses.
 	Graph domain.ScenarioGraph `json:"graph"`
 	// Templates are the API templates the graph's nodes bind to, keyed by id.

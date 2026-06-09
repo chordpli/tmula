@@ -23,10 +23,15 @@
 
 ## What is tmula?
 
-Plain load tools fire identical requests at one endpoint. Real users don't. They follow a
-journey, branch, hesitate, sometimes go off-script, and pile onto whatever's hot. **tmula**
-models that: virtual users walk an explicit **behavior graph** (nodes = API calls, weighted edges
-= transitions, dependency edges that are never skipped), and it surfaces issues in three modes:
+tmula is not trying to replace mature load-testing suites. Tools like k6, Locust, JMeter,
+Gatling, Artillery, and nGrinder already cover scripting, scenarios, distributed execution,
+dashboards, and CI in depth. **tmula** starts from a narrower angle: model the user journey
+as an explicit **behavior graph**, then send virtual traffic through that graph to see where
+the flow slows down, breaks, or concentrates.
+
+Virtual users follow a journey, branch, hesitate, sometimes go off-script, and pile onto
+whatever is hot. In tmula that journey is represented as nodes = API calls, weighted edges =
+transitions, and dependency edges that are never skipped. It surfaces issues in three modes:
 
 - **Scenario-following** - does the happy path hold up under realistic, branching traffic?
 - **Deviation** - probabilistic skips, step reordering, and payload mutation (never violating a
@@ -37,10 +42,12 @@ Observation is **client-side first** (status codes, latency tails, and error / a
 contract findings); server-side metrics are opt-in. A single Go binary with the web console baked
 in runs **locally first** and **scales out** to distributed master/worker mode for large traffic.
 
-> tmula는 **행동 그래프** 기반 실사용자 트래픽 시뮬레이터입니다. 가상 사용자가 실제 사람처럼
-> 시나리오를 따라 이동하고, 규칙 안에서 이탈하고, 특정 API에 부하를 집중시켜 - **실제 사용자를
-> 모으지 않고도** 평소 부하 도구나 수동 테스트가 놓치는 문제를 찾아냅니다. 단일 Go 바이너리(웹 UI
-> 내장)로 로컬에서 바로 돌리고, 필요하면 분산 마스터/워커로 확장합니다.
+> tmula는 기존 부하 테스트 도구를 대체하려는 도구가 아니라, **사용자 여정을 행동 그래프로 먼저
+> 모델링하고** 그 흐름 위에서 부하와 실패를 관찰하기 위한 traffic simulation 도구입니다. 가상
+> 사용자가 실제 사람처럼 시나리오를 따라 이동하고, 규칙 안에서 이탈하고, 특정 API에 부하를
+> 집중시켜 - **실제 사용자를 모으지 않고도** 어디서 흐름이 느려지고, 실패하고, 몰리는지
+> 확인합니다. 단일 Go 바이너리(웹 UI 내장)로 로컬에서 바로 돌리고, 필요하면 분산 마스터/워커로
+> 확장합니다.
 
 ---
 

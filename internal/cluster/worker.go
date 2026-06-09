@@ -153,7 +153,11 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 			cancel() // stop the other sessions; the first error is recorded
 		}
 	}
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard), load.WithResultSink(sink))
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates,
+		load.WithGuard(guard),
+		load.WithCorrelationIDs(spec.RunID, spec.ScenarioID),
+		load.WithResultSink(sink),
+	)
 
 	// The Runner seeds user i (local) with seed+i. Offsetting the base seed by
 	// the global offset makes local i correspond to global user offset+i, so the
@@ -203,7 +207,11 @@ func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunSh
 	// memory stays flat (one fixed-size Summary) no matter how many requests the
 	// shard makes.
 	sink := func(r load.StepResult) { summary.Add(toObservation(r)) }
-	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates, load.WithGuard(guard), load.WithResultSink(sink))
+	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates,
+		load.WithGuard(guard),
+		load.WithCorrelationIDs(spec.RunID, spec.ScenarioID),
+		load.WithResultSink(sink),
+	)
 
 	if _, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset)); err != nil {
 		return nil, fmt.Errorf("cluster: worker run shard summary: %w", err)

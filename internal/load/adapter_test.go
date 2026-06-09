@@ -86,6 +86,69 @@ func TestRESTAdapterSendOK(t *testing.T) {
 	}
 }
 
+func TestRESTAdapterAddsCorrelationHeaders(t *testing.T) {
+	got := make(http.Header)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	req := RenderedRequest{
+		Method: "GET",
+		URL:    srv.URL,
+		Headers: map[string]string{
+			HeaderRunID: "spoofed",
+		},
+		Correlation: RequestCorrelation{
+			RunID:      "run-1",
+			ScenarioID: "graph-1",
+			NodeID:     "checkout",
+			SessionID:  "user-7",
+		},
+	}
+	if _, err := NewRESTAdapter(time.Second).Send(context.Background(), req); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	assertHeader(t, got, HeaderRunID, "run-1")
+	assertHeader(t, got, HeaderScenarioID, "graph-1")
+	assertHeader(t, got, HeaderNodeID, "checkout")
+	assertHeader(t, got, HeaderSessionID, "user-7")
+}
+
+func TestRESTAdapterOmitsUnsafeCorrelationHeaders(t *testing.T) {
+	got := make(http.Header)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	req := RenderedRequest{
+		Method: "GET",
+		URL:    srv.URL,
+		Correlation: RequestCorrelation{
+			RunID:      "run-1\r\nbad",
+			ScenarioID: "",
+			NodeID:     "node-1",
+			SessionID:  "session\nbad",
+		},
+	}
+	if _, err := NewRESTAdapter(time.Second).Send(context.Background(), req); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got.Get(HeaderRunID) != "" {
+		t.Errorf("%s should be omitted for unsafe value, got %q", HeaderRunID, got.Get(HeaderRunID))
+	}
+	if got.Get(HeaderScenarioID) != "" {
+		t.Errorf("%s should be omitted for empty value, got %q", HeaderScenarioID, got.Get(HeaderScenarioID))
+	}
+	assertHeader(t, got, HeaderNodeID, "node-1")
+	if got.Get(HeaderSessionID) != "" {
+		t.Errorf("%s should be omitted for unsafe value, got %q", HeaderSessionID, got.Get(HeaderSessionID))
+	}
+}
+
 func TestRESTAdapterServerErrorIsResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -114,5 +177,12 @@ func TestRESTAdapterTransportError(t *testing.T) {
 func TestRESTAdapterProtocol(t *testing.T) {
 	if NewRESTAdapter(time.Second).Protocol() != domain.ProtocolREST {
 		t.Fatal("REST adapter must report rest protocol")
+	}
+}
+
+func assertHeader(t *testing.T, h http.Header, key, want string) {
+	t.Helper()
+	if got := h.Get(key); got != want {
+		t.Errorf("%s = %q, want %q", key, got, want)
 	}
 }
