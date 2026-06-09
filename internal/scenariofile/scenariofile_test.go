@@ -72,6 +72,22 @@ func TestParseAndExpandClosed(t *testing.T) {
 	}
 }
 
+func TestExpandCarriesStepExtractors(t *testing.T) {
+	spec, err := Expand(Scenario{
+		Target: "http://h:1",
+		Flow: []Step{
+			{ID: "products", Request: "GET /products", Extract: map[string]string{"productId": "items.0.id"}},
+			{ID: "cart", Request: "POST /cart", Body: `{"productId":"{{.productId}}"}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if got := spec.Templates["t_products"].Extract["productId"]; got != "items.0.id" {
+		t.Errorf("extract productId = %q, want items.0.id", got)
+	}
+}
+
 // TestNonAdjacentDependencyDoesNotCreateShortcut guards the regression where a
 // dependsOn pointing at a non-preceding step added a traversable forward edge,
 // letting the walk skip the steps in between (~50% of the time).

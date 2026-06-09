@@ -2,6 +2,8 @@ package load
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -205,6 +207,60 @@ func TestRunCorrelationDefaultsScenarioIDFromGraph(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	assertHeader(t, got, HeaderScenarioID, "graph-default")
+}
+
+func TestRunExtractsResponseVariablesPerSession(t *testing.T) {
+	var mu sync.Mutex
+	cartBodies := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		session := req.Header.Get(HeaderSessionID)
+		switch req.URL.Path {
+		case "/products":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"items":[{"id":"product-%s"}]}`, session)
+		case "/cart":
+			body, _ := io.ReadAll(req.Body)
+			mu.Lock()
+			cartBodies[session] = string(body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(w, req)
+		}
+	}))
+	defer srv.Close()
+
+	g := domain.ScenarioGraph{
+		ID:    "shop",
+		Nodes: []domain.Node{{ID: "products", APITemplateID: "t_products"}, {ID: "cart", APITemplateID: "t_cart"}},
+		Edges: []domain.Edge{{From: "products", To: "cart", Weight: 1}},
+	}
+	tmpls := map[domain.ID]domain.APITemplate{
+		"t_products": {Method: "GET", Path: "/products", Extract: map[string]string{"productId": "items.0.id"}},
+		"t_cart":     {Method: "POST", Path: "/cart", PayloadTemplate: `{"productId":"{{.productId}}"}`},
+	}
+	r := NewRunner(NewRESTAdapter(2*time.Second), srv.URL, tmpls, WithCorrelationIDs("run-1", "shop"))
+
+	users := []VirtualUser{{ID: "u1"}, {ID: "u2"}}
+	results, err := r.Run(context.Background(), g, "products", 2, users, 1)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, sr := range results {
+		if sr.Err != nil {
+			t.Fatalf("unexpected step error: %+v", sr)
+		}
+	}
+	want := map[string]string{
+		"u1": `{"productId":"product-u1"}`,
+		"u2": `{"productId":"product-u2"}`,
+	}
+	for session, body := range want {
+		if cartBodies[session] != body {
+			t.Errorf("cart body for %s = %q, want %q", session, cartBodies[session], body)
+		}
+	}
 }
 
 func TestRunUnknownTemplateErrors(t *testing.T) {

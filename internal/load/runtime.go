@@ -308,6 +308,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 
 	sent := false
 	var prevNode domain.ID // the node the user came from; "" at the entry
+	sessionVars := copyVars(u.Vars)
 	scenarioID := r.scenarioID
 	if scenarioID == "" {
 		scenarioID = g.ID
@@ -337,7 +338,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 				break
 			}
 		}
-		req, err := Render(tmpl, r.baseURL, u.Cred, u.Vars)
+		req, err := Render(tmpl, r.baseURL, u.Cred, sessionVars)
 		if err != nil {
 			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
 			continue
@@ -349,6 +350,16 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 			SessionID:  u.ID,
 		}
 		resp, sErr := r.send(ctx, req)
+		if sErr == nil && len(tmpl.Extract) > 0 {
+			extracted, err := ExtractVariables(resp.Body, tmpl.Extract)
+			if err != nil {
+				sErr = err
+			} else {
+				for k, v := range extracted {
+					sessionVars[k] = v
+				}
+			}
+		}
 		emit(StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
 		if r.eventSink != nil {
 			r.eventSink(StepEvent{
@@ -362,6 +373,14 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		}
 		sent = true
 	}
+}
+
+func copyVars(vars map[string]string) map[string]string {
+	out := make(map[string]string, len(vars))
+	for k, v := range vars {
+		out[k] = v
+	}
+	return out
 }
 
 // sleep pauses for d or until ctx is done, whichever comes first. It reports

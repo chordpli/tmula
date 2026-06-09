@@ -35,6 +35,7 @@ interface ScenarioGraphShape {
 interface TemplateShape {
   method?: unknown
   path?: unknown
+  extract?: unknown
 }
 
 type TemplateMap = Record<string, TemplateShape>
@@ -166,6 +167,18 @@ function doctorTemplates(templates: TemplateMap, g: ScenarioGraphShape): DoctorI
     if (typeof tmpl.path !== 'string' || !tmpl.path.trim()) {
       issues.push(issue('error', 'template-path', 'doctor.templatePathMissing', { template: id }))
     }
+    if (tmpl.extract !== undefined) {
+      if (!isRecord(tmpl.extract)) {
+        issues.push(issue('error', 'template-extract-shape', 'doctor.templateExtractShape', { template: id }))
+      } else {
+        for (const [name, path] of Object.entries(tmpl.extract)) {
+          if (!name.trim() || typeof path !== 'string' || !path.trim()) {
+            issues.push(issue('error', 'template-extract-entry', 'doctor.templateExtractEntry', { template: id }))
+            break
+          }
+        }
+      }
+    }
     if (!used.has(id)) {
       issues.push(issue('warning', 'template-unused', 'doctor.templateUnused', { template: id }))
     }
@@ -180,6 +193,10 @@ function nodeIDSet(g: ScenarioGraphShape): Set<string> {
     if (typeof n.id === 'string') ids.add(n.id)
   }
   return ids
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
 function parseJSON<T>(text: string): { ok: true; value: T } | { ok: false; error: string } {

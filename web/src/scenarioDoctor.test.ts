@@ -87,6 +87,27 @@ describe('doctorForm', () => {
     expect(got).toContain('template-path')
   })
 
+  it('flags malformed response extractors', () => {
+    expect(
+      codes({
+        ...form,
+        templatesJSON: JSON.stringify({
+          browse: { method: 'GET', path: '/browse', extract: ['bad'] },
+          product: { method: 'GET', path: '/products/1' },
+        }),
+      }),
+    ).toContain('template-extract-shape')
+    expect(
+      codes({
+        ...form,
+        templatesJSON: JSON.stringify({
+          browse: { method: 'GET', path: '/browse', extract: { productId: '' } },
+          product: { method: 'GET', path: '/products/1' },
+        }),
+      }),
+    ).toContain('template-extract-entry')
+  })
+
   it('checks open-model persona JSON and segment start nodes', () => {
     expect(codes({ ...form, workloadKind: 'open', segmentsJSON: 'not json' })).toContain('segments-json')
     expect(

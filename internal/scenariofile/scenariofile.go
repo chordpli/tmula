@@ -102,6 +102,8 @@ type Step struct {
 	Body string `json:"body,omitempty"`
 	// Headers are static request headers for this step.
 	Headers map[string]string `json:"headers,omitempty"`
+	// Extract maps response JSON paths onto session variables for later steps.
+	Extract map[string]string `json:"extract,omitempty"`
 	// DependsOn is the id of an earlier step this one requires. The edge into
 	// this step is marked as a dependency, so it is never skipped on deviation.
 	DependsOn string `json:"dependsOn,omitempty"`
@@ -271,6 +273,7 @@ func buildTemplates(flow []Step) (map[domain.ID]domain.APITemplate, error) {
 			Path:            path,
 			Headers:         st.Headers,
 			PayloadTemplate: st.Body,
+			Extract:         st.Extract,
 		}
 	}
 	return out, nil

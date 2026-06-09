@@ -119,6 +119,30 @@ from escaping its target.
 
 ---
 
+## Response data correlation
+
+Later steps can reuse values returned by earlier steps. Add an `extract` map to a request-bearing
+step (or API template): keys become session variables, values are JSON paths in the response body.
+Those variables are then available in later `path`, `headers`, and `payloadTemplate` fields via
+Go template syntax.
+
+```yaml
+target: http://localhost:9000
+flow:
+  - id: products
+    request: GET /products
+    extract:
+      productId: items.0.id
+  - id: cart
+    request: POST /cart
+    body: '{"productId":"{{.productId}}","qty":1}'
+```
+
+Each virtual user/session keeps its own extracted variables, so one user's product/cart IDs do not
+bleed into another user's journey.
+
+---
+
 ## Commands
 
 The `tmula` CLI - one binary, no curl/jq, no separately running server:

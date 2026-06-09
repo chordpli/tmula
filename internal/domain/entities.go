@@ -54,6 +54,7 @@ type APITemplate struct {
 	Path            string            `json:"path"`
 	Headers         map[string]string `json:"headers,omitempty"`
 	PayloadTemplate string            `json:"payloadTemplate,omitempty"`
+	Extract         map[string]string `json:"extract,omitempty"`
 }
 
 // Validate checks the template is callable.

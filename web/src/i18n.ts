@@ -139,7 +139,7 @@ const en: Record<string, string> = {
   'badge.jsonAdvanced': 'JSON · advanced',
   'help.graph': 'Nodes and weighted edges. A dependency edge must complete before its target runs.',
   'field.templates': 'API templates',
-  'help.templates': 'The request each node sends: method, path, and an optional payload template.',
+  'help.templates': 'The request each node sends: method, path, optional payloadTemplate, and response extractors.',
   'doctor.title': 'Scenario doctor',
   'doctor.clean': 'No obvious blockers.',
   'doctor.summary': '{errors} errors · {warnings} warnings',
@@ -167,6 +167,8 @@ const en: Record<string, string> = {
   'doctor.templateShape': 'Template "{template}" must be an object.',
   'doctor.templateMethodMissing': 'Template "{template}" is missing method.',
   'doctor.templatePathMissing': 'Template "{template}" is missing path.',
+  'doctor.templateExtractShape': 'Template "{template}" extract must be an object mapping variable names to JSON paths.',
+  'doctor.templateExtractEntry': 'Template "{template}" extract entries need non-empty variable names and JSON paths.',
   'doctor.templateUnused': 'Template "{template}" is not used by any node.',
   'editor.title': 'Visual graph editor',
   'editor.hint': 'Edit nodes and edges; the JSON below updates with every change.',
@@ -213,7 +215,7 @@ const en: Record<string, string> = {
   'help.graph.tip':
     'Nodes are states bound to an apiTemplateId; edges are weighted transitions between them. weight sets how likely a path is; a dependency edge must finish before its target can run.',
   'help.templates.tip':
-    'Each template is one request: method (GET/POST/…), path, and an optional payloadTemplate for the body.',
+    'Each template is one request: method (GET/POST/…), path, optional payloadTemplate, and optional extract map for response JSON values used by later steps.',
   'help.allowlist.tip':
     'The only hosts a run is allowed to call. Anything off this list is blocked, so a test can never hit the wrong server.',
   'help.arrivalRate.tip': 'How many new users start every second in an open run.',
@@ -395,7 +397,7 @@ const ko: Record<string, string> = {
   'badge.jsonAdvanced': 'JSON · 고급',
   'help.graph': '노드와 가중치 엣지입니다. 의존 엣지는 대상이 실행되기 전에 먼저 완료되어야 합니다.',
   'field.templates': 'API 템플릿',
-  'help.templates': '각 노드가 보내는 요청입니다: 메서드, 경로, 그리고 선택적 페이로드 템플릿.',
+  'help.templates': '각 노드가 보내는 요청입니다: 메서드, 경로, 선택적 payloadTemplate, 응답값 추출 설정.',
   'doctor.title': '시나리오 점검',
   'doctor.clean': '뚜렷한 차단 요소가 없습니다.',
   'doctor.summary': '오류 {errors}개 · 경고 {warnings}개',
@@ -422,6 +424,8 @@ const ko: Record<string, string> = {
   'doctor.templateShape': '템플릿 "{template}"은 객체여야 합니다.',
   'doctor.templateMethodMissing': '템플릿 "{template}"에 method가 없습니다.',
   'doctor.templatePathMissing': '템플릿 "{template}"에 path가 없습니다.',
+  'doctor.templateExtractShape': '템플릿 "{template}"의 extract는 변수 이름을 JSON 경로에 매핑하는 객체여야 합니다.',
+  'doctor.templateExtractEntry': '템플릿 "{template}"의 extract 항목에는 비어 있지 않은 변수 이름과 JSON 경로가 필요합니다.',
   'doctor.templateUnused': '템플릿 "{template}"은 어떤 노드에서도 사용되지 않습니다.',
   'editor.title': '시각 그래프 편집기',
   'editor.hint': '노드와 엣지를 편집하면 아래 JSON이 함께 갱신됩니다.',
@@ -468,7 +472,7 @@ const ko: Record<string, string> = {
   'help.graph.tip':
     '노드는 apiTemplateId에 연결된 상태이고, 엣지는 노드 사이의 가중치 있는 전이입니다. weight는 경로가 선택될 확률을 정하고, dependency 엣지는 대상이 실행되기 전에 먼저 끝나야 합니다.',
   'help.templates.tip':
-    '각 템플릿은 요청 하나입니다: 메서드(GET/POST 등), 경로, 그리고 본문에 쓸 선택적 payloadTemplate.',
+    '각 템플릿은 요청 하나입니다: 메서드(GET/POST 등), 경로, 선택적 payloadTemplate, 그리고 다음 단계에서 쓸 응답 JSON extract map.',
   'help.allowlist.tip':
     '실행이 호출해도 되는 호스트만 적습니다. 목록에 없는 곳은 차단되므로 테스트가 엉뚱한 서버에 닿을 일이 없습니다.',
   'help.arrivalRate.tip': '오픈 실행에서 매초 새로 시작하는 사용자 수입니다.',
