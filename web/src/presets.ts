@@ -62,7 +62,7 @@ const shopTemplates = {
   t_checkout: { method: 'POST', path: '/checkout', payloadTemplate: '{"total":42}' },
 }
 
-// The ticketing preset is a second full domain (examples/ticketing-api): buying
+// The ticketing preset is a second full domain (server/examples/ticketing-api): buying
 // concert seats. A buyer browses shows, opens one, checks seats, and a fraction
 // hold a seat then pay (hold -> pay is a dependency); exit edges drain seat-pickers
 // and holders who never pay. It points at the ticketing API's own port so picking

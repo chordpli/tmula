@@ -26,8 +26,8 @@ jobs:
       - name: Build and embed the web UI
         run: |
           cd web && npm ci && npm run build && cd ..
-          rm -rf internal/web/static/assets
-          cp -R web/dist/. internal/web/static/
+          rm -rf server/internal/web/static/assets
+          cp -R web/dist/. server/internal/web/static/
 
       - name: Cross-compile
         run: |
@@ -36,9 +36,9 @@ jobs:
           for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
             os="${target%/*}"; arch="${target#*/}"
             echo "building tmula_${os}_${arch}"
-            GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
+            ( cd server && GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
               go build -ldflags "-X main.version=${version}" \
-              -o "dist/tmula_${os}_${arch}" ./cmd/engine
+              -o "../dist/tmula_${os}_${arch}" ./cmd/tmula )
           done
           ( cd dist && shasum -a 256 tmula_* > checksums.txt )
 

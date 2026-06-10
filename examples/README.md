@@ -9,9 +9,9 @@ recruiting real users**.
 | Path | What it is |
 |---|---|
 | [`USAGE.md`](USAGE.md) | **Full 0→100 usage guide** - REST API, open (arrival-rate) model, personas, distributed runs |
-| `sample-api/` | A tiny **"shop"** API (stdlib Go) with a few **deliberate bugs** to find (:9000) |
+| `../server/examples/sample-api/` | A tiny **"shop"** API (stdlib Go) with a few **deliberate bugs** to find (:9000) |
 | `shop/{graph,templates}.json`, `shop/scenario.yaml` | The shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs |
-| `ticketing-api/` | A second tiny API: **concert ticketing** - seat-contention 409s, a payment rush, sold-out 404s (:9100) |
+| `../server/examples/ticketing-api/` | A second tiny API: **concert ticketing** - seat-contention 409s, a payment rush, sold-out 404s (:9100) |
 | `ticketing/{graph,templates}.json`, `ticketing/scenario.yaml` | The ticketing journey (`events → detail → seats → hold → pay`) with exit drop-offs |
 | `imports/` | Importable **OpenAPI + HAR** samples for both domains (web UI → *Import from OpenAPI / HAR*, or `tmula init --from`) |
 | `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
@@ -26,8 +26,8 @@ fills the scenario *and* points the target at that API's port. Run the matching
 server first:
 
 ```bash
-go run ./examples/sample-api      # shop       → :9000
-go run ./examples/ticketing-api   # ticketing  → :9100
+( cd server && go run ./examples/sample-api )      # shop       → :9000
+( cd server && go run ./examples/ticketing-api )   # ticketing  → :9100
 ```
 
 ## Easiest: the `tmula run` CLI
@@ -35,7 +35,7 @@ go run ./examples/ticketing-api   # ticketing  → :9100
 One binary, one command. No curl, no jq, no separately running server:
 
 ```bash
-go build -o ./bin/tmula ./cmd/engine
+( cd server && go build -o ../bin/tmula ./cmd/tmula )
 
 # a single endpoint
 ./bin/tmula run --target http://127.0.0.1:9000 --get /browse --users 30
@@ -93,7 +93,7 @@ cart hiccup, and the checkout that **saturates under traffic but recovers**
 ## Drive it from the UI instead
 
 ```bash
-go run ./examples/sample-api &   # sample API on :9000
+( cd server && go run ./examples/sample-api ) &   # sample API on :9000
 make web                         # build the UI into the binary + run on :8080
 open http://localhost:8080
 ```
@@ -114,9 +114,9 @@ Start one or more workers, then put their addresses in the **Worker addresses**
 field (or `--workers`):
 
 ```bash
-go run ./cmd/engine --role worker --addr :9101 &
-go run ./cmd/engine --role worker --addr :9102 &
-go run ./cmd/engine --role local  --addr :8080 --workers 127.0.0.1:9101,127.0.0.1:9102 &
+( cd server && go run ./cmd/tmula --role worker --addr :9101 ) &
+( cd server && go run ./cmd/tmula --role worker --addr :9102 ) &
+( cd server && go run ./cmd/tmula --role local  --addr :8080 --workers 127.0.0.1:9101,127.0.0.1:9102 ) &
 ```
 
 The master fans the virtual users across the workers and aggregates the

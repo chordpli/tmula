@@ -3,7 +3,7 @@ info:
   title: Shop API
   version: "1.0.0"
   description: >
-    The demo "shop" API that the tmula examples target (examples/sample-api).
+    The demo "shop" API that the tmula examples target (server/examples/sample-api).
     Import it from the web UI (Scenario card -> Import from OpenAPI / HAR) or with
     `tmula init --from examples/imports/shop.openapi.yaml` to scaffold a runnable
     scenario instead of hand-writing the graph + templates.

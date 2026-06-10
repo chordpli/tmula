@@ -15,15 +15,20 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
+          cache-dependency-path: go.sum
       - name: Build
+        working-directory: server
         run: go build ./...
       - name: Vet
+        working-directory: server
         run: go vet ./...
       - name: gofmt
+        working-directory: server
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then echo "gofmt needed on:"; echo "$unformatted"; exit 1; fi
       - name: Test
+        working-directory: server
         run: go test ./...
 
   web:

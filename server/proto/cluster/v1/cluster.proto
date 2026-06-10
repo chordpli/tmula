@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+// Package cluster.v1 is the wire contract between a load-test master and its
+// workers. The master splits a run's virtual users across workers; each worker
+// executes its shard and streams per-step results back for aggregation.
+package cluster.v1;
+
+option go_package = "github.com/chordpli/tmula/server/internal/cluster/clusterpb";
+
+// ClusterService is served by every worker. A master dials each registered
+// worker and drives shards through it.
+service ClusterService {
+  // RunShard asks the worker to execute its assigned slice of virtual users and
+  // stream one ShardResult per request the users make. The stream completes
+  // when the shard finishes (or the context is cancelled).
+  rpc RunShard(RunShardRequest) returns (stream ShardResult);
+
+  // RunShardSummary executes the same shard as RunShard but, instead of
+  // streaming one message per request, aggregates the whole shard on the worker
+  // and returns a single compact, mergeable summary. The master folds the
+  // per-worker summaries together, trading per-request fidelity for bounded
+  // network and memory at millions of requests — the same shard, summarized at
+  // the edge rather than streamed.
+  rpc RunShardSummary(RunShardRequest) returns (ShardSummary);
+
+  // Ping is a liveness probe used to confirm a worker is reachable.
+  rpc Ping(PingRequest) returns (PingReply);
+}
+
+// RunShardRequest is fully self-contained: the scenario graph, API templates
+// and target are carried as a single JSON document (spec_json) so the domain
+// model is not duplicated in protobuf. The remaining fields parameterize which
+// users this worker owns and how they walk the graph.
+message RunShardRequest {
+  // spec_json is the JSON encoding of the shared cluster.ShardSpec.
+  string spec_json = 1;
+  // user_offset is the index of the first virtual user this shard owns. It both
+  // names the users (user-<offset+i>) and seeds the per-user RNG, so the global
+  // run stays deterministic regardless of how users were partitioned.
+  int32 user_offset = 2;
+  // user_count is how many virtual users this shard runs.
+  int32 user_count = 3;
+  // seed is the run-wide base seed; per-user seed is seed + global user index.
+  int64 seed = 4;
+  // max_steps bounds each user's walk length.
+  int32 max_steps = 5;
+  // start_node is the graph node every user starts from.
+  string start_node = 6;
+}
+
+// ShardResult is one observed request outcome from a worker. A non-2xx status
+// is reported as data (not an error); error_class is set for transport/render
+// failures or when no response was produced.
+message ShardResult {
+  // user_id is the virtual user that made the request (user-<global index>).
+  string user_id = 1;
+  // api_id is the API template id bound to the visited node, if any.
+  string api_id = 2;
+  // status_code is the HTTP status, or 0 when no response was received.
+  int32 status_code = 3;
+  // latency_ms is the client-observed round-trip latency in milliseconds.
+  double latency_ms = 4;
+  // error_class names the failure class (empty on success).
+  string error_class = 5;
+}
+
+// ShardSummary is a worker's compact aggregate of its entire shard: running
+// counters, observed status codes, finding-signal tallies, and a serialized
+// latency histogram in the package's fixed bucket layout. It is mergeable — the
+// master sums the counters and maps and folds the histograms — so run-wide stats
+// (including percentiles) are recovered without the master seeing any individual
+// request.
+message ShardSummary {
+  // total, errors and timeouts are run-wide request counters.
+  int64 total = 1;
+  int64 errors = 2;
+  int64 timeouts = 3;
+  // status_counts tallies observed HTTP status codes (status code -> count).
+  map<int32, int64> status_counts = 4;
+  // finding_counts tallies finding-category signals (category string -> count),
+  // e.g. "contract" or "availability"; the master turns non-zero tallies into
+  // run-wide findings.
+  map<string, int64> finding_counts = 5;
+  // hist_buckets is the latency histogram's bucket counts in the fixed layout
+  // every Histogram shares, so the master merges by element-wise addition.
+  repeated uint64 hist_buckets = 6;
+  // hist_max is the exact maximum latency (ms) the worker observed, tracked
+  // alongside the (lossy) buckets.
+  double hist_max = 7;
+}
+
+// PingRequest carries an optional caller-chosen nonce echoed back in the reply.
+message PingRequest {
+  string nonce = 1;
+}
+
+// PingReply echoes the request nonce and identifies the responding worker.
+message PingReply {
+  string nonce = 1;
+  // worker_id identifies the responding worker (may be empty if unset).
+  string worker_id = 2;
+}

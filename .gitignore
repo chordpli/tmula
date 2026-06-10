@@ -16,7 +16,7 @@ web/dist/
 node_modules/
 
 # Built React UI assets copied into the embed dir (index.html placeholder stays tracked)
-internal/web/static/assets/
+server/internal/web/static/assets/
 
 # --- Env / secrets ---
 .env

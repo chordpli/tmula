@@ -8,8 +8,8 @@ set -euo pipefail
 
 USERS="${1:-60}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SAMPLE_ADDR="127.0.0.1:9000"
-ENGINE_ADDR="127.0.0.1:8080"
+SAMPLE_ADDR="${SAMPLE_ADDR:-127.0.0.1:9000}"
+ENGINE_ADDR="${ENGINE_ADDR:-127.0.0.1:8080}"
 API="http://${ENGINE_ADDR}/api"
 
 cd "$ROOT"
@@ -25,14 +25,23 @@ wait_up() { # url
   echo "timed out waiting for $1" >&2; return 1
 }
 
-echo "==> building tmula"
-go build -o ./bin/tmula ./cmd/engine
+ensure_not_up() { # url label
+  if curl -fsS -o /dev/null "$1" 2>/dev/null; then
+    echo "$2 is already responding at $1; set SAMPLE_ADDR/ENGINE_ADDR to free ports" >&2
+    exit 1
+  fi
+}
 
+echo "==> building tmula"
+( cd server && go build -o ../bin/tmula ./cmd/tmula )
+
+ensure_not_up "http://${SAMPLE_ADDR}/healthz" "sample API"
 echo "==> starting sample shop API on ${SAMPLE_ADDR}"
-SAMPLE_API_ADDR="${SAMPLE_ADDR}" go run ./examples/sample-api >/tmp/sample-api.log 2>&1 &
+( cd server && SAMPLE_API_ADDR="${SAMPLE_ADDR}" go run ./examples/sample-api ) >/tmp/sample-api.log 2>&1 &
 pids+=($!)
 wait_up "http://${SAMPLE_ADDR}/healthz"
 
+ensure_not_up "http://${ENGINE_ADDR}/healthz" "tmula engine"
 echo "==> starting tmula engine on ${ENGINE_ADDR}"
 ./bin/tmula --role local --addr "${ENGINE_ADDR}" >/tmp/tmula-demo.log 2>&1 &
 pids+=($!)

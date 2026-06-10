@@ -1,6 +1,6 @@
 # Compact tmula scenario — a concert-ticket purchase. Drive it with the CLI:
 #
-#   go run ./examples/ticketing-api        # another terminal (listens on :9100)
+#   ( cd server && go run ./examples/ticketing-api )  # another terminal (listens on :9100)
 #   tmula run examples/ticketing/scenario.yaml --users 80
 #
 # `flow` steps run in order; consecutive steps are linked automatically and a

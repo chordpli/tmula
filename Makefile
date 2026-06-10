@@ -1,7 +1,8 @@
 # tmula — build/test pipeline (SSOT for local + CI commands)
 SHELL := /bin/bash
 BINARY := bin/tmula
-PKG := ./...
+SERVER_DIR := server
+SERVER_PKG := ./...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 .PHONY: all build go-build web-build embed web demo dev test vet fmt lint run clean tidy
@@ -13,7 +14,7 @@ build: go-build
 
 go-build:
 	@mkdir -p bin
-	go build -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/engine
+	cd $(SERVER_DIR) && go build -ldflags "-X main.version=$(VERSION)" -o ../$(BINARY) ./cmd/tmula
 
 ## web-build: build the React UI (verifies the front-end compiles).
 web-build:
@@ -21,24 +22,24 @@ web-build:
 
 ## embed: build the UI and copy assets into the Go embed dir, then build.
 embed: web-build
-	rm -rf internal/web/static/assets
-	cp -R web/dist/. internal/web/static/
+	rm -rf $(SERVER_DIR)/internal/web/static/assets
+	cp -R web/dist/. $(SERVER_DIR)/internal/web/static/
 	$(MAKE) go-build
 
 ## test: run Go unit tests.
 test:
-	go test $(PKG)
+	cd $(SERVER_DIR) && go test $(SERVER_PKG)
 
 vet:
-	go vet $(PKG)
+	cd $(SERVER_DIR) && go vet $(SERVER_PKG)
 
 ## fmt: format Go sources in place.
 fmt:
-	gofmt -w .
+	cd $(SERVER_DIR) && gofmt -w .
 
 ## lint: vet + gofmt verification (fails if any file needs formatting).
 lint: vet
-	@unformatted="$$(gofmt -l . | grep -v '/node_modules/' || true)"; \
+	@unformatted="$$(cd $(SERVER_DIR) && gofmt -l .)"; \
 	if [ -n "$$unformatted" ]; then echo "gofmt needed on:"; echo "$$unformatted"; exit 1; fi
 
 ## run: build and run a local engine on :8080 (placeholder UI; use `make web` for the real UI).
@@ -58,8 +59,8 @@ web: embed
 demo: embed
 	@echo "→ tmula console: http://localhost:8080   (shop SUT :9000 · ticketing SUT :9100) — Ctrl-C to stop"
 	@bash -c 'trap "kill 0" EXIT INT TERM; \
-	  SAMPLE_API_ADDR=:9000 go run ./examples/sample-api & \
-	  TICKETING_API_ADDR=:9100 go run ./examples/ticketing-api & \
+	  (cd $(SERVER_DIR) && SAMPLE_API_ADDR=:9000 go run ./examples/sample-api) & \
+	  (cd $(SERVER_DIR) && TICKETING_API_ADDR=:9100 go run ./examples/ticketing-api) & \
 	  $(BINARY) --role local --addr :8080'
 
 ## dev: hot-reload UI dev server (proxies /api to a separately running engine).
@@ -71,4 +72,4 @@ tidy:
 	go mod tidy
 
 clean:
-	rm -rf bin web/dist internal/web/static/assets
+	rm -rf bin web/dist $(SERVER_DIR)/internal/web/static/assets

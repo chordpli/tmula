@@ -617,7 +617,7 @@ Health check: `GET /healthz` returns `{"status":"ok","role":...,"version":...}`.
 
 ## Findings explained
 
-A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }`. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`internal/obs/finding.go`). First, two predicates used throughout:
+A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }`. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`server/internal/obs/finding.go`). First, two predicates used throughout:
 
 - A request **failed** when `statusCode >= 400` **or** it carries an `errorClass` (e.g. `"timeout"`, `"transport"`, `"assertion"`).
 - A request is **unavailable** when `statusCode >= 500` **or** `errorClass == "timeout"` **or** `errorClass == "transport"`.
@@ -670,7 +670,7 @@ You rarely need to hand-author the graph + templates. The importer turns an **Op
 
 **Journey-ordering heuristic.** The OpenAPI importer orders the imported steps into a plausible user journey (e.g. list before detail, reads before writes) rather than spec order, so the resulting flow reads like a real path through the API. Review the generated steps, fill in path parameters and request bodies, then run.
 
-Ready-made examples live in [`examples/imports/`](../examples/imports): `shop.openapi.yaml`, `shop.openapi`'s HAR sibling `shop-session.har`, and `ticketing.openapi.yaml`. They target `http://localhost:9000`, lining up with the bundled `examples/sample-api`.
+Ready-made examples live in [`examples/imports/`](../examples/imports): `shop.openapi.yaml`, `shop.openapi`'s HAR sibling `shop-session.har`, and `ticketing.openapi.yaml`. They target `http://localhost:9000`, lining up with the bundled `server/examples/sample-api`.
 
 ---
 
@@ -724,7 +724,7 @@ You can also set workers per-experiment via the RunSpec `workers` field (or the 
 
 ## Safety
 
-Because tmula deliberately concentrates traffic, a misfire would be a self-inflicted outage. Three guards (`internal/safety`) make that hard to do by accident; every outbound request passes all three.
+Because tmula deliberately concentrates traffic, a misfire would be a self-inflicted outage. Three guards (`server/internal/safety`) make that hard to do by accident; every outbound request passes all three.
 
 - **Allowlist.** A host allowlist (`TargetEnv.Allowlist`): the only hosts a run may reach. A request whose host is not on the list is blocked (`safety: host "<h>" not in allowlist`). Patterns are exact, or a leading `*.` wildcard (`*.example.com`). The allowlist must be non-empty; there is no "reach anything" mode.
 - **Rate cap.** A hard ceiling: `rateCap.maxRps` (a token bucket, burst capped at one second of rate) and `rateCap.maxConcurrency` (in-flight ceiling). Both must be `> 0`. Exceeding either yields a `LimitError` for that request rather than overrunning the target.
@@ -739,7 +739,7 @@ Together these mean a run cannot reach a host you did not list, cannot exceed th
 
 Two runnable demos double as a catalog of *deliberately planted bugs*, so you know what findings to expect when you point tmula at them. Pick one as a web **preset** (it fills the scenario *and* the target) or run it from the CLI.
 
-### shop - `examples/sample-api` (`:9000`)
+### shop - `server/examples/sample-api` (`:9000`)
 
 Journey: `browse → search / category → product → cart → checkout → done`. Planted bugs:
 
@@ -752,7 +752,7 @@ Journey: `browse → search / category → product → cart → checkout → don
 | `POST /cart` | ~8% return **500** - an intermittent "cart hiccup" | **contract** |
 | `POST /checkout` | ~8% baseline failures that **climb with concurrent load**, capped at 40% (503) - degraded under pressure, never fully down, recovers when load eases | **contract** + elevated **threshold** error rate under load |
 
-### ticketing - `examples/ticketing-api` (`:9100`)
+### ticketing - `server/examples/ticketing-api` (`:9100`)
 
 Journey: `events → detail → seats → hold → pay → done`. Planted bugs:
 

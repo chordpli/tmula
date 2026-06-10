@@ -204,8 +204,8 @@ Two complete, runnable demos make it clear how to point tmula at your own API - 
 
 | Example | What it is | Planted bugs it surfaces |
 |---------|-----------|--------------------------|
-| **shop** - `examples/sample-api` (`:9000`) | A branching store journey: `browse → search / category → product → cart → checkout` | ~8% cart 500s, a checkout that degrades under load, product 404s, a search latency tail |
-| **ticketing** - `examples/ticketing-api` (`:9100`) | A concert-seat purchase: `events → detail → seats → hold → pay` | Seat-contention 409s, a payment gateway that buckles in the on-sale rush, sold-out 404s |
+| **shop** - `server/examples/sample-api` (`:9000`) | A branching store journey: `browse → search / category → product → cart → checkout` | ~8% cart 500s, a checkout that degrades under load, product 404s, a search latency tail |
+| **ticketing** - `server/examples/ticketing-api` (`:9100`) | A concert-seat purchase: `events → detail → seats → hold → pay` | Seat-contention 409s, a payment gateway that buckles in the on-sale rush, sold-out 404s |
 
 Each ships a sample API server, a behavior graph + templates, and an importable **OpenAPI / HAR**
 ([`examples/imports/`](examples/imports)). Full reference - the **User manual**
@@ -221,26 +221,22 @@ scales out to gRPC master/worker for large runs. Client-side observation is the 
 metrics are opt-in.
 
 ```
-cmd/engine             entrypoint: serve (--role local|master|worker), run, init
-internal/domain        core model: experiments, scenario graphs, virtual users, ...
-internal/engine        scenario graph execution (dependency edges inviolable)
-internal/load          virtual users, load profiles, protocol adapters
-internal/workload      open-model (arrival-rate) scheduler + capacity planning
-internal/obs           observation collector, finding classification, mergeable summary
-internal/safety        allowlist, rate cap, kill switch
-internal/store         in-memory (local) + Postgres (distributed) persistence
-internal/cluster       gRPC master/worker for distributed runs
-internal/pipeline      buffered metric ingest for high-frequency persistence
-internal/scenariofile  compact scenario file (YAML/JSON) -> RunSpec
-internal/importer      OpenAPI / HAR -> scenario scaffold
-internal/report        standalone HTML report + run-to-run comparison
-internal/web           embedded React UI
-web/                   React + Vite control-plane UI
-examples/              sample APIs, scenarios, one-command demo, USAGE guide
+server/                  Go backend module
+server/cmd/tmula         entrypoint: serve (--role local|master|worker), run, init
+server/internal/domain   core model: experiments, scenario graphs, virtual users, ...
+server/internal/engine   scenario graph execution (dependency edges inviolable)
+server/internal/load     virtual users, load profiles, protocol adapters
+server/internal/workload open-model (arrival-rate) scheduler + capacity planning
+server/internal/obs      observation collector, finding classification, mergeable summary
+server/internal/safety   allowlist, rate cap, kill switch
+server/internal/store    in-memory (local) + Postgres (distributed) persistence
+server/internal/cluster  gRPC master/worker for distributed runs
+server/internal/web      embedded React UI
+server/proto             protobuf contracts for distributed workers
+server/examples          Go sample API servers used by the demos
+web/                     React + Vite control-plane UI
+examples/                scenario files, imports, one-command demo, USAGE guide
 ```
-
-Design docs - requirements, brief, tech spec, plan - live in
-[`context/001-user-traffic-simulator/`](context/001-user-traffic-simulator).
 
 ---
 

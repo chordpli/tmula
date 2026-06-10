@@ -3,7 +3,7 @@ info:
   title: Ticketing API
   version: "1.0.0"
   description: >
-    The demo concert-ticketing API (examples/ticketing-api): list shows, view one,
+    The demo concert-ticketing API (server/examples/ticketing-api): list shows, view one,
     check seats, hold a seat, pay. Import it from the web UI (Scenario card ->
     Import from OpenAPI / HAR) or with
     `tmula init --from examples/imports/ticketing.openapi.yaml` to scaffold a

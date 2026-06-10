@@ -3,15 +3,17 @@
 .git
 .github
 .claude
+.codex
 .omc
 .shots
+context
 bin
 docs
 # The web build is regenerated inside the image; never ship local node_modules/dist.
 web/node_modules
 web/dist
 # Stale embedded assets from a local `make embed`; the image embeds a fresh build.
-internal/web/static/assets
+server/internal/web/static/assets
 # Docs and editor cruft — not needed to build.
 **/*.log
 .DS_Store

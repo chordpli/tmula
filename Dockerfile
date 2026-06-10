@@ -21,11 +21,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # Replace the committed placeholder UI with the real build before `go build`
-# bakes internal/web/static into the binary via go:embed.
-RUN rm -rf internal/web/static/assets
-COPY --from=web /web/dist/ internal/web/static/
+# bakes server/internal/web/static into the binary via go:embed.
+RUN rm -rf server/internal/web/static/assets
+COPY --from=web /web/dist/ server/internal/web/static/
 ARG VERSION=docker
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/tmula          ./cmd/engine \
+WORKDIR /src/server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/tmula          ./cmd/tmula \
  && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"                            -o /out/sample-api     ./examples/sample-api \
  && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w"                            -o /out/ticketing-api  ./examples/ticketing-api
 
