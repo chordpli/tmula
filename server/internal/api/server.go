@@ -161,6 +161,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/trace", s.streamTrace)
 	s.mux.HandleFunc("GET /runs/{id}/heatmap", s.streamHeatmap)
 	s.mux.HandleFunc("GET /runs/{id}/latency-heatmap", s.streamLatencyHeatmap)
+	s.mux.HandleFunc("POST /runs/{id}/reproduce", s.reproduceFinding)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)

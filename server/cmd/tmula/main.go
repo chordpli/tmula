@@ -51,13 +51,17 @@ func main() {
 }
 
 // run dispatches subcommands. `tmula run ...` executes a one-shot experiment
-// from a scenario file (or flags) and prints the findings; every other
-// invocation starts the long-running engine (the back-compatible default).
+// from a scenario file (or flags) and prints the findings; `tmula reproduce`
+// replays a finished run's finding in isolation to classify its root cause;
+// every other invocation starts the long-running engine (the back-compatible
+// default).
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
 		case "run":
 			return runScenario(args[1:])
+		case "reproduce":
+			return runReproduce(args[1:])
 		case "init":
 			return initScenario(args[1:])
 		case "bench":
