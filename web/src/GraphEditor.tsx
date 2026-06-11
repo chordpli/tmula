@@ -557,7 +557,15 @@ function GraphPreview({
             route.index === selectedEdgeIndex ? 'editor-preview__edge--selected' : '',
             coldEdge(route.index).trim(),
           ].join(' ')}
-          style={route.kind === 'exit' ? undefined : { strokeWidth: edgeStrokeWidth(route.edge.weight) }}
+          style={
+            // Weight-to-thickness only applies where weight is a branch
+            // probability; a completion edge always carries weight 1 and would
+            // otherwise render as the fattest line in the graph, dwarfing the
+            // fixed-size arrowhead.
+            route.kind === 'exit' || route.kind === 'completion'
+              ? undefined
+              : { strokeWidth: edgeStrokeWidth(route.edge.weight) }
+          }
           d={route.d}
           markerEnd={
             route.kind === 'exit'
