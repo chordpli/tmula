@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/obs"
@@ -41,8 +43,9 @@ func HTML(d Data) ([]byte, error) {
 // CompareHTML renders a side-by-side comparison of two runs: per-metric deltas
 // (with direction and percent change) and a findings diff. A finding present
 // only in a is "resolved", only in b is "new", and in both is "persisting";
-// findings are keyed by (category, evidenceRef, description). Output is a
-// standalone HTML page with all dynamic values escaped.
+// findings are keyed by (category, evidenceRef) so run-specific numbers in
+// the description do not affect identity. Output is a standalone HTML page
+// with all dynamic values escaped.
 func CompareHTML(a, b Data) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := compareTmpl.Execute(&buf, newCompareView(a, b)); err != nil {
@@ -100,7 +103,42 @@ type findingGroup struct {
 	Severity domain.Severity
 	Label    string
 	Class    string // css class controlling the accent color
-	Findings []domain.Finding
+	Findings []findingRow
+}
+
+// findingRow is one finding flattened for display: the identity fields the
+// template always shows, plus the formatted evidence bundle when the finding
+// carries one (nil renders no evidence section at all).
+type findingRow struct {
+	Category    domain.FindingCategory
+	EvidenceRef string
+	Description string
+	Evidence    *evidenceView
+}
+
+// evidenceView is a finding's evidence bundle formatted for the template:
+// representative sessions as table rows, plus the status-code and run-window
+// timing distributions.
+type evidenceView struct {
+	Sessions     []evidenceSessionRow
+	StatusCounts []statusCount
+	TimeBuckets  []domain.EvidenceBucket
+}
+
+// evidenceSessionRow is one representative session formatted for display. ID
+// is the value to grep server logs for (the X-Tmula-Session-ID header); Seed
+// and UserIndex are the reproduce coordinates; Path is the pre-joined journey
+// ("" when the producing path ships no journeys, e.g. the distributed stream).
+type evidenceSessionRow struct {
+	ID         string
+	Seed       int64
+	UserIndex  int64
+	Persona    string
+	Path       string
+	StatusCode int
+	Latency    string // milliseconds, one decimal (matches statsRow)
+	ErrorClass string
+	TS         time.Time
 }
 
 func newReportView(d Data) reportView {
@@ -187,9 +225,9 @@ var severityMeta = map[domain.Severity]struct {
 // empty groups. Within a group the codebase's classifiers already emit findings
 // in a stable order, which is preserved.
 func groupFindings(fs []domain.Finding) []findingGroup {
-	bySev := map[domain.Severity][]domain.Finding{}
+	bySev := map[domain.Severity][]findingRow{}
 	for _, f := range fs {
-		bySev[f.Severity] = append(bySev[f.Severity], f)
+		bySev[f.Severity] = append(bySev[f.Severity], newFindingRow(f))
 	}
 	var groups []findingGroup
 	for _, sev := range severityOrder {
@@ -206,4 +244,54 @@ func groupFindings(fs []domain.Finding) []findingGroup {
 		})
 	}
 	return groups
+}
+
+// newFindingRow flattens one finding for display, formatting its evidence
+// bundle when present.
+func newFindingRow(f domain.Finding) findingRow {
+	return findingRow{
+		Category:    f.Category,
+		EvidenceRef: f.EvidenceRef,
+		Description: f.Description,
+		Evidence:    newEvidenceView(f.Evidence),
+	}
+}
+
+// newEvidenceView formats a finding's evidence bundle for the template; nil in,
+// nil out, so legacy findings render exactly as before.
+func newEvidenceView(ev *domain.FindingEvidence) *evidenceView {
+	if ev == nil {
+		return nil
+	}
+	v := &evidenceView{
+		StatusCounts: statusCounts(ev.StatusCounts),
+		TimeBuckets:  ev.TimeBuckets,
+	}
+	for _, s := range ev.Sessions {
+		v.Sessions = append(v.Sessions, evidenceSessionRow{
+			ID:         s.SessionID,
+			Seed:       s.Seed,
+			UserIndex:  s.UserIndex,
+			Persona:    s.Persona,
+			Path:       joinPath(s.Path),
+			StatusCode: s.StatusCode,
+			Latency:    fmt.Sprintf("%.1f", s.LatencyMs),
+			ErrorClass: s.ErrorClass,
+			TS:         s.TS,
+		})
+	}
+	return v
+}
+
+// joinPath renders a session's node journey as a single arrow-joined string,
+// so the template treats the path as one (escaped) value.
+func joinPath(path []domain.ID) string {
+	if len(path) == 0 {
+		return ""
+	}
+	parts := make([]string, len(path))
+	for i, id := range path {
+		parts[i] = string(id)
+	}
+	return strings.Join(parts, " → ")
 }

@@ -89,3 +89,20 @@ func TestFindingsFromSummary(t *testing.T) {
 		t.Error("did not expect a mutation finding (no mutated inputs)")
 	}
 }
+
+// TestFindingsFromSummaryEvidenceRefs: every summary-derived finding carries a
+// stable, non-empty evidence ref — "run-wide" for the coarse per-category
+// findings (a Summary has no per-API breakdown) and the metric identity for
+// threshold findings — so the run-comparison diff can key them reliably.
+func TestFindingsFromSummaryEvidenceRefs(t *testing.T) {
+	s := sampleSummary()
+	cfg := ClassifyConfig{ErrorRateThreshold: 0.1, AvailabilityRun: 2}
+	for _, f := range FindingsFromSummary("run-1", s, cfg) {
+		if f.EvidenceRef == "" {
+			t.Errorf("%s finding has an empty evidence ref: %+v", f.Category, f)
+		}
+		if f.Category != domain.FindingThreshold && f.EvidenceRef != "run-wide" {
+			t.Errorf("%s finding evidence ref = %q, want %q", f.Category, f.EvidenceRef, "run-wide")
+		}
+	}
+}

@@ -1,7 +1,8 @@
 name: tmula run
 description: >-
   Run a tmula traffic scenario against your service and gate CI on what broke:
-  journey regressions, contract violations, availability dips. The run summary
+  journey regressions, contract violations, availability dips. Optionally diff
+  against a baseline run so only new findings fail the job. The run summary
   lands on the workflow page, and optionally as a PR comment.
 branding:
   icon: activity
@@ -32,12 +33,37 @@ inputs:
     description: "Gate: 'findings' fails on any finding, 'warning'/'critical' on that severity and above, 'none' never fails."
     required: false
     default: findings
+  baseline-file:
+    description: >-
+      Path to a baseline report JSON (a previous `tmula run --json` output,
+      e.g. an artifact saved by the main-branch run). Turns on the regression
+      gate: the run fails only on findings new vs the baseline (exit 3), so
+      known problems do not block every PR. Combine with `fail-on: none` to
+      gate purely on regressions.
+    required: false
+    default: ''
+  known-issues:
+    description: >-
+      Path to a known-issues YAML; matching new findings are suppressed in the
+      baseline gate until their expires date. Only valid with baseline-file.
+    required: false
+    default: ''
   version:
-    description: tmula release tag to install (default latest).
+    description: tmula release tag to install (default latest). Pin this for reproducible runs.
     required: false
     default: ''
   comment:
     description: Post the run summary as a PR comment (needs the workflow's pull-requests write permission).
+    required: false
+    default: 'false'
+  pr-comment:
+    description: >-
+      Post the baseline gate verdict (the new / resolved / persisting /
+      suppressed table) as a PR comment, editing the same comment in place on
+      re-runs instead of stacking new ones like `comment` does. Without a
+      baseline it posts the full run summary. Needs the workflow's
+      pull-requests write permission; fork PRs get a read-only token, so the
+      comment is skipped with a warning there.
     required: false
     default: 'false'
   extra-args:
@@ -53,7 +79,11 @@ runs:
       env:
         TMULA_VERSION: ${{ inputs.version }}
       run: |
-        curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+        # Run the installer bundled with this action instead of piping it from
+        # the mutable main branch: GitHub checks the action repo out at the ref
+        # the workflow pinned in `uses:`, so the script is pinned along with it.
+        # The binary itself is selected by the `version` input (TMULA_VERSION).
+        sh "$GITHUB_ACTION_PATH/install.sh"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run scenario
@@ -65,6 +95,8 @@ runs:
         OPEN: ${{ inputs.open }}
         FOR: ${{ inputs.for }}
         FAIL_ON: ${{ inputs.fail-on }}
+        BASELINE_FILE: ${{ inputs.baseline-file }}
+        KNOWN_ISSUES: ${{ inputs.known-issues }}
         EXTRA: ${{ inputs.extra-args }}
       run: |
         args=()
@@ -79,6 +111,10 @@ runs:
           none|'') ;;
           *) echo "fail-on must be findings|warning|critical|none, got '$FAIL_ON'" >&2; exit 1 ;;
         esac
+        # The CLI validates these eagerly (bad path or malformed YAML fails in
+        # seconds, before the run), so they are passed through unchecked here.
+        [ -n "$BASELINE_FILE" ] && args+=(--baseline-file "$BASELINE_FILE")
+        [ -n "$KNOWN_ISSUES" ]  && args+=(--known-issues "$KNOWN_ISSUES")
         if [ -n "$EXTRA" ]; then
           # Word-split the raw args without glob-expanding a * or ? in them.
           set -f
@@ -116,4 +152,63 @@ runs:
       run: |
         if [ -n "${TMULA_SUMMARY:-}" ] && [ -f "$TMULA_SUMMARY" ]; then
           gh pr comment "$PR_NUMBER" -R "$REPO" --body-file "$TMULA_SUMMARY"
+        fi
+
+    - name: Upsert the baseline gate PR comment
+      # always(): the baseline gate's new findings make "Run scenario" exit 3,
+      # and that is exactly when this comment matters — it must run after the
+      # failure, before the job reports it. The composite action still fails
+      # with the run step's code; this step never overrides it (see below).
+      if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        # Context values cross into the script as env vars, never as ${{ }}
+        # template expansion inside run: (the classic script-injection vector).
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        if [ -z "${TMULA_SUMMARY:-}" ] || [ ! -f "$TMULA_SUMMARY" ]; then
+          echo "no run summary produced; skipping the gate comment" >&2
+          exit 0
+        fi
+        # One comment per job, found again on re-runs by this marker line.
+        # GITHUB_JOB is restricted to [A-Za-z0-9_-], so it is safe to embed.
+        export MARKER="<!-- tmula-gate-comment:${GITHUB_JOB} -->"
+        body="$RUNNER_TEMP/tmula-pr-comment.md"
+        {
+          echo "$MARKER"
+          # The gate table is the verdict a reviewer acts on; the CLI appends
+          # it at the end of the summary, so take everything from its heading.
+          # Without a baseline (or an older tmula) the section does not exist —
+          # post the whole run summary instead.
+          if grep -q '^### Baseline gate ' "$TMULA_SUMMARY"; then
+            sed -n '/^### Baseline gate /,$p' "$TMULA_SUMMARY"
+          else
+            cat "$TMULA_SUMMARY"
+          fi
+          echo
+          echo "_From workflow run [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID})._"
+        } > "$body"
+        # Upsert: PATCH the marker-matched comment if one exists, POST a new
+        # one otherwise. env.MARKER inside the jq program avoids splicing the
+        # marker into the filter; sed -n 1p (not head) drains the pipe so a
+        # multi-page listing cannot SIGPIPE under pipefail (--paginate runs
+        # the filter once per page, so only the first id line counts).
+        comment_id="$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+          --jq '[.[] | select(.body | startswith(env.MARKER)) | .id] | first // empty' \
+          | sed -n 1p || true)"
+        # A comment-plumbing failure (typically a fork PR's read-only token)
+        # must not repaint the job: its red/green has to keep mapping to the
+        # run step's exit code, so warn and stay green.
+        ok=1
+        if [ -n "$comment_id" ]; then
+          gh api --silent --method PATCH \
+            "repos/$REPO/issues/comments/$comment_id" -F body=@"$body" || ok=0
+        else
+          gh api --silent --method POST \
+            "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$body" || ok=0
+        fi
+        if [ "$ok" -eq 0 ]; then
+          echo "warning: could not post the gate comment (fork PRs get a read-only token; otherwise grant the workflow pull-requests: write)" >&2
         fi

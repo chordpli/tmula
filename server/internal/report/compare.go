@@ -40,7 +40,8 @@ type metricDelta struct {
 }
 
 // findingPair is a finding seen in both runs, carrying both occurrences so the
-// template can show each side's first-seen time if it differs.
+// template can show each side's description (whose numbers may differ) and
+// first-seen time.
 type findingPair struct {
 	A domain.Finding
 	B domain.Finding
@@ -139,29 +140,28 @@ func direction(a, b float64) string {
 }
 
 // findingKey identifies a finding for diffing. Two findings are "the same"
-// issue when their category, evidence reference and description match; run id
-// and first-seen time are deliberately excluded so the same issue across two
-// runs collapses to one key.
+// issue when their category and evidence reference match. The description is
+// deliberately excluded: it embeds run-specific numbers (counts, rates), so
+// keying on it would split the same issue into a new/resolved pair whenever
+// two runs disagree on exact counts — which under probabilistic load is
+// always. Run id and first-seen time are excluded so the same issue across
+// two runs collapses to one key. The classifiers guarantee a stable,
+// non-empty EvidenceRef per issue (API id, metric identity, or "run-wide").
 type findingKey struct {
 	category    domain.FindingCategory
 	evidenceRef string
-	description string
 }
 
 func keyOf(f domain.Finding) findingKey {
 	return findingKey{
 		category:    f.Category,
 		evidenceRef: f.EvidenceRef,
-		description: f.Description,
 	}
 }
 
 // diffFindings returns the findings in want whose key is absent from have.
 func diffFindings(want, have []domain.Finding) []domain.Finding {
-	present := make(map[findingKey]bool, len(have))
-	for _, f := range have {
-		present[keyOf(f)] = true
-	}
+	present := keySet(have)
 	var out []domain.Finding
 	for _, f := range want {
 		if !present[keyOf(f)] {
@@ -169,6 +169,43 @@ func diffFindings(want, have []domain.Finding) []domain.Finding {
 		}
 	}
 	return out
+}
+
+// keySet collects the finding keys of fs for membership tests.
+func keySet(fs []domain.Finding) map[findingKey]bool {
+	present := make(map[findingKey]bool, len(fs))
+	for _, f := range fs {
+		present[keyOf(f)] = true
+	}
+	return present
+}
+
+// BaselineDiff is a current run's findings diffed against a baseline run's,
+// bucketed by the same (category, evidenceRef) identity the comparison view
+// uses. It is the data a regression gate needs: only New should fail a CI job.
+type BaselineDiff struct {
+	New        []domain.Finding // present only in the current run (would fail the gate)
+	Resolved   []domain.Finding // present only in the baseline (fixed/gone)
+	Persisting []domain.Finding // present in both; carries the current run's occurrence
+}
+
+// DiffAgainstBaseline classifies the current run's findings relative to a
+// baseline run's. Every bucket is sorted most-severe first for deterministic
+// output. Persisting carries the current-run finding because its description
+// holds this run's numbers — what a CI table should show.
+func DiffAgainstBaseline(baseline, current []domain.Finding) BaselineDiff {
+	inBaseline := keySet(baseline)
+	var persisting []domain.Finding
+	for _, f := range current {
+		if inBaseline[keyOf(f)] {
+			persisting = append(persisting, f)
+		}
+	}
+	return BaselineDiff{
+		New:        sortFindings(diffFindings(current, baseline)),
+		Resolved:   sortFindings(diffFindings(baseline, current)),
+		Persisting: sortFindings(persisting),
+	}
 }
 
 // intersectFindings returns the findings present in both a and b, pairing each

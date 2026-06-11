@@ -269,12 +269,113 @@ type MetricSample struct {
 
 // Finding is a classified issue surfaced by a run.
 type Finding struct {
-	RunID       ID              `json:"runId"`
-	Category    FindingCategory `json:"category"`
-	Severity    Severity        `json:"severity"`
-	EvidenceRef string          `json:"evidenceRef,omitempty"`
-	FirstSeen   time.Time       `json:"firstSeen"`
-	Description string          `json:"description"`
+	RunID    ID              `json:"runId"`
+	Category FindingCategory `json:"category"`
+	Severity Severity        `json:"severity"`
+	// EvidenceRef is the stable identity of what the finding is about: the API
+	// id for per-endpoint findings, the metric name (e.g. "error-rate") for
+	// threshold findings, "run-wide" for summary-derived aggregates. It carries
+	// no run-specific numbers, so the same issue keys identically across runs.
+	EvidenceRef string    `json:"evidenceRef,omitempty"`
+	FirstSeen   time.Time `json:"firstSeen"`
+	Description string    `json:"description"`
+	// Count is the number of occurrences behind the finding (errors surfaced,
+	// contract violations, length of the failure streak). Zero when the
+	// category has no occurrence count (threshold findings carry rates, which
+	// stay in the description).
+	Count int `json:"count,omitempty"`
+	// Evidence, when present, is the diagnostic bundle behind the finding:
+	// representative sessions with reproduce coordinates, the status-code
+	// distribution and the failure timing across the run window. It is
+	// optional (omitempty) so findings persisted before the bundle existed —
+	// and the coarse summary-derived findings, which retain no per-request
+	// data — round-trip unchanged.
+	Evidence *FindingEvidence `json:"evidence,omitempty"`
+	// RootCauseClass is the verdict `tmula reproduce` stamps after replaying
+	// one of the finding's evidence sessions in isolation: RootCauseFunctional
+	// when every attempt reproduced the failure without load,
+	// RootCauseLoadDependent when none did, RootCauseFlaky in between. It is a
+	// signal, not a proof — the replay recreates the traffic composition, not
+	// the original timing or target state. Empty (omitted on the wire) until a
+	// reproduce pass runs, so legacy findings round-trip unchanged.
+	RootCauseClass string `json:"rootCauseClass,omitempty"`
+}
+
+// Root-cause classes a reproduce pass can stamp on a finding (see
+// Finding.RootCauseClass).
+const (
+	// RootCauseFunctional: the failure reproduced on every isolated attempt —
+	// it does not need load, so it is likely a plain functional bug.
+	RootCauseFunctional = "functional"
+	// RootCauseLoadDependent: the failure reproduced on no isolated attempt —
+	// it likely needs the original concurrency/saturation to manifest.
+	RootCauseLoadDependent = "load-dependent"
+	// RootCauseFlaky: the failure reproduced on some attempts only.
+	RootCauseFlaky = "flaky"
+)
+
+// FindingEvidence is the diagnostic bundle attached to a finding so it can be
+// acted on without re-running the experiment: which sessions hit the issue
+// (and how to replay them), which status codes came back, and when in the run
+// the occurrences clustered.
+//
+// JSON field naming here is part of the masking contract: the shared-report
+// path (api/share.go) runs the deny-by-default PII masker over the report
+// JSON, and that masker redacts any field whose NAME contains a sensitive
+// substring — including "session". Session and node ids are synthetic tmula
+// identifiers, not PII, so the wire names below ("vus", "vu", "path", ...)
+// are deliberately chosen to carry them past the masker intact.
+type FindingEvidence struct {
+	// Sessions are up to a handful of representative sessions behind the
+	// finding, chosen for diagnosability (the earliest occurrences plus the
+	// slowest of the rest) rather than arrival order. Empty when the producing
+	// path could not attribute requests to sessions.
+	Sessions []EvidenceSession `json:"vus,omitempty"`
+	// TimeBuckets distribute the finding's occurrences over four fixed
+	// quarters of the observed run window, so a report shows whether they
+	// cluster early in ramp-up or late in soak. Omitted when no occurrence
+	// carried a timestamp.
+	TimeBuckets []EvidenceBucket `json:"timeBuckets,omitempty"`
+	// StatusCounts tallies the HTTP status codes of every occurrence (not just
+	// the representative sessions). Transport-level failures carry no code and
+	// are visible through the sessions' ErrorClass instead.
+	StatusCounts map[int]int `json:"statusCounts,omitempty"`
+}
+
+// EvidenceSession is one representative session behind a finding: its
+// identity (the X-Tmula-Session-ID correlation value to grep server logs
+// for), the seed coordinates a reproduce command replays it from, the journey
+// it walked, and the request that surfaced the issue.
+type EvidenceSession struct {
+	// SessionID is the virtual-user/session label, sent to the target as the
+	// X-Tmula-Session-ID header on every request the session made.
+	SessionID string `json:"vu"`
+	// Seed is the session's walk seed and UserIndex the offset that derives it
+	// from the run seed (run seed + UserIndex == Seed): the pool index for the
+	// closed model, the arrival number for the open model, the global user
+	// index for a distributed shard.
+	Seed      int64 `json:"seed"`
+	UserIndex int64 `json:"userIndex"`
+	// Persona is the segment label the session was drawn from ("" when the run
+	// had no persona mix).
+	Persona string `json:"persona,omitempty"`
+	// Path is the node sequence the session traversed up to and including the
+	// request below. Empty when the producing path does not carry journeys
+	// (the distributed stream ships no per-request path).
+	Path []ID `json:"path,omitempty"`
+	// The request that surfaced the issue: status (0 for transport-level
+	// failures), latency, error class and completion time.
+	StatusCode int       `json:"statusCode,omitempty"`
+	LatencyMs  float64   `json:"latencyMs"`
+	ErrorClass string    `json:"errorClass,omitempty"`
+	TS         time.Time `json:"ts"`
+}
+
+// EvidenceBucket is one fixed quarter of the run window and how many of the
+// finding's occurrences fell into it.
+type EvidenceBucket struct {
+	Label string `json:"label"`
+	Count int    `json:"count"`
 }
 
 // MetricQuery names one PromQL expression to correlate with a run.

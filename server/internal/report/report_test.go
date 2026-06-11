@@ -159,6 +159,85 @@ func TestCompareHTMLClassifiesFindings(t *testing.T) {
 	}
 }
 
+// TestCompareKeyIgnoresRunSpecificCounts pins the diff identity: the same issue
+// (same category, same evidence ref) whose description differs only by the
+// run-specific numbers formatted into it must classify as persisting, never as
+// a new/resolved pair — under probabilistic load two runs almost never agree on
+// exact counts.
+func TestCompareKeyIgnoresRunSpecificCounts(t *testing.T) {
+	a := sampleData()
+	a.Run.ID = "run-a"
+	a.Findings = []domain.Finding{
+		{Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			EvidenceRef: "checkout", Description: "3 contract violation(s) on checkout"},
+		{Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: "error-rate", Description: "error rate 0.31 exceeded threshold 0.20"},
+	}
+	b := sampleData()
+	b.Run.ID = "run-b"
+	b.Findings = []domain.Finding{
+		{Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			EvidenceRef: "checkout", Description: "7 contract violation(s) on checkout"},
+		{Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: "error-rate", Description: "error rate 0.44 exceeded threshold 0.20"},
+	}
+
+	v := newCompareView(a, b)
+	if len(v.New) != 0 || len(v.Resolved) != 0 {
+		t.Fatalf("count-only differences must not split into new/resolved: new=%+v resolved=%+v", v.New, v.Resolved)
+	}
+	if len(v.Persisted) != 2 {
+		t.Fatalf("want 2 persisting findings, got %d: %+v", len(v.Persisted), v.Persisted)
+	}
+
+	// The rendered persisting entry shows both sides' numbers, so the count
+	// change is visible even though it no longer affects identity.
+	out, err := CompareHTML(a, b)
+	if err != nil {
+		t.Fatalf("CompareHTML: %v", err)
+	}
+	html := string(out)
+	for _, want := range []string{"3 contract violation(s)", "7 contract violation(s)"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("persisting entry missing %q (both runs' numbers should render)", want)
+		}
+	}
+}
+
+// TestCompareKeyDistinguishesEvidence pins that the (category, evidenceRef) key
+// keeps distinct issues apart: different endpoints, different threshold metrics
+// and different categories on the same endpoint never collapse into one
+// persisting entry.
+func TestCompareKeyDistinguishesEvidence(t *testing.T) {
+	a := sampleData()
+	a.Run.ID = "run-a"
+	a.Findings = []domain.Finding{
+		{Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			EvidenceRef: "orders", Description: "2 contract violation(s) on orders"},
+		{Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: "error-rate", Description: "error rate 0.31 exceeded threshold 0.20"},
+		// Same evidence ref as B's contract finding, different category.
+		{Category: domain.FindingAvailability, Severity: domain.SeverityCritical,
+			EvidenceRef: "checkout", Description: "6 consecutive failures on checkout"},
+	}
+	b := sampleData()
+	b.Run.ID = "run-b"
+	b.Findings = []domain.Finding{
+		{Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			EvidenceRef: "checkout", Description: "2 contract violation(s) on checkout"},
+		{Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: "p95-latency", Description: "p95 latency 900.0ms exceeded threshold 500.0ms"},
+	}
+
+	v := newCompareView(a, b)
+	if len(v.Persisted) != 0 {
+		t.Fatalf("distinct keys must not persist together, got %+v", v.Persisted)
+	}
+	if len(v.New) != 2 || len(v.Resolved) != 3 {
+		t.Fatalf("want 2 new + 3 resolved, got new=%d resolved=%d", len(v.New), len(v.Resolved))
+	}
+}
+
 func TestCompareHTMLEscapesAndZeroBaseline(t *testing.T) {
 	a := sampleData()
 	a.Stats.ErrorRate = 0 // zero baseline -> "new", not an infinity

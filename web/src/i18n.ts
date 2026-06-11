@@ -129,6 +129,9 @@ const en: Record<string, string> = {
   'help.start': 'Where every user begins.',
   'field.maxSteps': 'Max steps',
   'help.maxSteps': 'Longest path a user may take before stopping.',
+  'field.deviation': 'Deviation rate',
+  'help.deviation': 'Chance a user wanders off the weighted path at each step. 0 follows the scenario exactly.',
+  'unit.percent': '%',
   'field.users': 'Virtual users',
   'help.users': 'The size of the fixed user pool that loops through the scenario.',
   'check.trace': 'Show live traffic while the run streams',
@@ -227,6 +230,8 @@ const en: Record<string, string> = {
     'A random pause between each step of a user, picked between the min and max milliseconds — so traffic looks human, not instant.',
   'help.personas.tip':
     'Split arrivals into weighted user types, each able to start at a different node and use its own think time. Leave empty for one uniform crowd.',
+  'help.deviation.tip':
+    'Virtual users probabilistically deviate from the journey — exploring other paths or giving up mid-way. Dependency edges are never violated.',
 
   // Import (Feature B)
   'import.title': 'Import from OpenAPI / HAR / access log',
@@ -246,6 +251,19 @@ const en: Record<string, string> = {
   'import.success': 'Imported — review the scenario below.',
   'import.emptyError': 'Choose a file or paste a spec first.',
   'import.unavailable': 'Import is not available on this server.',
+  'import.coverage.title': 'Import coverage',
+  'import.coverage.summary':
+    '{requests} requests used · {skipped} lines skipped · {sessions} sessions · {clients} clients · {dropped} endpoints folded',
+  'import.coverage.partial':
+    'This import reflects only part of the captured traffic — {skipped} of {total} lines ({pct}%) were skipped.',
+  'import.coverage.full': 'Every usable line is reflected in the learned graph.',
+  'import.coverage.folded':
+    '{count} colder endpoint(s) beyond the graph cap were folded out; their traffic bridges across the kept nodes.',
+  'import.coverage.format': 'Detected as {format} format',
+  'import.coverage.samples': 'Skipped line samples',
+  'import.coverage.sample.line': 'Line',
+  'import.coverage.sample.text': 'Content',
+  'import.coverage.sample.reason': 'Reason',
 
   // Run
   'run.button': 'Run experiment',
@@ -262,6 +280,10 @@ const en: Record<string, string> = {
   'live.flow': 'aggregate flow map (>{max} {unit})',
   'unit.maxConcurrency': 'max concurrency',
   'unit.users': 'users',
+
+  // Attach mode (?run=<run-id> links, e.g. opened by `tmula demo`)
+  'attach.notFound':
+    'Run "{id}" was not found on this server — it may have finished and been cleaned up. Set up a new run below.',
 
   // Live run section
   'run.title': 'Run',
@@ -285,12 +307,39 @@ const en: Record<string, string> = {
   'stat.p99': 'Latency p99',
   'stat.max': 'max {ms} ms',
   'stat.timeouts': 'Timeouts',
+  // Journey-outcome headline: how journeys ended (reached done vs left at exit).
+  'stat.completionRate': 'Completion rate',
+  'stat.completionSub': '{count} of {started} journeys reached done',
+  'stat.dropOffRate': 'Drop-off rate',
+  'stat.dropOffSub': '{count} of {started} journeys left at exit',
 
   // Findings (ReportView)
   'metrics.title': 'Server metrics',
   'metrics.fetchError': 'Some series could not be fetched:',
   'findings.title': 'Findings',
   'findings.empty': 'No issues detected.',
+
+  // Finding evidence panel (ReportView). Session ids, personas, error classes and
+  // bucket labels are backend data and shown verbatim — only the chrome below is
+  // translated.
+  'evidence.summary': 'Evidence',
+  'evidence.summaryOne': 'Evidence · {count} representative session',
+  'evidence.summaryMany': 'Evidence · {count} representative sessions',
+  'evidence.sessionsTitle': 'Representative sessions',
+  'evidence.grepHint':
+    "Each session sent its ID as the X-Tmula-Session-ID header on every request — grep the target server's logs for an ID below to see exactly what that session did. Seed and user # are the coordinates to reproduce it.",
+  'evidence.col.session': 'Session',
+  'evidence.col.persona': 'Persona',
+  'evidence.col.seed': 'Seed',
+  'evidence.col.user': 'User #',
+  'evidence.col.path': 'Path to failure',
+  'evidence.col.status': 'Status',
+  'evidence.col.latency': 'Latency',
+  'evidence.col.error': 'Error',
+  'evidence.col.time': 'At',
+  'evidence.statusTitle': 'Status codes (all occurrences)',
+  'evidence.timingTitle': 'When in the run',
+  'evidence.rootCause': 'Root cause class:',
 
   // LiveGraph captions
   'graph.events.title': 'Live traffic',
@@ -393,6 +442,9 @@ const ko: Record<string, string> = {
   'help.start': '모든 사용자가 출발하는 지점입니다.',
   'field.maxSteps': '최대 단계',
   'help.maxSteps': '사용자가 멈추기 전까지 거칠 수 있는 가장 긴 경로입니다.',
+  'field.deviation': '경로 이탈률',
+  'help.deviation': '각 단계에서 사용자가 가중치 경로를 벗어날 확률입니다. 0이면 시나리오를 그대로 따릅니다.',
+  'unit.percent': '%',
   'field.users': '가상 사용자',
   'help.users': '시나리오를 반복하는 고정 사용자 풀의 크기입니다.',
   'check.trace': '실행이 스트리밍되는 동안 실시간 트래픽 보기',
@@ -489,6 +541,8 @@ const ko: Record<string, string> = {
     '사용자의 각 단계 사이에 두는 무작위 대기 시간으로, 최소~최대 밀리초 사이에서 정해집니다. 덕분에 트래픽이 즉각적이지 않고 사람처럼 보입니다.',
   'help.personas.tip':
     '도착하는 사용자를 가중치 있는 유형으로 나눕니다. 유형마다 다른 노드에서 시작하고 자기 생각 시간을 쓸 수 있습니다. 비우면 단일 균일 집단으로 실행합니다.',
+  'help.deviation.tip':
+    '가상 유저가 확률적으로 경로를 이탈(탐험/중도포기)합니다. 의존성 엣지는 절대 위반되지 않습니다.',
 
   // Import (Feature B)
   'import.title': 'OpenAPI / HAR / 액세스 로그에서 가져오기',
@@ -508,6 +562,19 @@ const ko: Record<string, string> = {
   'import.success': '가져왔습니다 — 아래 시나리오를 검토하세요.',
   'import.emptyError': '먼저 파일을 고르거나 명세를 붙여 넣으세요.',
   'import.unavailable': '이 서버에서는 가져오기를 사용할 수 없습니다.',
+  'import.coverage.title': '임포트 커버리지',
+  'import.coverage.summary':
+    '요청 {requests}건 사용 · {skipped}줄 스킵 · 세션 {sessions}개 · 클라이언트 {clients} · 접힌 엔드포인트 {dropped}개',
+  'import.coverage.partial':
+    '이 임포트는 캡처된 트래픽의 일부만 반영합니다 — 전체 {total}줄 중 {skipped}줄({pct}%)을 건너뛰었습니다.',
+  'import.coverage.full': '사용 가능한 모든 줄이 학습된 그래프에 반영되었습니다.',
+  'import.coverage.folded':
+    '그래프 상한을 넘는 한산한 엔드포인트 {count}개를 접었습니다 — 해당 트래픽은 남은 노드 사이로 이어집니다.',
+  'import.coverage.format': '{format} 포맷으로 감지됨',
+  'import.coverage.samples': '건너뛴 줄 샘플',
+  'import.coverage.sample.line': '줄',
+  'import.coverage.sample.text': '내용',
+  'import.coverage.sample.reason': '사유',
 
   // Run
   'run.button': '실험 실행',
@@ -524,6 +591,10 @@ const ko: Record<string, string> = {
   'live.flow': '집계 흐름도 (>{max} {unit})',
   'unit.maxConcurrency': '최대 동시 실행',
   'unit.users': '사용자',
+
+  // 어태치 모드 (?run=<run-id> 링크 — 예: `tmula demo`가 여는 주소)
+  'attach.notFound':
+    '실행 "{id}"을(를) 이 서버에서 찾을 수 없습니다 — 이미 끝나 정리되었을 수 있습니다. 아래에서 새 실행을 설정하세요.',
 
   // Live run section
   'run.title': '실행',
@@ -547,12 +618,38 @@ const ko: Record<string, string> = {
   'stat.p99': '지연 p99',
   'stat.max': '최대 {ms} ms',
   'stat.timeouts': '타임아웃',
+  // 여정 결과 헤드라인: 완주(done 도달) 대 이탈(exit 도달).
+  'stat.completionRate': '완주율',
+  'stat.completionSub': '{started}개 여정 중 {count}개가 완료(done)에 도달했습니다',
+  'stat.dropOffRate': '이탈률',
+  'stat.dropOffSub': '{started}개 여정 중 {count}개가 중간에 이탈(exit)했습니다',
 
   // Findings (ReportView)
   'metrics.title': '서버 메트릭',
   'metrics.fetchError': '일부 시계열을 가져오지 못했습니다:',
   'findings.title': '발견 항목',
   'findings.empty': '발견된 문제가 없습니다.',
+
+  // 발견 항목의 증거 패널 (ReportView). 세션 ID·페르소나·오류 분류·구간 라벨은
+  // 백엔드 데이터라 그대로 보여 주고, 주변 UI 문구만 번역합니다.
+  'evidence.summary': '증거',
+  'evidence.summaryOne': '증거 · 대표 세션 {count}건',
+  'evidence.summaryMany': '증거 · 대표 세션 {count}건',
+  'evidence.sessionsTitle': '대표 세션',
+  'evidence.grepHint':
+    '각 세션은 모든 요청에 자기 ID를 X-Tmula-Session-ID 헤더로 보냈습니다. 대상 서버 로그에서 아래 ID로 grep 하면 그 세션이 한 일을 정확히 볼 수 있습니다. 시드와 사용자 번호는 세션을 재현하는 좌표입니다.',
+  'evidence.col.session': '세션',
+  'evidence.col.persona': '페르소나',
+  'evidence.col.seed': '시드',
+  'evidence.col.user': '사용자 #',
+  'evidence.col.path': '실패까지의 경로',
+  'evidence.col.status': '상태',
+  'evidence.col.latency': '지연',
+  'evidence.col.error': '오류',
+  'evidence.col.time': '시각',
+  'evidence.statusTitle': '상태 코드 분포 (전체 발생 기준)',
+  'evidence.timingTitle': '실행 중 발생 시점',
+  'evidence.rootCause': '근본 원인 분류:',
 
   // LiveGraph captions
   'graph.events.title': '실시간 트래픽',

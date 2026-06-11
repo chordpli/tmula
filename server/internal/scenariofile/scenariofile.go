@@ -29,6 +29,7 @@ import (
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
+	"github.com/chordpli/tmula/server/internal/obs"
 	"github.com/chordpli/tmula/server/internal/runspec"
 	"github.com/chordpli/tmula/server/internal/scenario"
 )
@@ -63,6 +64,12 @@ type Scenario struct {
 	MaxSteps int `json:"maxSteps,omitempty"`
 	// Seed makes a run reproducible (default 1).
 	Seed int64 `json:"seed,omitempty"`
+	// DeviationRate is the per-step probability (0..1) that a virtual user
+	// departs from the weighted happy path — abandoning the journey early or
+	// exploring an unlikely transition — instead of following the scripted
+	// weights. Dependency edges are never violated. Default 0: every user
+	// follows the happy path, exactly as before.
+	DeviationRate float64 `json:"deviationRate,omitempty"`
 	// Open, when set, switches the run to the open (arrival-rate) model.
 	Open *Open `json:"open,omitempty"`
 	// Segments is an optional persona mix (open model only).
@@ -75,6 +82,11 @@ type Scenario struct {
 	// each named query is fetched over the run's window and shown in the report
 	// beside the client-side stats. The Prometheus host must be allowlisted.
 	Metrics *Metrics `json:"metrics,omitempty"`
+	// Findings, when set, tunes the thresholds that classify the run's
+	// observations into findings: errorRate (0..1], p95LatencyMs (the gate is
+	// disabled when omitted) and availabilityStreak (consecutive failures on
+	// one API). Omit the block — or any field — to keep the defaults.
+	Findings *obs.FindingConfig `json:"findings,omitempty"`
 }
 
 // Metrics is the compact server-metrics block: a Prometheus base URL and the
@@ -226,6 +238,18 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 		allow = []string{host}
 	}
 
+	// Reject a malformed deviation rate here with a scenariofile-prefixed message
+	// rather than deferring to the spec's experiment validation downstream.
+	if s.DeviationRate < 0 || s.DeviationRate > 1 {
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: deviationRate %v out of range [0,1]", s.DeviationRate)
+	}
+
+	// Same early rejection for the findings block: a threshold the classifier
+	// could never apply fails here with a scenariofile-prefixed message.
+	if err := s.Findings.Validate(); err != nil {
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
+	}
+
 	seed := s.Seed
 	if seed == 0 {
 		seed = 1
@@ -238,7 +262,7 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 	spec := runspec.RunSpec{
 		Experiment: domain.Experiment{
 			Name: "cli-run", TargetEnvID: "env", ScenarioGraphID: graph.ID,
-			Params: domain.ExperimentParams{DeviationRate: 0, AuthStrategy: domain.CredPool},
+			Params: domain.ExperimentParams{DeviationRate: s.DeviationRate, AuthStrategy: domain.CredPool},
 		},
 		TargetEnv: domain.TargetEnv{
 			BaseURL: s.Target, Allowlist: allow, RateCap: defaultRateCap, EnvClass: domain.EnvDev,
@@ -248,6 +272,9 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 		Start:     domain.ID(start),
 		MaxSteps:  maxSteps,
 		Seed:      seed,
+		// Findings passes through untouched (nil keeps the classifier defaults);
+		// the run path resolves it into the ClassifyConfig at execution time.
+		Findings: s.Findings,
 	}
 
 	if s.Open != nil {

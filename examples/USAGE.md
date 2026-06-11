@@ -78,8 +78,10 @@ Findings (4):
 ```bash
 tmula run scenario.yaml --users 80 --fail-on-findings           # findings 있으면 exit 2
 tmula run scenario.yaml --users 80 --fail-on-severity critical  # critical 만 게이트
+tmula run scenario.yaml --users 80 --baseline-file main.json    # 베이스라인 대비 새 finding만 exit 3
 ```
-종료코드: **0 정상 · 1 에러 · 2 findings**. 실패/킬된 런은 findings 무관 비정상 종료.
+종료코드: **0 정상 · 1 에러 · 2 findings · 3 베이스라인 대비 새 findings**(`--baseline`/`--baseline-file`,
+`--known-issues`로 수용된 finding 억제). 실패/킬된 런은 findings 무관 비정상 종료.
 
 ### `tmula bench` - 용량(capacity) 한 줄 측정
 
@@ -141,15 +143,18 @@ segments:                    # 선택: 페르소나 믹스 (open 전용)
 
 ### 기존 API에서 시작: `tmula init`
 
-빈 시나리오를 손으로 쓰지 말고, OpenAPI 스펙이나 HAR 녹화에서 초벌 시나리오를 생성하세요.
+빈 시나리오를 손으로 쓰지 말고, OpenAPI 스펙·HAR 녹화·액세스 로그에서 초벌 시나리오를 생성하세요.
 
 ```bash
 tmula init --from openapi.yaml --out scenario.yaml   # OpenAPI(서버/경로/예시 바디)에서
 tmula init --from session.har  --out scenario.yaml   # 브라우저 HAR 녹화(요청 순서 그대로)에서
+tmula init --from access.log --target http://staging:9000 --out scenario.yaml  # 액세스 로그에서 그래프 학습
 # 그 다음 스텝 순서/바디만 다듬고:
 tmula run scenario.yaml --users 50
 ```
-> 생성물은 시작점입니다. 경로 파라미터(`{id}`)·바디·스텝 순서를 검토하세요. 형식은 `--format openapi|har`로 강제할 수 있고, `--target`으로 대상 URL을 덮어쓸 수 있습니다.
+> 생성물은 시작점입니다. 경로 파라미터(`{id}`)·바디·스텝 순서를 검토하세요. 형식은 `--format openapi|har|accesslog`로 강제할 수 있고, `--target`으로 대상 URL을 덮어쓸 수 있습니다(로그에는 호스트가 없어 필수).
+>
+> 액세스 로그는 한 단계 더 갑니다. 분기 그래프를 트래픽에서 **학습**해 관찰된 분기 가중치·think time·open 워크로드 제안까지 채운 graph-first 시나리오를 내고, 포맷은 내용으로 자동 감지합니다(nginx/Apache combined · JSON lines · AWS ALB · CloudFront · Caddy · Traefik). 학습 커버리지(사용/스킵 줄 수, 세션·클라이언트 수, 접힌 엔드포인트)는 stderr 노트로 보고됩니다. 자세한 동작은 [사용자 매뉴얼의 액세스 로그 학습 절](../docs/guide.ko.md#액세스-로그에서-그래프-학습하기)을 보세요.
 
 ### 결과를 HTML로 보기 / 두 런 비교
 
@@ -161,7 +166,21 @@ curl -s "$API/runs/$RUN/report.html" > report.html
 curl -s "$API/runs/compare?a=$RUN_BEFORE&b=$RUN_AFTER" > compare.html
 ```
 
-## Step 1b - 풀스택 데모 한 방
+## Step 1b - 풀스택 데모 한 방: `tmula demo`
+
+```bash
+./bin/tmula demo                # 60초 창; --duration 30s · --no-browser · --addr :8081
+```
+
+한 명령으로 전체 루프를 돌립니다. 심은 버그가 있는 미니 shop을 에페메랄 포트에 띄우고,
+그 shop의 액세스 로그에서 행동 그래프를 **학습**해, 같은 프로세스의 엔진(+웹 콘솔, 기본
+`:8080`)으로 학습된 트래픽을 재생한 뒤, findings 요약과 다음 단계(붙여넣기 가능한
+`tmula reproduce` 명령, HTML 리포트 URL, 내 서비스에 붙이는 `tmula init`/`tmula run` 짝)를
+출력합니다. 요약 후에도 Ctrl-C까지 떠 있어 그 명령들이 그대로 동작합니다. jq/curl이
+필요 없습니다. (브라우저 콘솔 페이지는 UI가 임베드된 바이너리에서만 진짜 콘솔입니다 -
+Step 3 참고. 터미널 요약과 report.html은 어느 빌드에서나 나옵니다.)
+
+**수동 경로** - 같은 흐름을 스크립트로 한 줄씩 따라가고 싶다면:
 
 ```bash
 ./examples/run-demo.sh          # 기본 60 유저
@@ -624,5 +643,5 @@ curl -fsS -X POST "$API/experiments" -H 'Content-Type: application/json' -d "$(j
 
 ## 권장 도입 순서
 
-데모(Step 1) → curl로 closed 1회(Step 4) → 내 API(Step 5) → open + capacity(Step 7) →
-페르소나(Step 8) → 분산 + 집계(Step 10).
+`tmula demo`(Step 1b) → CLI 한 줄(Step 1) → curl로 closed 1회(Step 4) → 내 API(Step 5) →
+open + capacity(Step 7) → 페르소나(Step 8) → 분산 + 집계(Step 10).

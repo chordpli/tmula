@@ -286,6 +286,12 @@ func LoadSummary(d SummaryData) (*Summary, error) {
 // fidelity for bounded memory is the entire point. The category order matches
 // Aggregator.Classify (mutation, contract, availability, threshold).
 //
+// For the same reason these findings carry NO evidence bundle (Finding.Evidence
+// stays nil): evidence needs per-request session context, and discarding
+// per-request data is precisely what the Summary buys its bounded memory with.
+// Runs that need diagnosable findings should use the streaming distributed path
+// (or a local run), where the Aggregator sees every observation.
+//
 // The threshold signals here (error rate and p95) are computed from the
 // Summary's Stats, i.e. from total/errors/the histogram, which count ALL
 // observations including mutated requests. Aggregator.classifyThreshold instead
@@ -298,21 +304,27 @@ func FindingsFromSummary(runID domain.ID, s *Summary, cfg ClassifyConfig) []doma
 	st := s.Stats()
 	counts := s.FindingCounts()
 	var out []domain.Finding
+	// The coarse findings have no per-API identity, so they all carry the
+	// run-wide evidence ref: stable and non-empty, which is what the run
+	// comparison's (category, evidenceRef) key needs.
 	if n := counts[domain.FindingMutation]; n > 0 {
 		out = append(out, domain.Finding{
 			RunID: runID, Category: domain.FindingMutation, Severity: domain.SeverityWarning,
+			EvidenceRef: evidenceRunWide, Count: n,
 			Description: fmt.Sprintf("mutated input surfaced %d error(s) across the run", n),
 		})
 	}
 	if n := counts[domain.FindingContract]; n > 0 {
 		out = append(out, domain.Finding{
 			RunID: runID, Category: domain.FindingContract, Severity: domain.SeverityCritical,
+			EvidenceRef: evidenceRunWide, Count: n,
 			Description: fmt.Sprintf("%d contract violation(s) across the run (unexpected error on the happy path)", n),
 		})
 	}
 	if n := counts[domain.FindingAvailability]; cfg.AvailabilityRun > 0 && n >= cfg.AvailabilityRun {
 		out = append(out, domain.Finding{
 			RunID: runID, Category: domain.FindingAvailability, Severity: domain.SeverityCritical,
+			EvidenceRef: evidenceRunWide, Count: n,
 			Description: fmt.Sprintf("%d unavailable response(s) across the run (saturation or downtime)", n),
 		})
 	}

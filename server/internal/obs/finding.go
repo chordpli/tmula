@@ -18,6 +18,28 @@ type RequestObservation struct {
 	ErrorClass string // "", "transport", "timeout", "assertion", ...
 	Mutated    bool
 	TS         time.Time
+
+	// Optional session context for evidence. All of it is best-effort: a
+	// producer that cannot attribute requests to sessions (the worker-side
+	// Summary path retains no per-request data at all) leaves these zero and
+	// classification is unaffected — only the findings' evidence bundles lose
+	// their per-session representatives.
+	//
+	// SessionID is the virtual-user/session label (the X-Tmula-Session-ID
+	// correlation value). Seed is the session's walk seed and UserIndex the
+	// offset deriving it from the run seed (run seed + UserIndex == Seed);
+	// both are meaningful only when SessionID is non-empty. Persona is the
+	// segment the session was drawn from ("" without a mix).
+	SessionID string
+	Seed      int64
+	UserIndex int64
+	Persona   string
+	// Path is the node sequence the session traversed up to and including
+	// this request. Producers attach it to FAILED observations only, as a
+	// reslice of the session's precomputed walk (shared, never copied), so
+	// the aggregator's per-observation footprint stays flat on healthy
+	// traffic even though it retains every observation until Classify.
+	Path []domain.ID
 }
 
 func (o RequestObservation) failed() bool {
@@ -50,6 +72,83 @@ type ClassifyConfig struct {
 	AvailabilityRun    int     // this many consecutive failures on an API -> availability finding
 }
 
+// Default classification thresholds, applied whenever a run does not configure
+// its own (see FindingConfig). They are the values every run classified with
+// before the findings block existed, so changing one silently re-grades runs.
+const (
+	DefaultErrorRateThreshold = 0.2
+	DefaultP95LatencyMs       = 0 // p95 gate disabled unless configured
+	DefaultAvailabilityRun    = 5
+)
+
+// DefaultClassifyConfig returns the thresholds an unconfigured run classifies
+// with: the long-standing 0.2 error rate, a 5-long availability streak, and
+// the p95 gate disabled.
+func DefaultClassifyConfig() ClassifyConfig {
+	return ClassifyConfig{
+		ErrorRateThreshold: DefaultErrorRateThreshold,
+		P95LatencyMs:       DefaultP95LatencyMs,
+		AvailabilityRun:    DefaultAvailabilityRun,
+	}
+}
+
+// FindingConfig is the optional, operator-facing findings block of a run spec:
+// the thresholds that classify a run's observations into findings. Every field
+// is optional — a zero (or omitted) value falls back to the package default —
+// so a spec without the block classifies exactly as before. The json tags are
+// the wire contract shared by the RunSpec and the compact scenario file.
+type FindingConfig struct {
+	// ErrorRate is the overall error-rate threshold (0..1] above which a run
+	// gets a threshold finding. Zero falls back to DefaultErrorRateThreshold.
+	ErrorRate float64 `json:"errorRate,omitempty"`
+	// P95LatencyMs gates the run's overall p95 latency: above this many
+	// milliseconds a threshold finding is raised. Zero keeps the gate disabled
+	// (the default).
+	P95LatencyMs float64 `json:"p95LatencyMs,omitempty"`
+	// AvailabilityStreak is how many consecutive failures on one API flag an
+	// availability finding. Zero falls back to DefaultAvailabilityRun.
+	AvailabilityStreak int `json:"availabilityStreak,omitempty"`
+}
+
+// Validate rejects thresholds that cannot classify anything sensibly: an error
+// rate outside [0,1] or a negative latency/streak. Zero values are fine — they
+// mean "use the default". It is nil-safe, like ClassifyConfig.
+func (c *FindingConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if c.ErrorRate < 0 || c.ErrorRate > 1 {
+		return fmt.Errorf("findings: errorRate %v out of range [0,1]", c.ErrorRate)
+	}
+	if c.P95LatencyMs < 0 {
+		return fmt.Errorf("findings: p95LatencyMs %v must not be negative", c.P95LatencyMs)
+	}
+	if c.AvailabilityStreak < 0 {
+		return fmt.Errorf("findings: availabilityStreak %d must not be negative", c.AvailabilityStreak)
+	}
+	return nil
+}
+
+// ClassifyConfig resolves the block into the thresholds the classifier runs
+// with, filling unset (zero) fields from the package defaults. It is nil-safe:
+// a spec that carries no findings block resolves to DefaultClassifyConfig.
+func (c *FindingConfig) ClassifyConfig() ClassifyConfig {
+	cfg := DefaultClassifyConfig()
+	if c == nil {
+		return cfg
+	}
+	if c.ErrorRate != 0 {
+		cfg.ErrorRateThreshold = c.ErrorRate
+	}
+	if c.P95LatencyMs != 0 {
+		cfg.P95LatencyMs = c.P95LatencyMs
+	}
+	if c.AvailabilityStreak != 0 {
+		cfg.AvailabilityRun = c.AvailabilityStreak
+	}
+	return cfg
+}
+
 // Aggregator collects observations and classifies findings across four
 // categories: threshold, contract, mutation and availability.
 type Aggregator struct {
@@ -80,14 +179,26 @@ func (a *Aggregator) Classify(runID domain.ID, cfg ClassifyConfig) []domain.Find
 	findings = append(findings, classifyContract(runID, obs)...)
 	findings = append(findings, classifyAvailability(runID, obs, cfg.AvailabilityRun)...)
 	findings = append(findings, classifyThreshold(runID, obs, cfg)...)
+	// Condense the retained observations into one bounded evidence bundle per
+	// finding. This happens once, at classification time, so the per-request
+	// hot path never builds evidence structures.
+	attachEvidence(findings, obs, cfg)
 	return findings
 }
+
+// hasEndpoint reports whether an observation can be attributed to a specific
+// API. Observations with an empty APIID come from walk/setup failures (a step
+// that never reached an endpoint), not endpoint behaviour, so the per-API
+// classifiers skip them — this is also what keeps every per-API finding's
+// EvidenceRef (the API id) non-empty, the invariant the run comparison relies
+// on (see report.findingKey).
+func (o RequestObservation) hasEndpoint() bool { return o.APIID != "" }
 
 func classifyMutation(runID domain.ID, obs []RequestObservation) []domain.Finding {
 	counts := map[domain.ID]int{}
 	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
-		if o.mutationSignal() {
+		if o.hasEndpoint() && o.mutationSignal() {
 			counts[o.APIID]++
 			if _, ok := firstSeen[o.APIID]; !ok {
 				firstSeen[o.APIID] = o.TS
@@ -104,7 +215,7 @@ func classifyContract(runID domain.ID, obs []RequestObservation) []domain.Findin
 	counts := map[domain.ID]int{}
 	firstSeen := map[domain.ID]time.Time{}
 	for _, o := range obs {
-		if o.contractSignal() {
+		if o.hasEndpoint() && o.contractSignal() {
 			counts[o.APIID]++
 			if _, ok := firstSeen[o.APIID]; !ok {
 				firstSeen[o.APIID] = o.TS
@@ -130,6 +241,9 @@ func classifyAvailability(runID domain.ID, obs []RequestObservation, run int) []
 	byAPI := map[domain.ID][]RequestObservation{}
 	order := make([]domain.ID, 0)
 	for _, o := range obs {
+		if !o.hasEndpoint() {
+			continue // walk/setup failure, not an endpoint's availability
+		}
 		if _, ok := byAPI[o.APIID]; !ok {
 			order = append(order, o.APIID)
 		}
@@ -188,19 +302,238 @@ func classifyThreshold(runID domain.ID, obs []RequestObservation, cfg ClassifyCo
 	return thresholdFindings(runID, rate, p95, cfg)
 }
 
+// Evidence refs for findings that have no single API to point at. The run
+// comparison keys findings by (category, evidenceRef), so each ref must be
+// stable across runs, non-empty and distinct per issue: the two threshold
+// findings carry their metric identity, and the Summary-derived coarse
+// findings (which aggregate a whole run) are marked run-wide.
+const (
+	evidenceErrorRate  = "error-rate"
+	evidenceP95Latency = "p95-latency"
+	evidenceRunWide    = "run-wide"
+)
+
 // thresholdFindings builds the 0-2 threshold findings shared by the obs-list and
 // Summary classifiers, so their messages and comparisons cannot drift.
 func thresholdFindings(runID domain.ID, errorRate, p95 float64, cfg ClassifyConfig) []domain.Finding {
 	var out []domain.Finding
 	if cfg.ErrorRateThreshold > 0 && errorRate > cfg.ErrorRateThreshold {
 		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: evidenceErrorRate,
 			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", errorRate, cfg.ErrorRateThreshold)})
 	}
 	if cfg.P95LatencyMs > 0 && p95 > cfg.P95LatencyMs {
 		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: evidenceP95Latency,
 			Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", p95, cfg.P95LatencyMs)})
 	}
 	return out
+}
+
+// --- finding evidence --------------------------------------------------------
+
+// maxEvidenceSessions caps how many representative sessions are condensed into
+// one finding's evidence bundle. The bundle exists to make a finding
+// diagnosable, not to be a request log, so a handful chosen for spread beats
+// hundreds in arrival order — and the cap is what keeps a finding's persisted
+// size flat no matter how many requests failed behind it.
+const maxEvidenceSessions = 5
+
+// evidenceBucketLabels are the four fixed quarters of the observed run window
+// the occurrence timing is bucketed into — coarse on purpose: enough to tell
+// "early in ramp-up" from "late in soak" without persisting a timeline.
+var evidenceBucketLabels = [4]string{"0-25%", "25-50%", "50-75%", "75-100%"}
+
+// attachEvidence condenses the observation list into one bounded evidence
+// bundle per finding: the observations matching each finding's identity become
+// its status distribution, its timing buckets, and up to maxEvidenceSessions
+// representative sessions. Findings whose observations yield nothing
+// diagnosable (no session context, no status codes, no timestamps) keep a nil
+// Evidence, so legacy-shaped findings remain byte-identical on the wire.
+func attachEvidence(findings []domain.Finding, obs []RequestObservation, cfg ClassifyConfig) {
+	if len(findings) == 0 {
+		return
+	}
+	// The observed run window — first to last timestamped observation — is the
+	// frame the timing buckets are relative to. The first observation lands
+	// moments after the run starts, so it is a faithful stand-in for the run
+	// start without threading the orchestrator's clock through Classify.
+	winMin, winMax := observationWindow(obs)
+	for i := range findings {
+		cand := evidenceCandidates(findings[i], obs, cfg)
+		if len(cand) == 0 {
+			continue
+		}
+		ev := &domain.FindingEvidence{
+			Sessions:     evidenceSessions(cand),
+			TimeBuckets:  evidenceBuckets(cand, winMin, winMax),
+			StatusCounts: evidenceStatusCounts(cand),
+		}
+		if ev.Sessions == nil && ev.TimeBuckets == nil && ev.StatusCounts == nil {
+			continue // nothing diagnosable; keep the legacy shape
+		}
+		findings[i].Evidence = ev
+	}
+}
+
+// evidenceCandidates returns the observations behind one finding, using the
+// same predicates the classifiers counted with so the evidence can never
+// disagree with the finding it backs. Threshold findings are run-wide: the
+// error-rate bundle draws from every non-mutated failure, and the p95 bundle
+// from every request over the gate — slowness, not failure, is its signal.
+func evidenceCandidates(f domain.Finding, obs []RequestObservation, cfg ClassifyConfig) []RequestObservation {
+	var match func(RequestObservation) bool
+	switch f.Category {
+	case domain.FindingMutation:
+		api := domain.ID(f.EvidenceRef)
+		match = func(o RequestObservation) bool { return o.hasEndpoint() && o.APIID == api && o.mutationSignal() }
+	case domain.FindingContract:
+		api := domain.ID(f.EvidenceRef)
+		match = func(o RequestObservation) bool { return o.hasEndpoint() && o.APIID == api && o.contractSignal() }
+	case domain.FindingAvailability:
+		api := domain.ID(f.EvidenceRef)
+		match = func(o RequestObservation) bool { return o.hasEndpoint() && o.APIID == api && o.unavailable() }
+	case domain.FindingThreshold:
+		switch f.EvidenceRef {
+		case evidenceErrorRate:
+			match = func(o RequestObservation) bool { return !o.Mutated && o.failed() }
+		case evidenceP95Latency:
+			match = func(o RequestObservation) bool { return !o.Mutated && o.LatencyMs > cfg.P95LatencyMs }
+		default:
+			return nil
+		}
+	default:
+		return nil
+	}
+	var out []RequestObservation
+	for _, o := range obs {
+		if match(o) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+// evidenceSessions picks up to maxEvidenceSessions representative sessions
+// from the candidates. Each session appears once (its earliest occurrence,
+// insertion-stable on equal timestamps); when over the cap the pick is the
+// earliest few — where an issue first surfaced — plus the slowest of the rest,
+// which together cover both onset and worst case. Candidates without a session
+// id (a producer that cannot attribute requests) yield no representatives.
+func evidenceSessions(cand []RequestObservation) []domain.EvidenceSession {
+	perSession := make(map[string]RequestObservation)
+	order := make([]string, 0)
+	for _, o := range cand {
+		if o.SessionID == "" {
+			continue
+		}
+		cur, ok := perSession[o.SessionID]
+		if !ok {
+			perSession[o.SessionID] = o
+			order = append(order, o.SessionID)
+		} else if o.TS.Before(cur.TS) {
+			perSession[o.SessionID] = o
+		}
+	}
+	if len(order) == 0 {
+		return nil
+	}
+	reps := make([]RequestObservation, 0, len(order))
+	for _, id := range order {
+		reps = append(reps, perSession[id])
+	}
+	sort.SliceStable(reps, func(i, j int) bool { return reps[i].TS.Before(reps[j].TS) })
+	if len(reps) > maxEvidenceSessions {
+		earliest := (maxEvidenceSessions + 1) / 2
+		head := reps[:earliest:earliest] // full slice expr: the append below must not clobber reps
+		rest := reps[earliest:]
+		sort.SliceStable(rest, func(i, j int) bool { return rest[i].LatencyMs > rest[j].LatencyMs })
+		reps = append(head, rest[:maxEvidenceSessions-earliest]...)
+	}
+	out := make([]domain.EvidenceSession, len(reps))
+	for i, o := range reps {
+		out[i] = domain.EvidenceSession{
+			SessionID:  o.SessionID,
+			Seed:       o.Seed,
+			UserIndex:  o.UserIndex,
+			Persona:    o.Persona,
+			Path:       o.Path,
+			StatusCode: o.StatusCode,
+			LatencyMs:  o.LatencyMs,
+			ErrorClass: o.ErrorClass,
+			TS:         o.TS,
+		}
+	}
+	return out
+}
+
+// evidenceBuckets distributes the candidates' timestamps over four fixed
+// quarters of the observed run window. Untimestamped candidates are skipped;
+// when none carry a time (or the run window is unknown) no buckets are
+// emitted. A zero-length window degenerates to everything in the first quarter.
+func evidenceBuckets(cand []RequestObservation, winMin, winMax time.Time) []domain.EvidenceBucket {
+	if winMin.IsZero() {
+		return nil
+	}
+	window := winMax.Sub(winMin)
+	var counts [4]int
+	any := false
+	for _, o := range cand {
+		if o.TS.IsZero() {
+			continue
+		}
+		q := 0
+		if window > 0 {
+			q = int(4 * o.TS.Sub(winMin) / window)
+			if q > 3 {
+				q = 3 // the window's last instant belongs to the final quarter
+			}
+		}
+		counts[q]++
+		any = true
+	}
+	if !any {
+		return nil
+	}
+	out := make([]domain.EvidenceBucket, len(counts))
+	for i, n := range counts {
+		out[i] = domain.EvidenceBucket{Label: evidenceBucketLabels[i], Count: n}
+	}
+	return out
+}
+
+// evidenceStatusCounts tallies the candidates' HTTP status codes. Codes <= 0
+// (transport-level failures) are skipped, matching Collector and Summary; a
+// candidate set with no real codes yields nil rather than an empty map.
+func evidenceStatusCounts(cand []RequestObservation) map[int]int {
+	var counts map[int]int
+	for _, o := range cand {
+		if o.StatusCode <= 0 {
+			continue
+		}
+		if counts == nil {
+			counts = make(map[int]int)
+		}
+		counts[o.StatusCode]++
+	}
+	return counts
+}
+
+// observationWindow returns the earliest and latest non-zero timestamps across
+// the observations; a zero winMin signals that nothing was timestamped.
+func observationWindow(obs []RequestObservation) (winMin, winMax time.Time) {
+	for _, o := range obs {
+		if o.TS.IsZero() {
+			continue
+		}
+		if winMin.IsZero() || o.TS.Before(winMin) {
+			winMin = o.TS
+		}
+		if winMax.IsZero() || o.TS.After(winMax) {
+			winMax = o.TS
+		}
+	}
+	return winMin, winMax
 }
 
 // findingsFromCounts builds one finding per API present in counts, in stable
@@ -225,6 +558,7 @@ func findingsFromCounts(runID domain.ID, cat domain.FindingCategory, sev domain.
 			EvidenceRef: string(api),
 			FirstSeen:   firstSeen[api],
 			Description: fmt.Sprintf(format, counts[api], api),
+			Count:       counts[api],
 		})
 	}
 	return out

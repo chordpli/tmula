@@ -173,6 +173,81 @@ func TestClassifyThreshold(t *testing.T) {
 	}
 }
 
+// TestThresholdFindingEvidenceRefs pins the diff identity of threshold
+// findings: each carries a stable, non-empty metric-identity evidence ref so
+// the error-rate and p95 findings never collide with each other (the run
+// comparison keys findings by category + evidence ref).
+func TestThresholdFindingEvidenceRefs(t *testing.T) {
+	a := NewAggregator()
+	for i := 0; i < 10; i++ {
+		a.Add(RequestObservation{APIID: "x", StatusCode: 200, LatencyMs: 100})
+	}
+	a.Add(RequestObservation{APIID: "x", StatusCode: 500, LatencyMs: 100})
+
+	fs := a.Classify("r", ClassifyConfig{ErrorRateThreshold: 0.05, P95LatencyMs: 50})
+	refs := map[string]bool{}
+	for _, f := range fs {
+		if f.Category != domain.FindingThreshold {
+			continue
+		}
+		if f.EvidenceRef == "" {
+			t.Fatalf("threshold finding has an empty evidence ref: %+v", f)
+		}
+		refs[f.EvidenceRef] = true
+	}
+	if !refs["error-rate"] || !refs["p95-latency"] {
+		t.Fatalf("want metric-identity refs %q and %q, got %v", "error-rate", "p95-latency", refs)
+	}
+}
+
+// TestEmptyAPIIDProducesNoEmptyEvidenceRef pins the non-empty-EvidenceRef
+// invariant for the per-API classifiers: an observation with an empty APIID
+// (a walk/setup failure that never reached an endpoint) must not yield a
+// per-API finding carrying an empty evidence ref — the per-API classifiers
+// skip it. Any finding it does contribute to (e.g. the run-wide threshold)
+// must still carry a non-empty ref, so the run comparison's (category,
+// evidenceRef) key never collapses distinct issues.
+func TestEmptyAPIIDProducesNoEmptyEvidenceRef(t *testing.T) {
+	a := NewAggregator()
+	// A walk-construction failure: empty APIID, non-empty ErrorClass, no status.
+	a.Add(RequestObservation{APIID: "", ErrorClass: "transport"})
+
+	// Drive every per-API classifier at once (mutation/contract/availability via
+	// AvailabilityRun=1) plus the threshold classifier.
+	fs := a.Classify("r", ClassifyConfig{ErrorRateThreshold: 0.1, AvailabilityRun: 1})
+	for _, f := range fs {
+		if f.EvidenceRef == "" {
+			t.Fatalf("finding has an empty evidence ref: %+v", f)
+		}
+	}
+
+	// And specifically: the empty-APIID observation produced no per-API finding.
+	cat := findingsByCategory(fs)
+	for _, c := range []domain.FindingCategory{domain.FindingMutation, domain.FindingContract, domain.FindingAvailability} {
+		if cat[c] != 0 {
+			t.Fatalf("empty APIID should not produce a %v finding, got %d", c, cat[c])
+		}
+	}
+}
+
+// TestFindingCountField: per-API findings expose the occurrence count as a
+// structured field matching the number formatted into the description.
+func TestFindingCountField(t *testing.T) {
+	a := NewAggregator()
+	for i := 0; i < 3; i++ {
+		a.Add(RequestObservation{APIID: "checkout", StatusCode: 500})
+	}
+	for _, f := range a.Classify("r", ClassifyConfig{}) {
+		if f.Category == domain.FindingContract {
+			if f.Count != 3 {
+				t.Fatalf("contract finding Count = %d, want 3", f.Count)
+			}
+			return
+		}
+	}
+	t.Fatal("no contract finding produced")
+}
+
 func TestNoFindingsOnCleanRun(t *testing.T) {
 	a := NewAggregator()
 	for i := 0; i < 50; i++ {

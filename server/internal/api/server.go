@@ -39,6 +39,14 @@ type Server struct {
 	store   store.Store
 	adapter load.Adapter
 	masker  *mask.Masker
+	// annotateMu serializes the store read-modify-write in annotateRootCause.
+	// Without it, two concurrent reproduce calls for different findings of the
+	// same run could both read the finding list, each stamp only its own finding,
+	// and the later SaveFindings would overwrite the first call's update — a
+	// lost-update that silently drops one RootCauseClass from the system of
+	// record. This lock is intentionally separate from mu and rs.mu so it does
+	// not block unrelated store or run-state operations.
+	annotateMu sync.Mutex
 	// shareReg owns the share-token bookkeeping behind its own mutex, decoupled
 	// from s.mu (which guards run state). Share access was already localized and
 	// never shared a critical section with run state, so this is behavior-preserving.
@@ -51,9 +59,12 @@ type Server struct {
 	// a RunSpec for POST /import. Injected so the api package avoids the
 	// importer/scenariofile import cycle (both depend on api).
 	importFn ImportFunc
-	seq      atomic.Int64
-	now      func() time.Time
-	mux      *http.ServeMux
+	// importStatsFn, when set (WithImporterStats), is preferred over importFn and
+	// additionally returns import coverage stats surfaced in the /import response.
+	importStatsFn ImportStatsFunc
+	seq           atomic.Int64
+	now           func() time.Time
+	mux           *http.ServeMux
 }
 
 // maxRetainedRuns and maxRetainedShares bound the in-memory registries so a
@@ -161,6 +172,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /runs/{id}/trace", s.streamTrace)
 	s.mux.HandleFunc("GET /runs/{id}/heatmap", s.streamHeatmap)
 	s.mux.HandleFunc("GET /runs/{id}/latency-heatmap", s.streamLatencyHeatmap)
+	s.mux.HandleFunc("POST /runs/{id}/reproduce", s.reproduceFinding)
 	s.mux.HandleFunc("POST /runs/{id}/share", s.createShare)
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)

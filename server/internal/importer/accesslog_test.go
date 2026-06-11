@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/chordpli/tmula/server/internal/domain"
+	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
 
@@ -157,9 +158,9 @@ func TestFromAccessLogCapsEndpoints(t *testing.T) {
 	for i, p := range paths {
 		b.WriteString(`9.9.9.9 - - [10/Jun/2026:` + times[i] + ` +0000] "GET ` + p + ` HTTP/1.1" 200 1 "-" "ua"` + "\n")
 	}
-	sc, stats, err := fromAccessLog([]byte(b.String()), accessLogOptions{maxNodes: 2, sessionGapSeconds: 1800})
+	sc, stats, err := FromAccessLogWithOptions([]byte(b.String()), AccessLogOptions{MaxNodes: 2})
 	if err != nil {
-		t.Fatalf("fromAccessLog: %v", err)
+		t.Fatalf("FromAccessLogWithOptions: %v", err)
 	}
 	if stats.DroppedEndpoints != 2 {
 		t.Errorf("DroppedEndpoints = %d, want 2 (spoke1, spoke2)", stats.DroppedEndpoints)
@@ -177,5 +178,148 @@ func TestFromAccessLogCapsEndpoints(t *testing.T) {
 func TestFromAccessLogRejectsEmpty(t *testing.T) {
 	if _, _, err := FromAccessLog([]byte("nonsense\nlines only\n")); err == nil {
 		t.Error("expected an error when no line parses")
+	}
+}
+
+func TestFromAccessLogSamplesSkippedLines(t *testing.T) {
+	// Eleven garbage lines around two good ones: the skip count covers them
+	// all, and the first ten parse failures are sampled with line number, a
+	// 120-char text prefix and a reason — so a half-broken real-world log
+	// reports *why* coverage is partial instead of a bare count. The asset
+	// request on line 2 is filtered by design, so it is counted but never
+	// sampled as a failure.
+	var b strings.Builder
+	b.WriteString(`1.1.1.1 - - [10/Jun/2026:10:00:00 +0000] "GET /a HTTP/1.1" 200 1 "-" "ua"` + "\n")
+	b.WriteString(`1.1.1.1 - - [10/Jun/2026:10:00:01 +0000] "GET /app.css HTTP/1.1" 200 1 "-" "ua"` + "\n")
+	long := "garbage-" + strings.Repeat("x", 200)
+	for i := 0; i < 11; i++ {
+		b.WriteString(long + "\n")
+	}
+	b.WriteString(`1.1.1.1 - - [10/Jun/2026:10:00:02 +0000] "GET /b HTTP/1.1" 200 1 "-" "ua"` + "\n")
+
+	_, stats, err := FromAccessLog([]byte(b.String()))
+	if err != nil {
+		t.Fatalf("FromAccessLog: %v", err)
+	}
+	if stats.Requests != 2 {
+		t.Errorf("stats.Requests = %d, want 2", stats.Requests)
+	}
+	if stats.Skipped != 12 {
+		t.Errorf("stats.Skipped = %d, want 12 (asset + 11 garbage)", stats.Skipped)
+	}
+	if len(stats.SkippedSamples) != 10 {
+		t.Fatalf("len(SkippedSamples) = %d, want 10 (capped)", len(stats.SkippedSamples))
+	}
+	first := stats.SkippedSamples[0]
+	if first.Line != 3 {
+		t.Errorf("first sample line = %d, want 3 (the asset on line 2 is filtered, not failed)", first.Line)
+	}
+	if got := len([]rune(first.Text)); got != 120 {
+		t.Errorf("sample text length = %d runes, want 120 (truncated)", got)
+	}
+	if !strings.HasPrefix(first.Text, "garbage-") {
+		t.Errorf("sample text = %q, want the raw line prefix", first.Text)
+	}
+	if first.Reason == "" {
+		t.Error("sample reason must not be empty")
+	}
+	for _, s := range stats.SkippedSamples {
+		if s.Line == 2 {
+			t.Errorf("asset line 2 must not be sampled as a parse failure: %+v", s)
+		}
+	}
+}
+
+func TestFromAccessLogSessionGapOption(t *testing.T) {
+	// Two requests 100s apart: one session under the default 1800s gap, two
+	// when the caller tightens the gap below the pause.
+	log := `1.1.1.1 - - [10/Jun/2026:10:00:00 +0000] "GET /a HTTP/1.1" 200 1 "-" "ua"
+1.1.1.1 - - [10/Jun/2026:10:01:40 +0000] "GET /b HTTP/1.1" 200 1 "-" "ua"
+`
+	_, stats, err := FromAccessLog([]byte(log))
+	if err != nil {
+		t.Fatalf("FromAccessLog: %v", err)
+	}
+	if stats.Sessions != 1 {
+		t.Errorf("default gap: sessions = %d, want 1", stats.Sessions)
+	}
+	_, stats, err = FromAccessLogWithOptions([]byte(log), AccessLogOptions{SessionGapSeconds: 50})
+	if err != nil {
+		t.Fatalf("FromAccessLogWithOptions: %v", err)
+	}
+	if stats.Sessions != 2 {
+		t.Errorf("50s gap: sessions = %d, want 2", stats.Sessions)
+	}
+}
+
+func TestFromAccessLogPromotesVariables(t *testing.T) {
+	// Three clients hit /product/{id} with three distinct ids (101 hottest)
+	// and one walks into the nested /product/{id}/reviews. With promotion on,
+	// the collapsed segment becomes a template variable in the existing
+	// {{.var}} representation (load.Render's variable system) instead of
+	// pinning every session to the single most-observed resource, and the
+	// observed values are reported as a sample pool capped at the option.
+	log := `1.1.1.1 - - [10/Jun/2026:10:00:00 +0000] "GET /browse HTTP/1.1" 200 1 "-" "ua-a"
+1.1.1.1 - - [10/Jun/2026:10:00:04 +0000] "GET /product/101 HTTP/1.1" 200 1 "-" "ua-a"
+1.1.1.1 - - [10/Jun/2026:10:00:08 +0000] "GET /product/101/reviews HTTP/1.1" 200 1 "-" "ua-a"
+2.2.2.2 - - [10/Jun/2026:10:00:01 +0000] "GET /browse HTTP/1.1" 200 1 "-" "ua-b"
+2.2.2.2 - - [10/Jun/2026:10:00:05 +0000] "GET /product/202 HTTP/1.1" 200 1 "-" "ua-b"
+3.3.3.3 - - [10/Jun/2026:10:00:02 +0000] "GET /product/101 HTTP/1.1" 200 1 "-" "ua-c"
+4.4.4.4 - - [10/Jun/2026:10:00:03 +0000] "GET /product/303 HTTP/1.1" 200 1 "-" "ua-d"
+`
+	sc, stats, err := FromAccessLogWithOptions([]byte(log), AccessLogOptions{
+		PromoteVariables:   true,
+		MaxVariableSamples: 2,
+	})
+	if err != nil {
+		t.Fatalf("FromAccessLogWithOptions: %v", err)
+	}
+
+	if got := sc.Templates["t_get_product_id"].Path; got != "/product/{{.product_id}}" {
+		t.Errorf("product template path = %q, want /product/{{.product_id}}", got)
+	}
+	if got := sc.Templates["t_get_product_id_reviews"].Path; got != "/product/{{.product_id}}/reviews" {
+		t.Errorf("reviews template path = %q, want /product/{{.product_id}}/reviews", got)
+	}
+	// Non-collapsed endpoints stay concrete.
+	if got := sc.Templates["t_get_browse"].Path; got != "/browse" {
+		t.Errorf("browse template path = %q, want /browse", got)
+	}
+
+	// Both templates share one pool under the product_id name; the pool keeps
+	// the hottest MaxVariableSamples values (101 observed 3x across both
+	// endpoints, then 202/303 once each — the lexicographic tie-break keeps
+	// 202).
+	if len(stats.Variables) != 1 {
+		t.Fatalf("stats.Variables = %+v, want exactly product_id", stats.Variables)
+	}
+	v := stats.Variables[0]
+	if v.Name != "product_id" {
+		t.Errorf("variable name = %q, want product_id", v.Name)
+	}
+	if len(v.Values) != 2 || v.Values[0] != "101" || v.Values[1] != "202" {
+		t.Errorf("variable values = %v, want [101 202]", v.Values)
+	}
+
+	// The promoted path is consistent with the load runtime's variable system:
+	// a value from the pool renders into a concrete request URL.
+	req, err := load.Render(sc.Templates["t_get_product_id"], "http://localhost:9000", domain.Credential{}, map[string]string{"product_id": v.Values[1]})
+	if err != nil {
+		t.Fatalf("Render(promoted template): %v", err)
+	}
+	if req.URL != "http://localhost:9000/product/202" {
+		t.Errorf("rendered URL = %q, want the pooled value substituted", req.URL)
+	}
+
+	// Promotion is opt-in: the default path stays concrete and pool-free.
+	scDefault, statsDefault, err := FromAccessLog([]byte(log))
+	if err != nil {
+		t.Fatalf("FromAccessLog: %v", err)
+	}
+	if got := scDefault.Templates["t_get_product_id"].Path; strings.Contains(got, "{") {
+		t.Errorf("default product path = %q, want a concrete observed path", got)
+	}
+	if len(statsDefault.Variables) != 0 {
+		t.Errorf("default stats.Variables = %+v, want none", statsDefault.Variables)
 	}
 }

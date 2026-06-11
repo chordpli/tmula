@@ -258,7 +258,7 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 				setupOnce.Do(func() { firstSetupErr = err })
 				return
 			}
-			record(collector, agg, results, s.clock.Now)
+			record(collector, agg, results, segName, opts.Seed, s.clock.Now)
 		}()
 	}
 
@@ -320,7 +320,13 @@ func thinkFunc(tt domain.ThinkTime, sessionSeed int64) load.ThinkFunc {
 // stamped via now() at the moment it is recorded, so availability now depends on
 // per-request timestamp order (stable on ties), consistent with the closed path,
 // rather than the order sessions happen to complete under concurrency.
-func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepResult, now func() time.Time) {
+//
+// Each observation also carries the session's evidence context: its id, the
+// persona it was drawn from, the reproduce coordinates (the seed the runner
+// stamped on the result, and its offset from runSeed — the arrival number,
+// since open sessions are seeded runSeed+arrival), and the failure path the
+// runner attached to failed steps.
+func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepResult, persona string, runSeed int64, now func() time.Time) {
 	for _, sr := range results {
 		cls := errorClass(sr)
 		collector.Record(sr.Resp.StatusCode, sr.Resp.LatencyMs, cls)
@@ -330,6 +336,11 @@ func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepRe
 			LatencyMs:  sr.Resp.LatencyMs,
 			ErrorClass: cls,
 			TS:         now(),
+			SessionID:  sr.UserID,
+			Seed:       sr.Seed,
+			UserIndex:  sr.Seed - runSeed,
+			Persona:    persona,
+			Path:       sr.Path,
 		})
 	}
 }

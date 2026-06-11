@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -58,7 +60,9 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	} else {
 		err = s.executeLocal(ctx, rs, spec, agg)
 	}
-	findings := agg.Classify(rs.exec.ID, obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5})
+	// The spec's optional findings block tunes the thresholds; a run without
+	// one classifies with the package defaults, exactly as before.
+	findings := agg.Classify(rs.exec.ID, spec.Findings.ClassifyConfig())
 	rs.mu.Lock()
 	rs.findings = findings
 	rs.mu.Unlock()
@@ -191,7 +195,9 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		User:     user,
 		Seed:     spec.Seed,
 		RunID:    rs.exec.ID,
-		Classify: obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5},
+		// The spec's optional findings block tunes the classifier thresholds
+		// (defaults when nil), identical to the closed paths.
+		Classify: spec.Findings.ClassifyConfig(),
 		// Feed the run's own collector so the SSE stream reports live progress
 		// while the open run is still generating traffic, not just at the end.
 		Collector: rs.collector,
@@ -213,7 +219,20 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // the collector incrementally) are appended last so callers can layer on behavior
 // without duplicating the guard/event-sink wiring.
 func (s *Server) runnerFor(rs *runState, spec RunSpec, extra ...load.RunnerOption) *load.Runner {
-	opts := []load.RunnerOption{load.WithGuard(rs.guard), load.WithCorrelationIDs(rs.exec.ID, scenarioIDForSpec(spec))}
+	opts := []load.RunnerOption{
+		load.WithGuard(rs.guard),
+		load.WithCorrelationIDs(rs.exec.ID, scenarioIDForSpec(spec)),
+		// The experiment's deviation rate flows into every session's walk (both
+		// the closed Run fan-out and the open scheduler's RunSession); 0 — the
+		// default — leaves the weighted happy path untouched.
+		load.WithDeviation(spec.Experiment.Params.DeviationRate),
+	}
+	if spec.Workload != nil {
+		// Closed-model think time: Run paces each user from the workload model's
+		// range. The open path is unaffected — its scheduler passes think to
+		// RunSession explicitly, and the runner-level value applies only to Run.
+		opts = append(opts, load.WithThinkTime(spec.Workload.ThinkTime))
+	}
 	if rs.heat != nil || rs.trace != nil || rs.latency != nil {
 		heat, trace, latency := rs.heat, rs.trace, rs.latency
 		opts = append(opts, load.WithEventSink(func(e load.StepEvent) {
@@ -252,6 +271,14 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 			LatencyMs:  res.Resp.LatencyMs,
 			ErrorClass: cls,
 			TS:         s.now(),
+			// Evidence context: the runner stamps each result with its session's
+			// walk seed (spec.Seed + pool index for the closed model), so the
+			// index reproduce needs is the seed's offset from the run seed. The
+			// path is attached to failed steps only — see load.StepResult.
+			SessionID: res.UserID,
+			Seed:      res.Seed,
+			UserIndex: res.Seed - spec.Seed,
+			Path:      res.Path,
 		})
 	}
 	// Wiring the sink at construction makes the Runner stream each result into the
@@ -322,13 +349,28 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 	// never a materialized user array.
 	sink := func(st cluster.ShardStep) {
 		rs.collector.Record(st.StatusCode, st.LatencyMs, st.ErrorClass)
-		agg.Add(obs.RequestObservation{
+		o := obs.RequestObservation{
 			APIID:      domain.ID(st.APIID),
 			StatusCode: st.StatusCode,
 			LatencyMs:  st.LatencyMs,
 			ErrorClass: st.ErrorClass,
 			TS:         s.now(),
-		})
+		}
+		// Evidence context, reconstructed master-side: workers name every user
+		// user-<global index> and seed it spec.Seed + global index (a stable
+		// contract — see cluster worker's buildUsers/RunShard), so the streamed
+		// id alone yields the reproduce coordinates. The per-request path does
+		// not cross the wire, so distributed evidence carries coordinates but
+		// no journeys; an id that does not match the contract carries nothing
+		// rather than fabricated coordinates. (The worker-aggregated Summary
+		// path is coarser still and carries no evidence at all — see
+		// obs.FindingsFromSummary.)
+		if idx, ok := globalUserIndex(st.UserID); ok {
+			o.SessionID = st.UserID
+			o.Seed = spec.Seed + idx
+			o.UserIndex = idx
+		}
+		agg.Add(o)
 	}
 	if _, err := coord.DistributeInto(ctx, shardSpec, spec.PoolSize(), sink); err != nil {
 		return fmt.Errorf("api: distribute run: %w", err)
@@ -358,7 +400,10 @@ func (s *Server) executeDistributedSummary(ctx context.Context, rs *runState, sp
 	if err != nil {
 		return obs.Stats{}, nil, fmt.Errorf("api: distribute summary: %w", err)
 	}
-	cfg := obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5}
+	// Classification happens master-side on the merged summary, so the spec's
+	// findings block (defaults when nil) applies here without traveling to the
+	// workers.
+	cfg := spec.Findings.ClassifyConfig()
 	return summary.Stats(), obs.FindingsFromSummary(rs.exec.ID, summary, cfg), nil
 }
 
@@ -390,6 +435,13 @@ func dialWorkers(addrs []string) ([]grpc.ClientConnInterface, func(), error) {
 // to each worker. The per-worker user partition is computed by the Coordinator,
 // so only the run-wide fields cross here.
 func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
+	// Closed-model think time travels with the shard when a workload model was
+	// supplied (a distributed spec is never open — Validate refuses that), so a
+	// worker paces its users exactly like a local run.
+	var think domain.ThinkTime
+	if spec.Workload != nil {
+		think = spec.Workload.ThinkTime
+	}
 	return cluster.ShardSpec{
 		RunID:         runID,
 		ScenarioID:    scenarioIDForSpec(spec),
@@ -399,12 +451,34 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		Start:         spec.Start,
 		MaxSteps:      spec.MaxSteps,
 		Seed:          spec.Seed,
+		// Ship the experiment's deviation rate so each worker's sessions deviate
+		// exactly as a local run would.
+		DeviationRate: spec.Experiment.Params.DeviationRate,
+		ThinkTime:     think,
 		// Ship the safety policy so each worker enforces the same allowlist and
 		// rate/concurrency cap on the target it was handed.
 		Allowlist: spec.TargetEnv.Allowlist,
 		RateCap:   spec.TargetEnv.RateCap,
 		EnvClass:  spec.TargetEnv.EnvClass,
 	}
+}
+
+// globalUserIndex extracts the global user index from a worker-built session
+// id. Workers name shard users "user-<global index>" (cluster's buildUsers)
+// and seed each one spec.Seed + global index, so the id is the only thing the
+// master needs to recover a streamed result's reproduce coordinates. It
+// reports false for any id outside that contract, in which case the caller
+// must attach no coordinates rather than fabricated ones.
+func globalUserIndex(userID string) (int64, bool) {
+	const prefix = "user-"
+	if !strings.HasPrefix(userID, prefix) {
+		return 0, false
+	}
+	idx, err := strconv.ParseInt(userID[len(prefix):], 10, 64)
+	if err != nil || idx < 0 {
+		return 0, false
+	}
+	return idx, true
 }
 
 func scenarioIDForSpec(spec RunSpec) domain.ID {

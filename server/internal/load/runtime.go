@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 
@@ -16,7 +17,8 @@ import (
 // session. It is called once per inter-step gap; returning a non-positive
 // duration means "no pause". Keeping it a function (rather than a fixed range)
 // lets the caller own the randomness source — the open-model scheduler draws a
-// uniform think time from its seeded RNG, while the closed Run path passes nil.
+// uniform think time from its seeded RNG, while the closed Run path derives one
+// per user from the configured think time (WithThinkTime; nil when unset).
 type ThinkFunc func() time.Duration
 
 // VirtualUser is one simulated principal: an identity, its credential, and any
@@ -33,6 +35,15 @@ type StepResult struct {
 	NodeID domain.ID
 	Resp   Response
 	Err    error
+	// Seed is the walk seed this session ran with, stamped on every result so
+	// downstream evidence carries the reproduce coordinate without a side
+	// channel (closed: run seed + pool index; open: run seed + arrival).
+	Seed int64
+	// Path is the node sequence the session had traversed up to and including
+	// this step. It is attached only when the step FAILED (an error, or a
+	// status >= 400) and is a reslice of the session's precomputed walk —
+	// shared, never copied — so healthy traffic pays no per-step path cost.
+	Path []domain.ID
 }
 
 // Runner drives many virtual users concurrently through a scenario graph,
@@ -50,6 +61,19 @@ type Runner struct {
 	// maxConcurrentSessions default. It exists so tests can assert the fan-out is
 	// actually bounded without spawning the full production-sized pool.
 	maxConcurrency int
+	// deviation is the per-step probability (0..1) that a session departs from
+	// the weighted happy path; 0 (the default) keeps the plain Walk. See
+	// WithDeviation for how the single rate maps onto the engine policy.
+	deviation float64
+	// think paces the closed-model fan-out: Run pauses each user a uniform draw
+	// in [MinMs, MaxMs] between consecutive requests. The zero value means no
+	// pause (the historical closed behavior). It does not affect RunSession,
+	// whose caller owns think time explicitly.
+	think domain.ThinkTime
+	// sleepFn is how a session pauses for think time; the package-level sleep
+	// (a cancellable real timer) by default, overridable via withSleep so tests
+	// can assert pacing against a virtual clock without real waiting.
+	sleepFn func(context.Context, time.Duration) bool
 }
 
 // StepEvent is one step a virtual user took, emitted live for visualization.
@@ -88,7 +112,7 @@ type ResultSink func(StepResult)
 // NewRunner builds a Runner. templates is keyed by APITemplate ID; a node with
 // an empty or unknown APITemplateID is treated as a pure state (no request).
 func NewRunner(adapter Adapter, baseURL string, templates map[domain.ID]domain.APITemplate, opts ...RunnerOption) *Runner {
-	r := &Runner{adapter: adapter, baseURL: baseURL, templates: templates}
+	r := &Runner{adapter: adapter, baseURL: baseURL, templates: templates, sleepFn: sleep}
 	for _, o := range opts {
 		o(r)
 	}
@@ -124,6 +148,33 @@ func WithCorrelationIDs(runID, scenarioID domain.ID) RunnerOption {
 		r.runID = runID
 		r.scenarioID = scenarioID
 	}
+}
+
+// WithDeviation injects probabilistic deviation into every session's walk: with
+// probability rate per step the virtual user departs from the weighted happy
+// path. The single rate maps onto engine.DeviationPolicy{Rate: rate, Abandon:
+// true, Explore: true}: both failure modes are enabled because real users both
+// leave mid-flow and wander onto unlikely screens, and with both set the engine
+// splits each deviation 50:50 between abandoning and exploring (see
+// engine/deviation.go), so one knob yields a balanced mix. Dependency edges are
+// never violated either way. Rate 0 (the default) keeps the plain weighted Walk,
+// so an undeviated run is byte-for-byte what it always was.
+func WithDeviation(rate float64) RunnerOption { return func(r *Runner) { r.deviation = rate } }
+
+// WithThinkTime paces the closed-model fan-out: every user driven by Run pauses
+// a uniform draw in [MinMs, MaxMs] between consecutive requests, drawn from a
+// per-user RNG derived from the user's walk seed so pacing is as reproducible
+// as the traversal. The zero value means no pause — the historical closed
+// behavior — so existing callers are unaffected. RunSession ignores it: its
+// caller (the open-model scheduler) owns think time explicitly via the think
+// argument.
+func WithThinkTime(tt domain.ThinkTime) RunnerOption { return func(r *Runner) { r.think = tt } }
+
+// withSleep overrides how a session pauses for think time. It is unexported
+// because production always wants the real cancellable timer; tests inject a
+// virtual clock so think pacing is asserted without real waiting.
+func withSleep(fn func(context.Context, time.Duration) bool) RunnerOption {
+	return func(r *Runner) { r.sleepFn = fn }
 }
 
 // withMaxConcurrency overrides the session fan-out cap (default
@@ -247,11 +298,15 @@ func (r *Runner) Run(ctx context.Context, g domain.ScenarioGraph, start domain.I
 		go func(i int, u VirtualUser) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// Closed model: no think time, each user seeded by Seed+i so the
-			// traversal is reproducible no matter which pool worker runs it.
-			// runSession reuses the shared node→template map so it is resolved
-			// exactly once for the whole run, and emits each result through emit.
-			r.runSession(ctx, g, nodeTmpl, start, maxSteps, u, seed+int64(i), nil, emit)
+			// Closed model: each user is seeded by Seed+i so the traversal — and
+			// the think pacing derived from the same seed — is reproducible no
+			// matter which pool worker runs it. thinkFor is nil unless a think
+			// time was configured (WithThinkTime), keeping the historical
+			// no-pause hammering as the default. runSession reuses the shared
+			// node→template map so it is resolved exactly once for the whole
+			// run, and emits each result through emit.
+			userSeed := seed + int64(i)
+			r.runSession(ctx, g, nodeTmpl, start, maxSteps, u, userSeed, r.thinkFor(userSeed), emit)
 		}(i, users[i])
 	}
 
@@ -297,12 +352,28 @@ func (r *Runner) RunSession(ctx context.Context, g domain.ScenarioGraph, start d
 func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmpl map[domain.ID]domain.APITemplate, start domain.ID, maxSteps int, u VirtualUser, seed int64, think ThinkFunc, emit func(StepResult)) {
 	walker, err := engine.NewWalker(g, seed)
 	if err != nil {
-		emit(StepResult{UserID: u.ID, Err: err})
+		emit(StepResult{UserID: u.ID, Err: err, Seed: seed})
 		return
 	}
-	path, err := walker.Walk(start, maxSteps)
+	// Deviation is injected at the walk. A configured rate takes WalkWithDeviation
+	// with Abandon and Explore both enabled — real users both leave mid-flow and
+	// wander onto unlikely screens, and with both set the engine splits each
+	// deviation 50:50 between the two (engine/deviation.go) — so the one rate
+	// yields a balanced mix while dependency edges stay inviolable. Rate 0 takes
+	// the plain Walk, so an undeviated session draws exactly the random sequence
+	// it always did.
+	var path []domain.ID
+	if r.deviation > 0 {
+		path, err = walker.WalkWithDeviation(start, maxSteps, engine.DeviationPolicy{
+			Rate:    r.deviation,
+			Abandon: true,
+			Explore: true,
+		})
+	} else {
+		path, err = walker.Walk(start, maxSteps)
+	}
 	if err != nil {
-		emit(StepResult{UserID: u.ID, Err: err})
+		emit(StepResult{UserID: u.ID, Err: err, Seed: seed})
 		return
 	}
 
@@ -313,10 +384,13 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 	if scenarioID == "" {
 		scenarioID = g.ID
 	}
-	for _, nodeID := range path {
+	for stepIdx, nodeID := range path {
 		if ctx.Err() != nil {
 			break // cancelled (kill switch): stop this user's journey
 		}
+		// The journey up to and including this node — a reslice of the
+		// precomputed (immutable) walk, attached to failed results only.
+		walked := path[:stepIdx+1]
 		from := prevNode
 		prevNode = nodeID // advance even for pure-state nodes, so edges are correct
 		tmpl, ok := nodeTmpl[nodeID]
@@ -334,13 +408,13 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		// before each request after the first, and make it cancellable so the
 		// kill switch is not blocked by a pending pause.
 		if sent && think != nil {
-			if d := think(); d > 0 && !sleep(ctx, d) {
+			if d := think(); d > 0 && !r.sleepFn(ctx, d) {
 				break
 			}
 		}
 		req, err := Render(tmpl, r.baseURL, u.Cred, sessionVars)
 		if err != nil {
-			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
+			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err, Seed: seed, Path: walked})
 			continue
 		}
 		req.Correlation = RequestCorrelation{
@@ -360,7 +434,11 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 				}
 			}
 		}
-		emit(StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
+		sr := StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr, Seed: seed}
+		if sErr != nil || resp.StatusCode >= 400 {
+			sr.Path = walked // failed step: carry the journey for evidence
+		}
+		emit(sr)
 		if r.eventSink != nil {
 			r.eventSink(StepEvent{
 				UserID:    u.ID,
@@ -372,6 +450,28 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 			})
 		}
 		sent = true
+	}
+}
+
+// thinkFor builds one closed-model user's think pacer from the Runner's
+// configured think time: a uniform draw in [MinMs, MaxMs] from a user-local RNG
+// derived from the user's walk seed, so pacing is reproducible and never shared
+// across session goroutines. A zero range yields nil — no pause — which keeps
+// the historical closed behavior (and test runtime) unless a think time was
+// explicitly configured. The seed is XOR-offset so think draws do not correlate
+// with traversal choices, mirroring the open scheduler's thinkFunc.
+func (r *Runner) thinkFor(seed int64) ThinkFunc {
+	if r.think.MaxMs <= 0 {
+		return nil
+	}
+	rng := rand.New(rand.NewSource(seed ^ 0x5DEECE66D))
+	span := r.think.MaxMs - r.think.MinMs
+	return func() time.Duration {
+		ms := r.think.MinMs
+		if span > 0 {
+			ms += rng.Intn(span + 1)
+		}
+		return time.Duration(ms) * time.Millisecond
 	}
 }
 

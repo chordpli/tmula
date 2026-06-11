@@ -76,12 +76,14 @@ Between steps a user pauses for a **think time** (a random delay, because real p
 tmula surfaces issues in three overlapping ways:
 
 - **Scenario-following**: does the happy path hold up under realistic, branching traffic?
-- **Deviation**: probabilistic skips, step reordering, and payload mutation (never violating a dependency edge) shake out off-script bugs.
-- **Load-concentration**: funnel virtual users onto one API and watch where it degrades or saturates.
+- **Deviation**: a per-step probability (`deviationRate`, `0..1`; the console's **Deviation rate** field) that a user departs from the weighted happy path - abandoning the journey early or exploring an unlikely transition - without ever violating a dependency edge.
+- **Load-concentration**: aim a whole run at one endpoint (a single-endpoint `tmula run --get /path`, or a one-node graph) and watch where it degrades or saturates.
+
+> **Not in a run yet:** payload mutation, step reordering, and time-shaped concentration profiles are built but not wired into the execution path - see the [README roadmap](../README.md#roadmap). In particular the `mutation` finding category is reserved for payload mutation and does not fire today.
 
 ### What "findings" are
 
-A **finding** is a classified problem tmula detected from the *client side* (status codes, latency, error patterns), with no server instrumentation required. There are four categories: `contract`, `availability`, `threshold`, and `mutation`, each with a severity. A run's output is "here is what real traffic would have broken." See [Findings explained](#findings-explained) for how each is computed.
+A **finding** is a classified problem tmula detected from the *client side* (status codes, latency, error patterns), with no server instrumentation required. There are four categories: `contract`, `availability`, `threshold`, and `mutation`, each with a severity. A run's output is "here is what real traffic would have broken." Findings also carry an **evidence bundle** - representative failing sessions with replay coordinates, plus status-code and timing distributions - and `tmula reproduce` can replay one of those sessions in isolation to tell a functional bug from a load-dependent one. See [Findings explained](#findings-explained) for how each is computed.
 
 ### Why this differs from a plain load tool
 
@@ -92,6 +94,12 @@ A plain load tool hammers one URL with identical requests and tells you a throug
 ## Get it running
 
 This section is intentionally brief; the [README Quickstart](../README.md#quickstart) is the canonical source. Pick whichever fits you.
+
+**One command, zero setup: `tmula demo`.** With the binary installed (install script below), this runs the whole loop self-contained: it boots a tiny planted-bug shop on an ephemeral local port, *learns* a behavior graph from the shop's access log, replays the learned traffic against it (engine + web console on `--addr`, default `:8080`), and prints the findings with concrete next steps. See [`tmula demo`](#tmula-demo--the-whole-loop-one-command) for the full reference.
+
+```bash
+tmula demo                 # ~1 minute of learned traffic, then findings + next steps
+```
 
 **Docker (no toolchain).** One command brings up the console (real UI baked in) plus both example APIs:
 
@@ -161,11 +169,12 @@ The fastest start: in the **Scenario** card click **Start from a template** and 
 |-------|------------|-----------------|--------|
 | **Start node** | The node id where every user begins. | `browse` (shop) | Must be an id that exists in the graph. |
 | **Max steps** | The longest path (number of transitions) a user may take before stopping. | 10-12 for the shop | Too low and users never reach `checkout`. |
+| **Deviation rate** | The % chance, at each step, that a user wanders off the weighted path - exploring another path or giving up mid-way. Dependency edges are never violated. | `0` to follow the scenario exactly; 5-15 to shake out off-script bugs | The console takes a percent (0-100) and maps it onto the RunSpec's `params.deviationRate` (`0..1`). |
 | **Virtual users** | Closed: the pool size. Open: a nominal upper bound. | 50 closed; any positive number open | In the open run this is *nominal* - sessions come from the arrival rate. It still must be > 0 (the experiment validation rejects 0). |
 | **Show live traffic** | Checkbox: visualize the run while it streams. | on for small runs | Per-request animation when small (≤ 200 users / max-concurrency), an aggregate flow map above that. |
 | **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
 | **API templates** (JSON) | The request each node sends: method, path, optional payload. *Advanced.* | use a preset | See [API templates](#api-templates). |
-| **Import** | Turn an OpenAPI spec or a HAR recording into the graph + templates. | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
+| **Import** | Turn an OpenAPI spec, a HAR recording, or an access log into the graph + templates (logs come with an [import coverage report](#learning-a-graph-from-an-access-log)). | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
 
 When you press **Run**, the console assembles a [RunSpec](#the-full-runspec) and POSTs it. Two things happen automatically: it sends `users: []` plus a `userCount` for closed runs (so a huge run is a tiny request body, and the server synthesizes `u0..uN-1`), and it sizes the safety `rateCap` to your configured load. You never write those by hand in the UI.
 
@@ -394,7 +403,7 @@ The complete, self-contained run definition: the raw body of `POST /api/experime
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `experiment` | object | Names the run and its run-time params. `name` required; `params.virtualUserCount` must be `> 0`; `params.deviationRate` in `[0,1]`; `params.authStrategy` is `pool` or `bootstrap-signup`. |
+| `experiment` | object | Names the run and its run-time params. `name` required; `params.virtualUserCount` must be `> 0`; `params.deviationRate` in `[0,1]` (the per-step off-script probability - see [The three modes](#the-three-modes)); `params.authStrategy` is `pool` or `bootstrap-signup`. |
 | `targetEnv` | object | The system under test + safety constraints. `baseUrl` required; `allowlist` non-empty; `rateCap.maxRps` and `rateCap.maxConcurrency` both `> 0`; `envClass` is `dev`, `staging`, or `prod-locked`. |
 | `graph` | object | The [scenario graph](#scenario-graph). |
 | `templates` | object | The [API templates](#api-templates) map. |
@@ -410,6 +419,7 @@ The complete, self-contained run definition: the raw body of `POST /api/experime
 | `aggregateWorkers` | bool | Workers fold their shard into a compact summary instead of streaming every request. Ignored unless `workers` is set. |
 | `credentialPool` | object | Optional [auth pool](#authenticated-runs). Nil = unauthenticated. |
 | `metrics` | object | Optional. `{ "prometheusUrl": string, "queries": [{ "name", "query" }] }` - server metrics fetched into the report after the run. The host must be allowlisted. |
+| `findings` | object | Optional. `{ "errorRate": number, "p95LatencyMs": number, "availabilityStreak": int }` - tunes the thresholds that classify observations into findings. An omitted (or `0`) field keeps its default. See [Tuning the thresholds](#tuning-the-thresholds-the-findings-block). |
 
 > **`virtualUserCount` must be > 0 even for open runs.** This trips people up. `experiment.params.virtualUserCount` is validated `> 0` regardless of workload model (`experiment: virtualUserCount must be > 0`). In an open run it is a *nominal* field (the actual users come from the arrival rate), but you still must set a positive number. The scenario-file path sets it to `1` automatically for open runs.
 
@@ -430,6 +440,7 @@ allow: [127.0.0.1]                # hosts the run may reach (defaults to the tar
 users: 80                         # closed-model pool size (default 20; ignored when `open:` is set)
 maxSteps: 10                      # default: the flow length
 seed: 1                           # default 1
+deviationRate: 0.1                # per-step chance of going off-script (default 0 = never)
 
 flow:                             # the ordered journey (required, >= 1 step)
   - id: browse
@@ -464,6 +475,12 @@ auth:
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
+
+# Optional finding thresholds - see "Findings explained":
+findings:
+  errorRate: 0.1                  # threshold finding above 10% overall errors (default 0.2)
+  p95LatencyMs: 800               # threshold finding when p95 exceeds 800 ms (omit = gate off)
+  availabilityStreak: 5           # consecutive failures on one API (default 5)
 ```
 
 **Scenario fields**
@@ -476,10 +493,12 @@ auth:
 | `users` | int | Closed pool size. Default `20`. Ignored when `open` is set. |
 | `maxSteps` | int | Walk bound. Default: the flow length. |
 | `seed` | int64 | Reproducibility. Default `1`. |
+| `deviationRate` | number | Per-step probability (`0..1`) a user departs from the weighted path - abandons the journey or explores an unlikely transition; dependency edges are never violated. Default `0` (every user follows the happy path). Out of range → `scenariofile: deviationRate <v> out of range [0,1]`. |
 | `open` | object | Switches to the open model (below). |
 | `segments` | array | Persona mix; requires `open` (else `scenariofile: segments require an open workload`). |
 | `auth` | object | Credentials (below). |
 | `metrics` | object | Optional. Fetch Prometheus series over the run's window into the report (see [Server metrics](#server-metrics-side-by-side-prometheus)). |
+| `findings` | object | Optional finding thresholds (below). |
 
 **Step fields**
 
@@ -505,6 +524,16 @@ auth:
 | `maxConcurrency` | int | Back-pressure cap. |
 
 **`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` defaults to `pool` (only `pool` is accepted here); `users` is a list of `{ subject, token }` (`token` is the secret, exposed to templates as `{{.token}}`).
+
+**`findings` fields** (every field optional; a `0`/omitted value keeps its default)
+
+| Field | Type | Meaning / default |
+|-------|------|-------------------|
+| `errorRate` | number | Overall error rate above this → a `threshold` finding. Default `0.2`. Must be in `[0,1]` (else `scenariofile: findings: errorRate <v> out of range [0,1]`). |
+| `p95LatencyMs` | number | Overall p95 latency (ms) above this → a `threshold` finding. Default `0` = the p95 gate stays **disabled**. Must not be negative. |
+| `availabilityStreak` | int | This many consecutive failures on one API → an `availability` finding. Default `5`. Must not be negative. |
+
+The same block (identical field names) is the RunSpec's `findings` field; see [Tuning the thresholds](#tuning-the-thresholds-the-findings-block).
 
 How `Expand` defaults things: it derives the graph and templates from `flow` (each request-bearing step becomes a template `t_<id>`), links consecutive steps with weighted edges, sets a `rateCap` of `{ maxRps: 10000, maxConcurrency: 1000 }`, `envClass: dev`, and `start` to the first step. The compact graph is validated with the stricter scenario rules (transition weights in `[0,1]`, per-node outgoing sum ≤ 1, dependency edges form a DAG).
 
@@ -535,14 +564,39 @@ templates:                         # the API template map (key = id, protocol de
 
 With `graph`, `start` is required (and must name a graph node), every node's
 template must exist in `templates`, and the remaining blocks - `open`,
-`segments`, `auth`, `users` - behave exactly as in the flow form. The same
-strict scenario validation applies.
+`segments`, `auth`, `users`, `deviationRate`, `findings` - behave exactly as in
+the flow form. The same strict scenario validation applies.
 
 ---
 
 ## The CLI
 
 The `tmula` binary is one command with subcommands. With no recognized subcommand it starts the long-running engine (`serve`).
+
+### `tmula demo` - the whole loop, one command
+
+The first-run experience: boot a built-in buggy shop, learn its behavior graph from traffic, replay that traffic, read the findings - no scenario file, no second terminal.
+
+```bash
+tmula demo [--addr :8080] [--duration 60s] [--no-browser]
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--addr <addr>` | `:8080` | Listen address for the demo's engine + web console. A taken port fails fast with an error that points at this flag (e.g. `--addr :8081`). |
+| `--duration <dur>` | `60s` | How long the learned traffic keeps arriving. Must be positive. |
+| `--no-browser` | false | Do not open the web console in a browser. (Opening uses macOS `open` / Linux `xdg-open`; on other platforms the demo warns and the printed URL is the fallback.) |
+
+What it does, stage by stage (the staged `[1/4]`..`[4/4]` output mirrors this):
+
+1. **Boots the demo shop** - a tiny store with planted bugs (a flaky cart, a checkout that degrades under load, a rare broken product link) - on an *ephemeral* loopback port, so the only port you can ever collide on is the engine's `--addr`.
+2. **Learns a behavior graph** from the shop's bundled access log with the same [access-log learner](#learning-a-graph-from-an-access-log) `tmula init` uses: endpoints, branch weights, drop-offs, think time, and an open-workload suggestion. The pacing is compressed into the demo window (enough sessions that the planted bugs reliably surface); the learned graph and its weights are untouched.
+3. **Starts the local engine + embedded web console** on `--addr` and runs the learned traffic against the shop. The run spec expands through the same scenario path every `tmula run` uses - the allowlist defaults to the shop's host only, and the [safety guard](#safety) applies in full. The run is created with live tracing on, and the browser is opened to `/?run=<run-id>`, so a console with the embedded UI attaches straight to the run's live view - the traffic flow map and live metrics, no form to fill.
+4. **Prints the results** when the window closes: the standard run summary with findings, then **Next steps** - a ready-to-paste `tmula reproduce` command for the first finding, the run's `report.html` URL, the console URL, and the `tmula init --from <your access log>` / `tmula run` pair that points the same loop at your own service.
+
+After the summary the demo **stays up** (engine and shop both) so those commands keep working; **Ctrl-C** shuts both down gracefully and exits `0` - at any stage, including mid-run. Failures exit `1`. There is deliberately **no findings gate**: the demo *finding* bugs is the success, so unlike `tmula run` there is no `--fail-on-findings` and findings never affect the exit code.
+
+> **Embedded UI note.** The browser console page is only the real console in a binary that embeds the UI (the prebuilt/install-script binary, the Docker image, or a `make web` build). With a plain `go build` the demo still runs end to end - the terminal summary and the `report.html` URL are the result surfaces - but the console root shows the placeholder page. With the embedded UI, the `/?run=<run-id>` link the demo opens attaches the console straight to its run's live view (flow map + live metrics, then the report when the run finishes); without it, the demo's own run reports through the terminal summary and the linked HTML report.
 
 ### `tmula run` - run a scenario and print findings
 
@@ -562,6 +616,9 @@ Builds a RunSpec from a scenario file (or single-endpoint flags), executes it (i
 | `--json` | false | Print the raw report JSON instead of a summary. |
 | `--fail-on-findings` | false | Exit non-zero if any finding is detected (CI gate). |
 | `--fail-on-severity <s>` | - | Gate only on findings at/above `warning` or `critical`. |
+| `--baseline <run-id>` | - | Regression gate: diff this run's findings against a baseline run fetched from `--engine` (required with this form). Exit `3` only on findings **new** vs the baseline. See [the baseline gate](#the-baseline-gate--fail-only-on-regressions). |
+| `--baseline-file <file>` | - | Regression gate against a saved report JSON (a previous `tmula run --json` output, e.g. a CI artifact). Use only one of `--baseline` / `--baseline-file`. |
+| `--known-issues <file>` | - | Known-issues YAML: matching **new** findings are suppressed in the baseline gate until their `expires` date (`YYYY-MM-DD`). Requires `--baseline` or `--baseline-file`. |
 | `--summary <file>` | `$GITHUB_STEP_SUMMARY` | Append a markdown run summary (stats + findings table) to this file. Defaults to GitHub Actions' step summary when that env var is set, so CI gets it with zero configuration. |
 | `--timeout <dur>` | 2m | Max time to wait for the run to finish. |
 
@@ -585,11 +642,59 @@ tmula run examples/shop/scenario.yaml --users 50 --fail-on-findings
 
 # CI gate, criticals only
 tmula run examples/shop/scenario.yaml --users 50 --fail-on-severity critical
+
+# Regression gate: exit 3 only on findings new vs main's saved report
+tmula run examples/shop/scenario.yaml --users 50 \
+  --baseline-file main-report.json --known-issues known-issues.yaml
 ```
 
-**Exit codes:** `0` ok · `1` error (or a failed/killed run) · `2` findings detected under a gate. The gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals. A run that did not complete cleanly (failed or killed, e.g. a timeout or a kill-switch trip) exits non-zero **regardless** of findings, so it never silently passes CI.
+**Exit codes** (precedence order - a later gate is consulted only when every earlier one passed):
+
+| Code | Meaning | Trigger |
+|------|---------|---------|
+| `0` | Clean | The run completed and no enabled gate tripped. With a baseline, *persisting* findings still exit `0` - they are not what this change broke. |
+| `1` | Error, or a failed/killed run | Always non-zero regardless of findings (e.g. a timeout or a kill-switch trip), so a broken run never silently passes CI. |
+| `2` | Findings detected | `--fail-on-findings` / `--fail-on-severity`: the absolute gate. It counts every (matching) finding, baseline or not, so it keeps its meaning even when a baseline is also passed. |
+| `3` | New findings vs the baseline | `--baseline` / `--baseline-file`: the regression gate, after known-issue suppression. |
+
+The absolute gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals.
 
 The flag parser collects positionals in a loop, so `tmula run scenario.yaml --users 50` and `tmula run --users 50 scenario.yaml` both work.
+
+### The baseline gate - fail only on regressions
+
+`--fail-on-findings` is absolute: any finding fails the job, even one that has been failing for
+weeks. The **baseline gate** compares instead. Findings are keyed by their stable identity
+`(category, evidenceRef)` - no run-specific numbers - and diffed against a baseline run, so CI
+goes red only for what *this* change broke. Two ways to name the baseline:
+
+- `--baseline-file report.json` - a saved `tmula run --json` output. The natural CI shape: the
+  main-branch job uploads its report as an artifact, the PR job downloads it and gates against it.
+- `--baseline <run-id> --engine <url>` - fetch the baseline from a long-running engine's run
+  history (`GET /api/runs/{id}/report`). An in-process run starts with empty history, which is
+  why this form requires `--engine`.
+
+The verdict has four buckets: **new** (the only one that fails the gate, exit `3`), **resolved**,
+**persisting** (already broken in the baseline - reported, never failing), and **suppressed**. It
+prints after the report, and is appended to the markdown `--summary` as a **"Baseline gate"**
+section (one table, new findings first, suppressed rows annotated with their reason and expiry).
+
+**Known issues.** `--known-issues <file>` suppresses accepted *new* findings. The file is a YAML
+list; **every field is required**, so no suppression is anonymous or eternal:
+
+```yaml
+- category: contract
+  evidenceRef: checkout            # the finding's identity, exactly as reports print it
+  reason: known cart-service hiccup, tracked in SHOP-123
+  expires: 2026-07-31              # YYYY-MM-DD - the last (UTC) day this suppression holds
+```
+
+Matching is exact on `(category, evidenceRef)` - no globbing - and unknown YAML fields are
+rejected, so a typo cannot silently disable a suppression. `expires` forces a re-triage date: the
+expiry day itself still suppresses, and from the next (UTC) day the entry stops working - the
+finding turns **new** again (and fails the gate), and the expired entry is called out on stderr
+(it survives `--json` mode there) and in the summary, so it gets re-triaged or deleted rather
+than rotting in the file.
 
 ### Running in CI
 
@@ -617,10 +722,92 @@ jobs:
           comment: true            # post the summary on the PR
 ```
 
+**Gating on regressions from the action.** The action's inputs mirror the
+CLI's baseline gate:
+
+- `baseline-file`: path to a previous `tmula run --json` report (the natural
+  shape: the main-branch job uploads its report as an artifact, the PR job
+  downloads it). Setting it turns on the regression gate - the job fails with
+  exit `3` only on findings **new** vs the baseline. Combine with
+  `fail-on: none` to gate purely on regressions.
+- `known-issues`: path to a known-issues YAML, passed through to
+  `--known-issues`. Only valid together with `baseline-file` (the CLI rejects
+  it alone, early, before the run).
+- `pr-comment: 'true'`: on `pull_request` events, posts the **Baseline gate**
+  verdict table as a PR comment and *edits the same comment in place* on
+  re-runs (unlike `comment`, which adds a new comment every run). Without a
+  baseline it posts the full run summary instead. It needs the workflow's
+  `pull-requests: write` permission; fork PRs get a read-only token, so there
+  the comment is skipped with a warning - the job's red/green always tracks
+  the run's own exit code, never the comment plumbing.
+
+```yaml
+      - uses: actions/download-artifact@v4
+        with: { name: tmula-baseline, path: baseline }   # main's saved report
+      - uses: chordpli/tmula@main
+        with:
+          scenario: tests/journey.yaml
+          target: http://localhost:9000
+          fail-on: none                        # gate on regressions only
+          baseline-file: baseline/report.json  # exit 3 only on NEW findings
+          known-issues: tests/known-issues.yaml
+          pr-comment: true                     # upsert the gate verdict on the PR
+```
+
 Without the action, plain `tmula run` already cooperates with GitHub Actions:
 when `GITHUB_STEP_SUMMARY` is set the markdown summary is appended there
 automatically, and the summary is written even when the run failed or the gate
-trips - a red job links straight to *what broke*, not just an exit code.
+trips - a red job links straight to *what broke*, not just an exit code. To
+gate on regressions only, add `--baseline-file` (exit `3` on new findings - see
+[the baseline gate](#the-baseline-gate--fail-only-on-regressions)); its verdict
+table is appended to the same step summary.
+
+### `tmula reproduce` - real bug, or load artifact?
+
+Every per-endpoint finding's [evidence bundle](#the-evidence-bundle) names sessions with their
+**seed coordinates** (run seed + user index = session seed). `tmula reproduce` replays the
+finding's first evidence session **in isolation** - one session, no concurrent load, the same
+deterministic walk - several times, and classifies the root cause from how often the failure
+recurs:
+
+| Verdict (`rootCauseClass`) | Meaning |
+|----------------------------|---------|
+| `functional` | Reproduced on **every** attempt: it does not need load - likely a plain functional bug. |
+| `load-dependent` | Reproduced on **no** attempt: it likely needs the original concurrency or saturation. |
+| `flaky` | Reproduced on some attempts only - rerun with more `--attempts`, or inspect the target. |
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--engine <url>` | - | **Required.** The engine that ran (and still holds) the run. |
+| `--run <run-id>` | - | **Required.** The run whose finding to replay. |
+| `--finding <sel>` | - | **Required.** `category/evidenceRef` (e.g. `contract/checkout` - the same key reports print) or the finding's 1-based index in the run's findings list. |
+| `--attempts <n>` | 3 | How many isolated replays to run (1-20). |
+| `--json` | false | Print the raw reproduce JSON instead of the table. |
+| `--timeout <dur>` | 2m | Max time to wait for the replays. |
+
+```bash
+tmula reproduce --engine http://localhost:8080 --run run-12 --finding contract/checkout
+tmula reproduce --engine http://localhost:8080 --run run-12 --finding 1 --attempts 5
+```
+
+The output shows the session and its seed arithmetic, the original failure path, every attempt's
+per-step status codes (the step carrying the finding's signal marked with `!`), and the verdict.
+The verdict is also stamped onto the stored finding as `rootCauseClass` - live cache and Store
+both - so a refetched report shows the triage already done (`(root cause: load-dependent)`).
+
+The replay honors the original run's constraints: the safety guard is rebuilt and enforced
+(allowlist, rate cap, a `prod-locked` target is refused), a persona session replays with its
+segment's entry-node and max-steps overrides, and a credential-pool run re-acquires the same
+credential by index.
+
+**Limits.** The replay happens on the engine (`POST /api/runs/{id}/reproduce`), because the seed
+coordinates only mean something next to the run's spec - which lives in engine memory only. A
+restarted engine or an evicted run answers `410`; run against a long-running engine when you
+intend to reproduce later. Summary-derived (run-wide) findings carry no session coordinates, and
+`mutation` findings need inputs the replay does not generate - both are refused (`422`). And the
+verdict is **a signal, not a proof**: the replay recreates the session's *traffic composition*
+(same seed, same walk), never the original timing, concurrency, or target state - the engine
+repeats this note with every result.
 
 ### `tmula bench` - capacity probe
 
@@ -661,7 +848,7 @@ OpenAPI/HAR scaffold a linear flow; an access log goes further - tmula [*learns*
 
 ### `serve` (default) and roles
 
-Any invocation without `run` / `bench` / `init` starts the long-running engine.
+Any invocation without `run` / `reproduce` / `init` / `bench` / `demo` starts the long-running engine.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -684,7 +871,7 @@ Health check: `GET /healthz` returns `{"status":"ok","role":...,"version":...}`.
 
 ## Findings explained
 
-A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }`. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`server/internal/obs/finding.go`). First, two predicates used throughout:
+A finding is `{ runId, category, severity, evidenceRef, firstSeen, description, count }` (`count` is the number of occurrences behind it; omitted for threshold findings, which carry rates in the description). It optionally carries an `evidence` bundle ([below](#the-evidence-bundle)) and - after a `tmula reproduce` pass - a `rootCauseClass`. `evidenceRef` is the finding's *stable identity* with no run-specific numbers in it - the API (node) id for per-endpoint findings, `error-rate` / `p95-latency` for the run-wide threshold findings, `run-wide` for summary-derived aggregates - so the same issue keys identically across runs; it is what the baseline gate diffs on and what a known-issues entry names. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`server/internal/obs/finding.go`). First, two predicates used throughout:
 
 - A request **failed** when `statusCode >= 400` **or** it carries an `errorClass` (e.g. `"timeout"`, `"transport"`, `"assertion"`).
 - A request is **unavailable** when `statusCode >= 500` **or** `errorClass == "timeout"` **or** `errorClass == "transport"`.
@@ -692,21 +879,59 @@ A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }
 | Category | Severity | Exactly how it's computed |
 |----------|----------|---------------------------|
 | **contract** | critical | A **non-mutated** request that returned a **5xx** or failed an **assertion** (`contractSignal`). This is "the happy path produced an error a developer likely missed." One finding per API: *"N contract violation(s) on `<api>` (unexpected error on the happy path)."* |
-| **mutation** | warning | A **mutated** input that **failed** (`mutationSignal`). Mutation testing fails inputs on purpose, so this is informational. One finding per API: *"mutated input surfaced N error(s) on `<api>`."* |
+| **mutation** | warning | A **mutated** input that **failed** (`mutationSignal`). Mutation testing fails inputs on purpose, so this is informational. One finding per API: *"mutated input surfaced N error(s) on `<api>`."* **Reserved:** payload mutation is not yet wired into the run path ([roadmap](../README.md#roadmap)), so no request is marked mutated and this category does not fire today. |
 | **availability** | critical | An API that suffered **`AvailabilityRun` or more consecutive `unavailable()` results**. The streak is evaluated per endpoint in timestamp order (so it is robust to the order results stream back). Disabled when `AvailabilityRun <= 0`. One finding per API: *"N consecutive failures on `<api>` (saturation or downtime)."* |
 | **threshold** | warning | Run-wide, excluding mutated requests. Two possible findings: error rate (`failed / total`) **>** `ErrorRateThreshold` → *"error rate X exceeded threshold Y"*; and p95 latency **>** `P95LatencyMs` (when that gate is `> 0`) → *"p95 latency Xms exceeded threshold Yms."* |
 
-### Tuning `ClassifyConfig`
+### Tuning the thresholds (the `findings` block)
 
-The thresholds live in `ClassifyConfig`:
+The thresholds are configurable per run: both the RunSpec and the compact scenario file take an optional `findings` block (`obs.FindingConfig`):
 
-| Field | Meaning |
-|-------|---------|
-| `ErrorRateThreshold` | Overall error rate above this → a threshold finding. `0` disables the error-rate gate. |
-| `P95LatencyMs` | Overall p95 latency above this → a threshold finding. `0` disables the p95 gate. |
-| `AvailabilityRun` | This many consecutive failures on one API → an availability finding. `0` disables availability detection. |
+```yaml
+findings:
+  errorRate: 0.1          # default 0.2
+  p95LatencyMs: 800       # default 0 (gate disabled)
+  availabilityStreak: 3   # default 5
+```
+
+| Field | Meaning / default |
+|-------|-------------------|
+| `errorRate` | Overall error rate above this → a threshold finding. Default `0.2`. |
+| `p95LatencyMs` | Overall p95 latency above this many ms → a threshold finding. Default `0`, which keeps the p95 gate **disabled**. |
+| `availabilityStreak` | This many consecutive failures on one API → an availability finding. Default `5`. |
+
+Every field is optional, and a `0` (or omitted) field falls back to its default - a spec without the block classifies exactly as before the block existed. Note the asymmetry this implies: the block can *tighten or loosen* the error-rate and availability gates but cannot disable them (`0` means "default", not "off"), while the p95 gate is off unless you set it. Internally the block resolves into `ClassifyConfig` (`ErrorRateThreshold` / `P95LatencyMs` / `AvailabilityRun`), where a resolved `0` disables that gate. The block applies on every path - single-node, distributed-streaming, and distributed-summary (classification happens on the master, so nothing moves to the workers).
 
 > **The distributed/aggregated path.** When workers aggregate their shards (`aggregateWorkers`), findings come from a merged `Summary` (`FindingsFromSummary`), which keeps only per-category tallies: no per-API breakdown and no ordering. It produces at most *one* finding per tripped category for the whole run, deliberately coarser than the per-endpoint single-node findings. That is the fidelity-for-scale trade you opt into. (A detail: the Summary's threshold error-rate/p95 count *all* observations including mutated ones, whereas the single-node classifier excludes mutated requests. This is latent today because the distributed path never carries mutated observations.)
+
+### The evidence bundle
+
+A finding answers *what* broke; the **evidence bundle** attached to it answers *who hit it, when,
+and how to see it again*. It is condensed once, at classification time, from the same
+observations the classifier counted - so the evidence can never disagree with the finding it
+backs - and it is bounded by design: a finding stays small no matter how many requests failed
+behind it. On the wire (the report JSON and the Store) it is the finding's optional `evidence`
+field:
+
+| Field | What it is |
+|-------|------------|
+| `vus` | Up to **5 representative sessions**: the earliest occurrences (where the issue first surfaced) plus the slowest of the rest (the worst case). For the p95 threshold finding the candidates are the requests *over the gate* - slowness, not failure, is that signal. |
+| `vus[].vu` | The session ID - the exact `X-Tmula-Session-ID` header value the session sent on every request, so you can grep the target's logs for that one journey. |
+| `vus[].seed`, `vus[].userIndex` | The replay coordinates: run seed + `userIndex` = the session's walk seed (`seed`). The index is the pool index for the closed model, the arrival number for the open model, the global user index for a distributed shard. This is what `tmula reproduce` replays from. |
+| `vus[].persona` | The segment the session was drawn from (omitted when the run had no persona mix). |
+| `vus[].path` | The node sequence the session walked, up to and including the failing request. (The distributed stream carries no per-request path, so it is empty there.) |
+| `vus[].statusCode` / `latencyMs` / `errorClass` / `ts` | The request that surfaced the issue. Status `0` means a transport-level failure - the `errorClass` is the signal then. |
+| `timeBuckets` | The finding's occurrences over four fixed quarters of the observed run window (`0-25%` … `75-100%`) - enough to tell "early in ramp-up" from "late in soak". |
+| `statusCounts` | The status-code tally of *every* occurrence, not just the representative sessions. |
+
+The web console renders the bundle as a collapsible panel per finding, and the standalone HTML
+report has the same section. Both survive shared (masked) reports: the wire names `vus`/`vu` are
+deliberately chosen so the PII masker - which redacts any field whose *name* looks sensitive,
+including "session" - carries these synthetic identifiers through intact.
+
+Two producers attach no evidence: summary-derived findings (`aggregateWorkers` folds per-request
+data away by design - see the note above) and findings persisted before the bundle existed. A
+finding without evidence renders exactly as before, and `tmula reproduce` refuses it.
 
 ---
 
@@ -720,7 +945,7 @@ When **Show live traffic** is on, the console streams a live view; afterward you
 
 **Live metrics.** Running counters: requests, error rate, p50 / p95 / p99 / max latency, timeouts, and a status-code tally (e.g. `200:313 500:8`).
 
-**HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions.
+**HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions. In both the web report and the HTML report, each finding expands into its [evidence panel](#the-evidence-bundle): the representative sessions (with the `X-Tmula-Session-ID` value to grep server logs for and the seed coordinates `tmula reproduce` replays from), the status-code distribution, the timing distribution, and the `rootCauseClass` verdict when a reproduce pass recorded one.
 
 ### Server metrics side-by-side (Prometheus)
 
@@ -777,9 +1002,15 @@ so tmula **learns** the behavior graph itself from it. The result is a
 miniature of the observed traffic: replay it against staging and you see where
 the real traffic pattern breaks things, before a deploy.
 
-- **Input.** Apache/nginx **combined format** or **JSON lines** (one object per
-  line; common key spellings - `time`/`ts`/`timestamp`, `method`+`path` or
-  `request`, `remote_addr`, `user_agent` - are auto-detected).
+- **Input - six formats, auto-detected from content.** Apache/nginx **combined
+  format**; generic **JSON lines** (one object per line; common key spellings -
+  `time`/`ts`/`timestamp`, `method`+`path` or `request`, `remote_addr`,
+  `user_agent`); **AWS ALB** access logs; **CloudFront standard logs** (the
+  tab-separated W3C format - the parser follows whatever column order the
+  `#Fields` header declares); **Caddy** structured JSON; and **Traefik** JSON
+  access logs. Detection (`importer.DetectAccessLogFormat`) probes the first
+  few non-empty lines, so a file whose first line was truncated by log
+  rotation still detects.
 - **Sessionization.** Requests group per client (IP + user agent) and split
   into visits on a 30-minute idle gap.
 - **Endpoint collapsing.** Queries are stripped and volatile segments (numbers,
@@ -799,6 +1030,46 @@ The learner emits a [graph-first scenario file](#graph-first-scenario-files)
 rather than a linear flow - the branching *is* the learned information. Paste a
 log into the web console's Import and the graph + template editors fill in
 directly.
+
+**The coverage report - what the learner kept and dropped.** A capped or noisy
+import must not silently pass as full coverage, so the learner reports its
+stats: requests used, lines skipped, sessions, distinct clients, and folded
+endpoints, plus up to ten *sampled parse failures* (line number, the line's
+first 120 characters, and the reason) so a half-broken real-world log explains
+*why* coverage is partial. Lines filtered by design (static assets, non-journey
+methods) are counted but never sampled. The surfaces:
+
+- `tmula init` prints the summary note on stderr (`learned N endpoint(s) from
+  N request(s) across N session(s)…; skipped N unusable line(s)`).
+- `POST /api/import` can return the stats as an optional `stats` object
+  (omitted when the wired importer does not produce them, so old clients see
+  the pre-stats response unchanged).
+- The web console renders the stats as an **Import coverage** panel above the
+  graph preview: the used/skipped/sessions/clients/folded summary, a warning
+  tone when any line was skipped ("this import reflects only part of the
+  captured traffic"), and a skipped-line samples table when the server sent
+  samples.
+- A log with **zero usable requests** fails the import, and the error message
+  carries the first sampled failure's line number and reason - actionable from
+  the error text alone.
+
+**Variable promotion (Go API).** By default each collapsed `{id}` endpoint pins
+to its single most-observed concrete path. The Go API can instead *promote*
+those segments into template variables: `importer.FromAccessLogWithOptions`
+with `PromoteVariables` emits paths like `/product/{{.product_id}}` (the
+standard `{{.var}}` [template interpolation](#api-templates)) and reports each
+variable's observed value pool (hottest first, capped at `MaxVariableSamples`,
+default 5) in the stats. Variables with the same name share one pool across
+endpoints - `/product/{id}` and `/product/{id}/reviews` draw from the same
+`product_id` values. It is **off by default** because a promoted scenario only
+renders once the caller seeds those pools into the virtual users' `vars`; the
+default concrete paths run as-is.
+
+The learner's knobs - the format hint, the node cap (default 30; a negative
+value removes the cap), the session gap (default 30 minutes), and variable
+promotion - live on `importer.AccessLogOptions` /
+`importer.FromAccessLogWithOptions` in the Go API. The CLI and the web import
+use the defaults (auto-detection included).
 
 ---
 
@@ -922,7 +1193,7 @@ No, that's the signature of **overload / saturation**, usually because you are *
 That is usually a *real* bug in the system under test, and in the example domains, a deliberately planted one. The ticketing `POST /hold` 409s (seat contention) and `POST /pay` 503s (payment under rush), or the shop `POST /cart` 500s and `POST /checkout` degradation, are the kind of endpoint-concentrated failure tmula is built to surface. Endpoint-concentrated errors → look at that endpoint; run-wide errors with saturation symptoms → look at your harness (previous question).
 
 **Q: A CI run exited 2 even though I expected a pass.**
-`--fail-on-findings` (or `--fail-on-severity`) intentionally exits `2` when findings are detected. That's the gate working. A `1` instead means an actual error or a failed/killed run (e.g. a timeout or kill-switch trip), which always exits non-zero regardless of findings. `0` means clean.
+`--fail-on-findings` (or `--fail-on-severity`) intentionally exits `2` when findings are detected. That's the gate working. A `3` means the [baseline gate](#the-baseline-gate--fail-only-on-regressions) found findings *new* vs the baseline (after known-issue suppression). A `1` instead means an actual error or a failed/killed run (e.g. a timeout or kill-switch trip), which always exits non-zero regardless of findings. `0` means clean - which, with a baseline, includes "only persisting findings."
 
 **Q: My authenticated run "works" against a remote `--engine` but carries no token.**
 It can't, and the run path refuses it: a credential pool against a remote `--engine` is rejected because the secret cannot cross the wire (`json:"-"`). Run in-process (`tmula run` with an `auth:` block, no `--engine`) to authenticate.

@@ -6,6 +6,8 @@ import {
   classifyEdge,
   compareURL,
   formatCount,
+  formFromRunSpec,
+  getExperimentSpec,
   graphDepths,
   HEAT_ERR,
   HEAT_MAX_W,
@@ -22,21 +24,33 @@ import {
   latencyHeatmapURL,
   layoutGraph,
   lerpColor,
+  outcomeRates,
+  outcomeSummary,
   parseHeatFrame,
   parseLatencyFrame,
   parseAllowlist,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
+  probeRun,
   reportHTMLURL,
   requestTotal,
   runDisabled,
+  runIdFromQuery,
   shareTokenFromQuery,
   terminalNodeIds,
+  terminalRole,
   traceable,
   traceURL,
   type ExperimentForm,
+  type RunSpec,
 } from './api'
+
+// expParams unwraps the experiment params for assertions (experiment is typed
+// `unknown` on the wire so the UI never depends on its shape elsewhere).
+function expParams(spec: RunSpec): { virtualUserCount: number; deviationRate: number } {
+  return (spec.experiment as { params: { virtualUserCount: number; deviationRate: number } }).params
+}
 
 // rgb parses a color into channels for assertions, accepting both the "rgb(r, g, b)"
 // form heatColor/lerpColor emit and the "#rrggbb" form of the ramp endpoints.
@@ -55,6 +69,7 @@ const form: ExperimentForm = {
   allowlist: 'localhost, 127.0.0.1 ',
   users: 3,
   maxSteps: 5,
+  deviationPct: 0,
   start: 'a',
   graphJSON: '{"id":"g","nodes":[{"id":"a"}],"edges":[]}',
   templatesJSON: '{"ta":{"method":"GET","path":"/a"}}',
@@ -248,6 +263,21 @@ describe('buildRunSpec', () => {
     // Open: uncapped (0) still attaches.
     expect(buildRunSpec({ ...open, maxConcurrency: 0 }).trace).toBe(true)
   })
+
+  it('sends the deviation percent as a 0..1 deviationRate fraction', () => {
+    // The default (0%) keeps the exact 0 the server reads as "follow the path".
+    expect(expParams(buildRunSpec(form)).deviationRate).toBe(0)
+    // A friendly percent converts to the server's fraction contract.
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 25 })).deviationRate).toBeCloseTo(0.25, 9)
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 100 })).deviationRate).toBe(1)
+  })
+
+  it('clamps an out-of-range deviation percent into [0,1]', () => {
+    // The server hard-rejects deviationRate outside [0,1] with a 400; the builder
+    // degrades a hand-typed out-of-range percent gracefully instead.
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 150 })).deviationRate).toBe(1)
+    expect(expParams(buildRunSpec({ ...form, deviationPct: -10 })).deviationRate).toBe(0)
+  })
 })
 
 describe('traceable', () => {
@@ -319,6 +349,27 @@ describe('importScenario', () => {
     expect(calls[0].url).toBe('/api/import?format=openapi')
     expect(calls[0].init?.method).toBe('POST')
     expect(calls[0].init?.body).toBe('openapi: 3.0.0')
+  })
+
+  it('passes the optional coverage stats through, and tolerates their absence', async () => {
+    // A stats-aware server attaches `stats` (the import coverage report)…
+    const withStats = {
+      graph: { id: 'g', nodes: [{ id: 'a' }], edges: [] },
+      templates: {},
+      start: 'a',
+      maxSteps: 3,
+      stats: { requests: 120, skipped: 7, sessions: 32, clients: 21, droppedEndpoints: 3 },
+    }
+    mockFetch({ ok: true, status: 200, body: JSON.stringify(withStats) })
+    const out = await importScenario('log line', 'accesslog')
+    expect(out.stats).toEqual(withStats.stats)
+
+    // …while an old server (pre-stats response shape) simply leaves it undefined.
+    const { stats: _stats, ...withoutStats } = withStats
+    mockFetch({ ok: true, status: 200, body: JSON.stringify(withoutStats) })
+    const legacy = await importScenario('log line', 'accesslog')
+    expect(legacy.stats).toBeUndefined()
+    expect(legacy.start).toBe('a')
   })
 
   it('passes the chosen format through in the query string', async () => {
@@ -851,6 +902,86 @@ describe('classifyEdge', () => {
   })
 })
 
+describe('terminalRole', () => {
+  it("classifies 'exit' as the drop-off", () => {
+    expect(terminalRole('exit')).toBe('dropoff')
+  })
+
+  it('reads any other terminal as a completion (an unnamed endpoint stays positive)', () => {
+    expect(terminalRole('done')).toBe('completion')
+    expect(terminalRole('finished')).toBe('completion')
+  })
+})
+
+describe('outcomeRates', () => {
+  it('derives the completion and drop-off rates from raw counts', () => {
+    expect(outcomeRates(200, 30, 50)).toEqual({
+      started: 200,
+      completed: 30,
+      dropped: 50,
+      completionRate: 0.15,
+      dropOffRate: 0.25,
+    })
+  })
+
+  it('is all-zero rates when nothing started (never NaN)', () => {
+    const o = outcomeRates(0, 0, 0)
+    expect(o.completionRate).toBe(0)
+    expect(o.dropOffRate).toBe(0)
+  })
+})
+
+describe('outcomeSummary', () => {
+  const terminals = new Set(['done', 'exit'])
+
+  it('folds entry volume and terminal inflow into journey-outcome rates', () => {
+    const edges = [
+      { from: '', to: 'browse', requests: 100 }, // journeys started
+      { from: 'browse', to: 'search', requests: 40 }, // mid-journey request → not an outcome
+      { from: 'browse', to: 'exit', requests: 20 }, // drop-off
+      { from: 'cart', to: 'exit', requests: 10 }, // drop-off from a second source
+      { from: 'checkout', to: 'done', requests: 15 }, // completion
+    ]
+    const o = outcomeSummary(edges, terminals)
+    expect(o.started).toBe(100)
+    expect(o.completed).toBe(15)
+    expect(o.dropped).toBe(30)
+    expect(o.completionRate).toBeCloseTo(0.15, 9)
+    expect(o.dropOffRate).toBeCloseTo(0.3, 9)
+  })
+
+  it('sums multiple entry edges (personas can start at different nodes)', () => {
+    const edges = [
+      { from: '', to: 'browse', requests: 70 },
+      { from: '', to: 'cart', requests: 30 },
+      { from: 'checkout', to: 'done', requests: 25 },
+    ]
+    const o = outcomeSummary(edges, terminals)
+    expect(o.started).toBe(100)
+    expect(o.completionRate).toBeCloseTo(0.25, 9)
+  })
+
+  it('counts an unnamed terminal as a completion, matching the flow view', () => {
+    const edges = [
+      { from: '', to: 'a', requests: 10 },
+      { from: 'a', to: 'finished', requests: 4 },
+    ]
+    const o = outcomeSummary(edges, new Set(['finished']))
+    expect(o.completed).toBe(4)
+    expect(o.dropped).toBe(0)
+  })
+
+  it('is all zeros with no traffic', () => {
+    expect(outcomeSummary([], terminals)).toEqual({
+      started: 0,
+      completed: 0,
+      dropped: 0,
+      completionRate: 0,
+      dropOffRate: 0,
+    })
+  })
+})
+
 describe('requestTotal', () => {
   const terminals = new Set(['done', 'exit'])
 
@@ -879,5 +1010,252 @@ describe('requestTotal', () => {
       { from: 'b', to: 'exit', requests: 3 },
     ]
     expect(requestTotal(edges, terminals)).toBe(0)
+  })
+})
+
+// --- Attach mode (?run=<run-id>) -------------------------------------------------
+// `tmula demo` (and any shared link) opens the console as /?run=<run-id>; these
+// helpers parse the parameter, probe the run, and re-hydrate the form from the
+// run's stored spec so the attached live view matches what the run executes.
+
+describe('runIdFromQuery', () => {
+  it('extracts a run id', () => {
+    expect(runIdFromQuery('?run=run-1')).toBe('run-1')
+    expect(runIdFromQuery('?foo=1&run=run-7')).toBe('run-7')
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(runIdFromQuery('?run=%20run-2%20')).toBe('run-2')
+  })
+
+  it('returns null when absent or blank', () => {
+    expect(runIdFromQuery('')).toBeNull()
+    expect(runIdFromQuery('?foo=1')).toBeNull()
+    expect(runIdFromQuery('?run=')).toBeNull()
+    expect(runIdFromQuery('?run=%20%20')).toBeNull()
+  })
+})
+
+describe('probeRun', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  // mockFetch installs a fetch stub returning the given response and records the
+  // requested URLs (same shape as the importScenario helper above).
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string }[] = []
+    vi.stubGlobal('fetch', (url: string) => {
+      calls.push({ url })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      } as Response)
+    })
+    return calls
+  }
+
+  it('returns the report when the run exists', async () => {
+    const report = {
+      run: { id: 'run-1', status: 'running', experimentId: 'exp-1' },
+      stats: { total: 0, errors: 0, timeouts: 0, errorRate: 0, statusCounts: {}, p50: 0, p95: 0, p99: 0, max: 0 },
+      findings: [],
+    }
+    const calls = mockFetch({ ok: true, status: 200, body: JSON.stringify(report) })
+    const out = await probeRun('run-1')
+    expect(out).toEqual(report)
+    expect(calls[0].url).toBe('/api/runs/run-1/report')
+  })
+
+  it('returns null on 404 so an unknown run falls back to the form', async () => {
+    mockFetch({ ok: false, status: 404, body: '{"error":"run \\"x\\" not found"}' })
+    expect(await probeRun('x')).toBeNull()
+  })
+
+  it('throws on a non-404 failure', async () => {
+    mockFetch({ ok: false, status: 500, body: 'boom' })
+    await expect(probeRun('run-1')).rejects.toThrow('500')
+  })
+
+  it('escapes the run id into the URL', async () => {
+    const calls = mockFetch({ ok: false, status: 404, body: '' })
+    await probeRun('a/b')
+    expect(calls[0].url).toBe('/api/runs/a%2Fb/report')
+  })
+})
+
+describe('getExperimentSpec', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns the stored spec', async () => {
+    const spec = { start: 'browse', maxSteps: 9 }
+    vi.stubGlobal('fetch', (url: string) => {
+      expect(url).toBe('/api/experiments/exp-1')
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(spec),
+      } as Response)
+    })
+    expect(await getExperimentSpec('exp-1')).toEqual(spec)
+  })
+
+  it('returns null when the spec is gone (404) or any other failure', async () => {
+    vi.stubGlobal('fetch', () =>
+      Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) } as Response),
+    )
+    expect(await getExperimentSpec('exp-1')).toBeNull()
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
+    expect(await getExperimentSpec('exp-1')).toBeNull()
+  })
+})
+
+describe('formFromRunSpec', () => {
+  // A demo-like open-model spec, shaped exactly as GET /experiments/{id} returns
+  // it (the server's RunSpec JSON).
+  const openSpec = {
+    experiment: {
+      id: 'exp-1',
+      name: 'demo',
+      targetEnvId: 'env',
+      scenarioGraphId: 'graph',
+      params: { virtualUserCount: 1, deviationRate: 0.05, authStrategy: 'pool' },
+    },
+    targetEnv: {
+      id: 'env',
+      baseUrl: 'http://127.0.0.1:55330',
+      allowlist: ['127.0.0.1', 'localhost'],
+      rateCap: { maxRps: 1000, maxConcurrency: 2000 },
+      envClass: 'dev',
+    },
+    graph: {
+      id: 'learned',
+      nodes: [{ id: 'browse', apiTemplateId: 'b' }, { id: 'exit' }],
+      edges: [{ from: 'browse', to: 'exit', weight: 1 }],
+    },
+    templates: { b: { method: 'GET', path: '/products' } },
+    start: 'browse',
+    maxSteps: 12,
+    users: [{ id: 'u0' }],
+    seed: 1,
+    workload: {
+      kind: 'open',
+      arrival: { shape: 'constant', startRate: 8, peakRate: 8 },
+      durationSeconds: 60,
+      maxConcurrency: 200,
+      thinkTime: { minMs: 50, maxMs: 250 },
+    },
+    trace: true,
+  }
+
+  it('maps an open-model spec onto the form so attach converges with the form path', () => {
+    const patch = formFromRunSpec(openSpec)
+    expect(patch).not.toBeNull()
+    expect(patch!.baseUrl).toBe('http://127.0.0.1:55330')
+    expect(patch!.allowlist).toBe('127.0.0.1, localhost')
+    expect(patch!.start).toBe('browse')
+    expect(patch!.maxSteps).toBe(12)
+    expect(patch!.workloadKind).toBe('open')
+    expect(patch!.arrivalRate).toBe(8)
+    expect(patch!.durationSeconds).toBe(60)
+    expect(patch!.maxConcurrency).toBe(200)
+    expect(patch!.thinkMinMs).toBe(50)
+    expect(patch!.thinkMaxMs).toBe(250)
+    expect(patch!.traceEnabled).toBe(true)
+    expect(patch!.deviationPct).toBe(5)
+    // The graph/templates land as pretty-printed JSON the scenario card can edit
+    // and the live view can parse.
+    expect(JSON.parse(patch!.graphJSON!)).toEqual(openSpec.graph)
+    expect(JSON.parse(patch!.templatesJSON!)).toEqual(openSpec.templates)
+  })
+
+  it('keeps the form usable by the run path (buildRunSpec round-trips)', () => {
+    const base: ExperimentForm = {
+      baseUrl: 'http://localhost:9000',
+      allowlist: 'localhost',
+      users: 20,
+      maxSteps: 8,
+      deviationPct: 0,
+      start: 'a',
+      graphJSON: '{}',
+      templatesJSON: '{}',
+      workers: '',
+      aggregateWorkers: false,
+      workloadKind: 'closed',
+      arrivalRate: 12,
+      durationSeconds: 30,
+      maxConcurrency: 80,
+      thinkMinMs: 300,
+      thinkMaxMs: 900,
+      segmentsJSON: '',
+      traceEnabled: true,
+    }
+    const patch = formFromRunSpec(openSpec)!
+    const spec = buildRunSpec({ ...base, ...patch })
+    expect(spec.start).toBe('browse')
+    expect(spec.workload?.arrival.peakRate).toBe(8)
+    expect(spec.trace).toBe(true)
+  })
+
+  it('maps a closed-model spec: user count, no open fields', () => {
+    const closed = {
+      ...openSpec,
+      workload: undefined,
+      userCount: 300,
+      trace: false,
+    }
+    const patch = formFromRunSpec(closed)!
+    expect(patch.workloadKind).toBe('closed')
+    expect(patch.users).toBe(300)
+    expect(patch.traceEnabled).toBe(false)
+    expect(patch.arrivalRate).toBeUndefined()
+  })
+
+  it('falls back to the users list length when userCount is absent', () => {
+    const closed = { ...openSpec, workload: undefined, users: [{ id: 'u0' }, { id: 'u1' }] }
+    expect(formFromRunSpec(closed)!.users).toBe(2)
+  })
+
+  it('carries the persona mix of an open run', () => {
+    const segs = [{ name: 'buyer', weight: 0.3, start: 'browse' }]
+    const patch = formFromRunSpec({ ...openSpec, segments: segs })!
+    expect(JSON.parse(patch.segmentsJSON!)).toEqual(segs)
+  })
+
+  it('joins workers and keeps aggregate mode', () => {
+    const patch = formFromRunSpec({
+      ...openSpec,
+      workers: ['127.0.0.1:9101', '127.0.0.1:9102'],
+      aggregateWorkers: true,
+    })!
+    expect(patch.workers).toBe('127.0.0.1:9101, 127.0.0.1:9102')
+    expect(patch.aggregateWorkers).toBe(true)
+  })
+
+  it('returns null without a usable scenario graph', () => {
+    expect(formFromRunSpec(null)).toBeNull()
+    expect(formFromRunSpec('nope')).toBeNull()
+    expect(formFromRunSpec({})).toBeNull()
+    expect(formFromRunSpec({ graph: { nodes: 'x', edges: [] } })).toBeNull()
+  })
+
+  it('omits fields the spec does not carry instead of clobbering the form', () => {
+    const minimal = {
+      graph: { nodes: [{ id: 'a' }], edges: [] },
+      templates: {},
+      start: 'a',
+      maxSteps: 3,
+    }
+    const patch = formFromRunSpec(minimal)!
+    expect(patch.baseUrl).toBeUndefined()
+    expect(patch.allowlist).toBeUndefined()
+    expect(patch.workers).toBeUndefined()
+    // No workload block = the closed default, with no pool size to apply.
+    expect(patch.workloadKind).toBe('closed')
+    expect(patch.users).toBeUndefined()
   })
 })

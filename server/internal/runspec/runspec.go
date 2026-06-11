@@ -1,7 +1,7 @@
 // Package runspec holds RunSpec, the self-contained experiment definition the
 // control plane runs. It lives in its own leaf package (depending only on
-// domain, load and auth) so config producers like scenariofile can name the
-// type without importing the whole api control plane.
+// domain, load, auth and obs) so config producers like scenariofile can name
+// the type without importing the whole api control plane.
 package runspec
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
+	"github.com/chordpli/tmula/server/internal/obs"
 )
 
 // RunSpec is a self-contained experiment definition: everything needed to run.
@@ -65,6 +66,14 @@ type RunSpec struct {
 	// never a run failure. The Prometheus host must be in the target allowlist,
 	// like every other host the engine reaches.
 	Metrics *domain.MetricsSource `json:"metrics,omitempty"`
+
+	// Findings, when set, tunes how the run's observations are classified into
+	// findings: the error-rate threshold, the (otherwise disabled) p95 latency
+	// gate, and the consecutive-failure streak that flags availability. A nil
+	// block — and any zero field within it — keeps the long-standing defaults
+	// (see obs.DefaultClassifyConfig), so existing specs classify exactly as
+	// before.
+	Findings *obs.FindingConfig `json:"findings,omitempty"`
 
 	// CredentialPool, when set, authenticates the run: each virtual user (closed)
 	// or session (open) is assigned a credential by index from the pool, so the
@@ -152,6 +161,9 @@ func (r RunSpec) Validate() error {
 	if err := r.validateCredentialPool(); err != nil {
 		return err
 	}
+	if err := r.Findings.Validate(); err != nil {
+		return fmt.Errorf("api: %w", err)
+	}
 	if r.Metrics != nil {
 		if err := r.Metrics.Validate(); err != nil {
 			return fmt.Errorf("api: %w", err)
@@ -167,6 +179,14 @@ func (r RunSpec) Validate() error {
 // bootstrap-signup request fails loudly rather than silently running
 // unauthenticated, and a credential pool combined with distributed workers is
 // refused because the worker fan-out synthesizes its own (unauthenticated) users.
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: the rejection of (CredentialPool ≠ nil)
+// combined with (Workers > 0 || AggregateWorkers) is what guarantees that any
+// distributed run is always unauthenticated. CredentialProvider therefore returns
+// (nil, nil) for every distributed spec, which is the assumption reproduce.go's
+// sessionUser relies on to stay user-consistent: if a distributed run could carry
+// a credential pool, sessionUser would silently replay it under the wrong user.
+// See also: CredentialProvider and the sessionUser function in reproduce.go.
 func (r RunSpec) validateCredentialPool() error {
 	if r.CredentialPool == nil {
 		return nil
@@ -180,6 +200,8 @@ func (r RunSpec) validateCredentialPool() error {
 		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
 	}
 	if len(r.Workers) > 0 || r.AggregateWorkers {
+		// This rejection is load-bearing for reproduce fidelity — see the doc
+		// comment above before relaxing it.
 		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
 	}
 	return nil
@@ -188,6 +210,13 @@ func (r RunSpec) validateCredentialPool() error {
 // CredentialProvider builds the auth provider for a run from its credential pool,
 // or returns (nil, nil) when the run is unauthenticated. Validate has already
 // confirmed the pool is a usable "pool" strategy, so no signup function is needed.
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: a distributed run always returns (nil,
+// nil) here because validateCredentialPool rejects any spec that combines a
+// credential pool with distributed workers. The reproduce path (sessionUser in
+// reproduce.go) relies on this: a nil provider means the replayed session runs
+// as the same user the evidence session ran as, keeping the reproduce verdict
+// user-consistent. See validateCredentialPool for the full invariant.
 func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil

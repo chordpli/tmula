@@ -7,6 +7,7 @@ const form: ExperimentForm = {
   allowlist: 'localhost',
   users: 3,
   maxSteps: 5,
+  deviationPct: 0,
   start: 'browse',
   graphJSON: JSON.stringify({
     id: 'g',

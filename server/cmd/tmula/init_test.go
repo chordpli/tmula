@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chordpli/tmula/server/internal/scenariofile"
@@ -85,16 +86,62 @@ func TestInitFromAccessLogWritesGraphFirstScenario(t *testing.T) {
 	}
 }
 
-func TestImportRunSpecLearnsFromAccessLogWithoutTarget(t *testing.T) {
+func TestImportRunSpecWithStatsLearnsFromAccessLogWithoutTarget(t *testing.T) {
 	// The web import endpoint only consumes graph/templates/start/maxSteps, so
 	// a log (which names no host) must still convert instead of failing on the
-	// missing target.
-	spec, err := importRunSpec([]byte(sampleAccessLog), "auto")
+	// missing target — and the access-log path must carry the learner's
+	// coverage stats, mapped field-for-field onto the wire type.
+	garbled := sampleAccessLog + "definitely not an access log line\n"
+	spec, stats, err := importRunSpecWithStats([]byte(garbled), "auto")
 	if err != nil {
-		t.Fatalf("importRunSpec: %v", err)
+		t.Fatalf("importRunSpecWithStats: %v", err)
 	}
 	if len(spec.Graph.Nodes) < 3 || spec.Start == "" {
 		t.Errorf("learned spec graph=%d nodes start=%q, want a populated graph", len(spec.Graph.Nodes), spec.Start)
+	}
+	if stats == nil {
+		t.Fatal("stats = nil, want the learner's coverage report for an access-log import")
+	}
+	if stats.Requests != 3 || stats.Sessions != 2 || stats.Clients != 2 {
+		t.Errorf("stats = %+v, want requests/sessions/clients = 3/2/2", stats)
+	}
+	if stats.Format != "combined" {
+		t.Errorf("stats.Format = %q, want the detected profile (combined)", stats.Format)
+	}
+	if stats.Skipped != 1 || len(stats.SkippedSamples) != 1 {
+		t.Fatalf("skipped = %d with %d sample(s), want the garbage line counted and sampled", stats.Skipped, len(stats.SkippedSamples))
+	}
+	if s := stats.SkippedSamples[0]; s.Line != 4 || s.Reason == "" || s.Text == "" {
+		t.Errorf("skipped sample = %+v, want line 4 with a reason and the line text", s)
+	}
+}
+
+func TestImportRunSpecWithStatsNilForSpecConversions(t *testing.T) {
+	// OpenAPI/HAR conversions have no coverage to report: stats must be nil so
+	// the endpoint omits the field and old clients see the pre-stats shape.
+	openapi := "openapi: 3.0.0\nservers:\n  - url: http://svc.test\npaths:\n  /ping:\n    get: {}\n"
+	_, stats, err := importRunSpecWithStats([]byte(openapi), "auto")
+	if err != nil {
+		t.Fatalf("importRunSpecWithStats: %v", err)
+	}
+	if stats != nil {
+		t.Errorf("stats = %+v, want nil for an OpenAPI conversion", stats)
+	}
+}
+
+func TestImportScenarioNoteReportsFormatAndSkippedLines(t *testing.T) {
+	// `tmula init` must not stay silent about what the learner inferred: the
+	// note carries the detected format (so a misdetection is visible) and the
+	// first skipped lines with their line numbers and reasons.
+	garbled := sampleAccessLog + "definitely not an access log line\n"
+	_, note, err := importScenario([]byte(garbled), "accesslog", "")
+	if err != nil {
+		t.Fatalf("importScenario: %v", err)
+	}
+	for _, want := range []string{"combined", "skipped 1 unusable line(s)", "line 4:"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note is missing %q\nnote:\n%s", want, note)
+		}
 	}
 }
 
