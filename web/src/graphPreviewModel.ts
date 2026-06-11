@@ -110,15 +110,10 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
       const lane = nextNoteLane(noteLanes, edge.from)
       return exitRoute(edge, index, from, lane, routeTop, kind, showLabel)
     }
-    if (dx === 0) {
+    if (dx <= 0) {
       const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
       const lane = nextNoteLane(noteLanes, edge.from)
-      return sameColumnRoute(edge, index, from, lane, routeTop, kind, showLabel)
-    }
-    if (dx < 0) {
-      const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
-      const lane = nextNoteLane(noteLanes, edge.from)
-      return backRoute(edge, index, from, lane, routeTop, kind, showLabel)
+      return backArcRoute(edge, index, from, to, lane, routeTop, kind, showLabel)
     }
     return forwardRoute(edge, index, from, to, startOffset, endOffset, kind, showLabel)
   })
@@ -312,28 +307,59 @@ function forwardRoute(
   ], label)
 }
 
-function sameColumnRoute(
+// backArcRoute draws a real arrow for a backward or same-column transition,
+// arcing around the node row (left side for vertical neighbors, under/over the
+// row otherwise) so the destination is visible instead of implied by a chip.
+function backArcRoute(
   edge: EditableEdge,
   index: number,
   from: { x: number; y: number },
+  to: { x: number; y: number },
   lane: number,
   routeTop: boolean,
   kind: PreviewEdgeKind,
   showLabel: boolean,
 ): PreviewRoute {
-  return noteRoute(edge, index, from, lane, routeTop, kind, showLabel, `to ${edge.to} ${edge.weight}`)
-}
-
-function backRoute(
-  edge: EditableEdge,
-  index: number,
-  from: { x: number; y: number },
-  lane: number,
-  routeTop: boolean,
-  kind: PreviewEdgeKind,
-  showLabel: boolean,
-): PreviewRoute {
-  return noteRoute(edge, index, from, lane, routeTop, kind, showLabel, `to ${edge.to} ${edge.weight}`)
+  if (from.x === to.x) {
+    // Vertical neighbors: a short arc out the left side of both nodes.
+    const startP = { x: from.x - PREVIEW_NODE_HALF_W, y: from.y }
+    const endP = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y }
+    const bend = 46 + lane * 16
+    const c1 = { x: startP.x - bend, y: startP.y }
+    const c2 = { x: endP.x - bend, y: endP.y }
+    const mid = cubicPoint(startP, c1, c2, endP, 0.5)
+    const label = edgeLabel(edge.weight, mid.x, mid.y)
+    return route(
+      edge,
+      index,
+      kind,
+      showLabel,
+      `M ${fmt(startP.x)} ${fmt(startP.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(endP.x)} ${fmt(endP.y)}`,
+      [startP, c1, c2, endP],
+      label,
+    )
+  }
+  // Backward edge: arc under the row (over it when the source sits on the top
+  // row) from the source's edge to the target's, leaving the main rail clear.
+  // The arc dives below the exit-chip band (which sits ~50px off the row) so
+  // back arrows and exit notes never share the same lane.
+  const direction = routeTop ? -1 : 1
+  const startP = { x: from.x, y: from.y + direction * PREVIEW_NODE_HALF_H }
+  const endP = { x: to.x, y: to.y + direction * PREVIEW_NODE_HALF_H }
+  const lift = direction * (104 + lane * 18)
+  const c1 = { x: startP.x, y: startP.y + lift }
+  const c2 = { x: endP.x, y: endP.y + lift }
+  const mid = cubicPoint(startP, c1, c2, endP, 0.5)
+  const label = edgeLabel(edge.weight, mid.x, mid.y)
+  return route(
+    edge,
+    index,
+    kind,
+    showLabel,
+    `M ${fmt(startP.x)} ${fmt(startP.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(endP.x)} ${fmt(endP.y)}`,
+    [startP, c1, c2, endP],
+    label,
+  )
 }
 
 function exitRoute(

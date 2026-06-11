@@ -409,9 +409,10 @@ function NodeSelect({
 
 // edgeStrokeWidth encodes the edge's weight (a transition probability) as line
 // thickness, so the traffic split reads at a glance instead of only via labels.
+// The range is kept narrow (1.1–3.0) so a full-weight edge stays a line, not a bar.
 function edgeStrokeWidth(weight: number): number {
   const clamped = Math.max(0, Math.min(1, weight))
-  return 1.2 + clamped * 2.6
+  return 1.1 + clamped * 1.9
 }
 
 function GraphPreview({
@@ -456,19 +457,31 @@ function GraphPreview({
       role="img"
     >
       <defs>
-        <marker id="editor-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-          <path className="editor-preview__arrow" d="M 0 0 L 10 5 L 0 10 z" />
+        {/* markerUnits=userSpaceOnUse keeps the arrowhead a fixed, dainty size
+            instead of inflating with the weight-scaled stroke width. */}
+        <marker
+          id="editor-arrow"
+          viewBox="0 0 10 10"
+          refX="8.5"
+          refY="5"
+          markerWidth="8"
+          markerHeight="8"
+          markerUnits="userSpaceOnUse"
+          orient="auto-start-reverse"
+        >
+          <path className="editor-preview__arrow" d="M 0 0.8 L 10 5 L 0 9.2 z" />
         </marker>
         <marker
           id="editor-arrow-dep"
           viewBox="0 0 10 10"
-          refX="9"
+          refX="8.5"
           refY="5"
-          markerWidth="6"
-          markerHeight="6"
+          markerWidth="8"
+          markerHeight="8"
+          markerUnits="userSpaceOnUse"
           orient="auto-start-reverse"
         >
-          <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 0 L 10 5 L 0 10 z" />
+          <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 0.8 L 10 5 L 0 9.2 z" />
         </marker>
       </defs>
       {drawableRoutes.map((route) => (
@@ -487,10 +500,10 @@ function GraphPreview({
             route.edge.dependency ? 'editor-preview__edge--dep' : '',
             route.index === selectedEdgeIndex ? 'editor-preview__edge--selected' : '',
           ].join(' ')}
-          style={route.kind === 'back' || route.kind === 'exit' ? undefined : { strokeWidth: edgeStrokeWidth(route.edge.weight) }}
+          style={route.kind === 'exit' ? undefined : { strokeWidth: edgeStrokeWidth(route.edge.weight) }}
           d={route.d}
           markerEnd={
-            route.kind === 'back' || route.kind === 'exit'
+            route.kind === 'exit'
               ? undefined
               : route.edge.dependency
                 ? 'url(#editor-arrow-dep)'
