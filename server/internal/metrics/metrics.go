@@ -112,6 +112,12 @@ func queryRange(ctx context.Context, base string, q domain.MetricQuery, start, e
 
 	var env promEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
+		// A gateway/proxy error (502, 404, ...) usually carries an HTML or
+		// plain-text body; report the status rather than masking it behind a
+		// JSON syntax error.
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("prometheus: %s", resp.Status)
+		}
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK || env.Status != "success" {

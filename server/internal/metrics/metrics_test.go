@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,25 @@ func TestFetchDropsNonFiniteSamplesAndRefusesRedirects(t *testing.T) {
 	src.PrometheusURL = redir.URL
 	if _, err := Fetch(context.Background(), src, start, end); err == nil {
 		t.Error("expected an error for a redirecting metrics endpoint")
+	}
+}
+
+func TestFetchReportsStatusOnNonJSONErrorBody(t *testing.T) {
+	// A gateway in front of Prometheus answers 502 with an HTML body; the
+	// error must carry the status, not a JSON syntax error that masks it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html><body>Bad Gateway</body></html>"))
+	}))
+	t.Cleanup(srv.Close)
+	src := domain.MetricsSource{
+		PrometheusURL: srv.URL,
+		Queries:       []domain.MetricQuery{{Name: "x", Query: "up"}},
+	}
+	start, end := window()
+	_, err := Fetch(context.Background(), src, start, end)
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Errorf("error should carry the HTTP status, got: %v", err)
 	}
 }
 
