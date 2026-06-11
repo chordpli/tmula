@@ -162,6 +162,7 @@ export default function GraphEditor({
             const edge = graph.edges[index]
             if (edge) setSelection({ kind: 'edge', from: edge.from, to: edge.to })
           }}
+          onClearSelection={() => setSelection(null)}
         />
       </div>
 
@@ -454,6 +455,7 @@ function GraphPreview({
   selectedEdgeIndex,
   onSelectNode,
   onSelectEdge,
+  onClearSelection,
 }: {
   graph: EditableGraph
   start: string
@@ -462,6 +464,7 @@ function GraphPreview({
   selectedEdgeIndex: number
   onSelectNode: (index: number) => void
   onSelectEdge: (index: number) => void
+  onClearSelection: () => void
 }) {
   const { t } = useI18n()
   // hover narrows the view to one node or edge and its neighborhood: everything
@@ -511,6 +514,11 @@ function GraphPreview({
       className={`editor-preview editor-preview--${mode}`}
       viewBox={`${viewBox.minX} ${viewBox.minY} ${viewBox.width} ${viewBox.height}`}
       role="img"
+      onClick={(e) => {
+        // A click on bare canvas (not bubbled up from a node/edge child)
+        // dismisses the selection — the standard editor-canvas affordance.
+        if (e.target === e.currentTarget) onClearSelection()
+      }}
     >
       <defs>
         {/* markerUnits=userSpaceOnUse keeps the arrowhead a fixed, dainty size
