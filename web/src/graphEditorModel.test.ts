@@ -48,6 +48,8 @@ describe('graph editor model', () => {
   it('adds and updates edges', () => {
     const extended = addEdge(graph, 'cart', 'browse')
     expect(extended.edges).toContainEqual({ from: 'cart', to: 'browse', weight: 1 })
+    expect(addEdge(graph, 'cart', 'browse', 0.3).edges).toContainEqual({ from: 'cart', to: 'browse', weight: 0.3 })
+    expect(addEdge(graph, 'cart', 'browse', -2).edges).toContainEqual({ from: 'cart', to: 'browse', weight: 0 })
     const updated = updateEdge(extended, 1, { weight: -3, dependency: true })
     expect(updated.edges[1]).toEqual({ from: 'cart', to: 'browse', weight: 0, dependency: true })
   })

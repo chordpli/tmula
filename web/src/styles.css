@@ -1299,6 +1299,7 @@ a:hover {
 /* The preview always fits its container: the SVG scales via its viewBox, so the
    whole journey (including the last node) is visible without horizontal scroll. */
 .editor-preview-wrap {
+  position: relative;
   width: 100%;
   overflow: hidden;
   contain: layout paint;
@@ -1508,6 +1509,22 @@ a:hover {
   font-size: 10px !important;
   font-weight: 500 !important;
   fill: var(--text-muted) !important;
+}
+
+/* Instant readout of the hovered node/edge — faster and steadier than the
+   browser's native title tooltip. */
+.editor-hoverinfo {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  padding: 3px 8px;
 }
 
 /* Hover focus: unrelated elements fade so the hovered node/edge neighborhood

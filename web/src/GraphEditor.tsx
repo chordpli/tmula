@@ -47,7 +47,9 @@ export default function GraphEditor({
   const [newNodeTemplate, setNewNodeTemplate] = useState('')
   const [newEdgeFrom, setNewEdgeFrom] = useState('')
   const [newEdgeTo, setNewEdgeTo] = useState('')
+  const [newEdgeWeight, setNewEdgeWeight] = useState(1)
   const [previewMode, setPreviewMode] = useState<PreviewEdgeMode>('journey')
+  const [hoverInfo, setHoverInfo] = useState<string | null>(null)
 
   if (!graph) {
     return (
@@ -104,7 +106,7 @@ export default function GraphEditor({
     const from = newEdgeFrom || graph!.nodes[0]?.id || ''
     const to = newEdgeTo || graph!.nodes[1]?.id || graph!.nodes[0]?.id || ''
     if (!from || !to) return
-    commit(addEdge(graph!, from, to))
+    commit(addEdge(graph!, from, to, newEdgeWeight))
     setSelection({ kind: 'edge', from, to })
   }
 
@@ -163,7 +165,9 @@ export default function GraphEditor({
             if (edge) setSelection({ kind: 'edge', from: edge.from, to: edge.to })
           }}
           onClearSelection={() => setSelection(null)}
+          onHoverInfo={setHoverInfo}
         />
+        {hoverInfo && <div className="editor-hoverinfo">{hoverInfo}</div>}
       </div>
 
       <GraphLegend />
@@ -311,6 +315,15 @@ export default function GraphEditor({
             nodeIDs={nodeIDs}
             onChange={setNewEdgeTo}
           />
+          <input
+            className="input editor-row__weight"
+            type="number"
+            min={0}
+            step={0.1}
+            value={newEdgeWeight}
+            aria-label={t('editor.weight')}
+            onChange={(e) => setNewEdgeWeight(Math.max(0, Number(e.target.value) || 0))}
+          />
           <button type="button" className="btn btn--ghost editor-row__button" onClick={createEdge}>
             {t('editor.addEdge')}
           </button>
@@ -456,6 +469,7 @@ function GraphPreview({
   onSelectNode,
   onSelectEdge,
   onClearSelection,
+  onHoverInfo,
 }: {
   graph: EditableGraph
   start: string
@@ -465,6 +479,7 @@ function GraphPreview({
   onSelectNode: (index: number) => void
   onSelectEdge: (index: number) => void
   onClearSelection: () => void
+  onHoverInfo: (info: string | null) => void
 }) {
   const { t } = useI18n()
   // hover narrows the view to one node or edge and its neighborhood: everything
@@ -596,10 +611,22 @@ function GraphPreview({
           role="button"
           aria-label={`${t('editor.selEdge')}: ${route.edge.from} → ${route.edge.to}`}
           onClick={() => onSelectEdge(route.index)}
-          onMouseEnter={() => setHover({ kind: 'edge', index: route.index })}
-          onMouseLeave={() => setHover(null)}
-          onFocus={() => setHover({ kind: 'edge', index: route.index })}
-          onBlur={() => setHover(null)}
+          onMouseEnter={() => {
+            setHover({ kind: 'edge', index: route.index })
+            onHoverInfo(`${route.edge.from} → ${route.edge.to} · ${route.edge.weight}`)
+          }}
+          onMouseLeave={() => {
+            setHover(null)
+            onHoverInfo(null)
+          }}
+          onFocus={() => {
+            setHover({ kind: 'edge', index: route.index })
+            onHoverInfo(`${route.edge.from} → ${route.edge.to} · ${route.edge.weight}`)
+          }}
+          onBlur={() => {
+            setHover(null)
+            onHoverInfo(null)
+          }}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
@@ -644,10 +671,22 @@ function GraphPreview({
             role="button"
             aria-label={`${t('editor.selNode')}: ${node.id}`}
             onClick={() => onSelectNode(nodeIndex)}
-            onMouseEnter={() => setHover({ kind: 'node', id: node.id })}
-            onMouseLeave={() => setHover(null)}
-            onFocus={() => setHover({ kind: 'node', id: node.id })}
-            onBlur={() => setHover(null)}
+            onMouseEnter={() => {
+              setHover({ kind: 'node', id: node.id })
+              onHoverInfo(`${node.id} · ${node.apiTemplateId || 'terminal'}`)
+            }}
+            onMouseLeave={() => {
+              setHover(null)
+              onHoverInfo(null)
+            }}
+            onFocus={() => {
+              setHover({ kind: 'node', id: node.id })
+              onHoverInfo(`${node.id} · ${node.apiTemplateId || 'terminal'}`)
+            }}
+            onBlur={() => {
+              setHover(null)
+              onHoverInfo(null)
+            }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()

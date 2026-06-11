@@ -140,10 +140,10 @@ export function removeNode(g: EditableGraph, index: number): EditableGraph {
   }
 }
 
-export function addEdge(g: EditableGraph, from: string, to: string): EditableGraph {
+export function addEdge(g: EditableGraph, from: string, to: string, weight = 1): EditableGraph {
   if (!from || !to) return g
   if (g.edges.some((e) => e.from === from && e.to === to)) return g
-  return { ...g, edges: [...g.edges, { from, to, weight: 1 }] }
+  return { ...g, edges: [...g.edges, { from, to, weight: Math.max(0, weight) }] }
 }
 
 export function updateEdge(g: EditableGraph, index: number, patch: Partial<EditableEdge>): EditableGraph {
