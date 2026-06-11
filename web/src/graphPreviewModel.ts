@@ -341,23 +341,20 @@ function forwardRoute(
 ): PreviewRoute {
   const start = { x: from.x + PREVIEW_NODE_HALF_W, y: from.y + startOffset }
   const end = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y + endOffset }
-  // The curve hands over to a short straight horizontal lead-in before the
-  // node, so the arrowhead (always oriented horizontally) sits on a segment
-  // that is visibly horizontal too — head and line stay collinear even when
-  // the curve drops steeply between rows.
-  const lead = 14
-  const knee = { x: end.x - lead, y: end.y }
-  const curve = Math.max(28, Math.min(62, Math.abs(knee.x - start.x) * 0.3))
+  // Long horizontal handles (45% of the span) flatten the curve gradually, so
+  // it arrives at the node visibly horizontal — the arrowhead points the same
+  // way the line is going, with no elbow snapped in front of the node.
+  const curve = Math.max(40, Math.abs(end.x - start.x) * 0.45)
   const c1 = { x: start.x + curve, y: start.y }
-  const c2 = { x: knee.x - curve, y: knee.y }
-  const labelPoint = cubicPoint(start, c1, c2, knee, 0.5)
+  const c2 = { x: end.x - curve, y: end.y }
+  const labelPoint = cubicPoint(start, c1, c2, end, 0.5)
   const label = edgeLabel(edge.weight, labelPoint.x, labelPoint.y - 10)
   return route(
     edge,
     index,
     kind,
     showLabel,
-    `M ${fmt(start.x)} ${fmt(start.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(knee.x)} ${fmt(knee.y)} L ${fmt(end.x)} ${fmt(end.y)}`,
+    `M ${fmt(start.x)} ${fmt(start.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(end.x)} ${fmt(end.y)}`,
     [start, c1, c2, end],
     label,
   )

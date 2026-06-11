@@ -583,7 +583,7 @@ function GraphPreview({
             markerUnits="userSpaceOnUse"
             orient="auto-start-reverse"
           >
-            <path className="editor-preview__arrow" d="M 0 1 L 10 5 L 0 9 z" />
+            <path className="editor-preview__arrow" d="M 0 1.8 L 10 5 L 0 8.2 z" />
           </marker>,
           <marker
             key={markerIDFor(size, true)}
@@ -596,7 +596,7 @@ function GraphPreview({
             markerUnits="userSpaceOnUse"
             orient="auto-start-reverse"
           >
-            <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1 L 10 5 L 0 9 z" />
+            <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1.8 L 10 5 L 0 8.2 z" />
           </marker>,
         ])}
       </defs>
