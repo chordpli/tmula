@@ -96,6 +96,13 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
   const mainTop = Math.min(...railPoints.map((p) => p.y - PREVIEW_NODE_HALF_H))
 
   const noteLanes = new Map<string, number>()
+  // Backward edges get globally assigned depth lanes, shortest span first, so
+  // two back arcs nest like contour lines instead of crossing each other.
+  const backLaneByIndex = new Map<number, number>()
+  validEdges
+    .filter(({ from, to }) => to.x < from.x)
+    .sort((a, b) => (a.from.x - a.to.x) - (b.from.x - b.to.x))
+    .forEach((item, lane) => backLaneByIndex.set(item.index, lane))
   const rawRoutes = validEdges.map(({ edge, index, from, to }) => {
     const outList = outgoing.get(edge.from) ?? [index]
     const inList = incoming.get(edge.to) ?? [index]
@@ -112,7 +119,7 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
     }
     if (dx <= 0) {
       const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
-      const lane = nextNoteLane(noteLanes, edge.from)
+      const lane = dx === 0 ? nextNoteLane(noteLanes, edge.from) : backLaneByIndex.get(index) ?? 0
       return backArcRoute(edge, index, from, to, lane, routeTop, kind, showLabel)
     }
     return forwardRoute(edge, index, from, to, startOffset, endOffset, kind, showLabel)
@@ -339,16 +346,19 @@ function backArcRoute(
       label,
     )
   }
-  // Backward edge: arc under the row (over it when the source sits on the top
-  // row) from the source's edge to the target's, leaving the main rail clear.
-  // The arc dives below the exit-chip band (which sits ~50px off the row) so
-  // back arrows and exit notes never share the same lane.
+  // Backward edge: a U-shaped arc around the row (mirrored above it when the
+  // source sits on the top row). The space under a node is split into corridors:
+  // the bottom center belongs to that node's exit chip, so back arcs depart and
+  // arrive just outside the bottom-left corner (clear of the widest chip) and
+  // run their horizontal stretch below the chip band. The globally laned depth
+  // nests concurrent arcs instead of letting them cross.
   const direction = routeTop ? -1 : 1
-  const startP = { x: from.x, y: from.y + direction * PREVIEW_NODE_HALF_H }
-  const endP = { x: to.x, y: to.y + direction * PREVIEW_NODE_HALF_H }
-  const lift = direction * (104 + lane * 18)
-  const c1 = { x: startP.x, y: startP.y + lift }
-  const c2 = { x: endP.x, y: endP.y + lift }
+  const edgeY = direction * PREVIEW_NODE_HALF_H
+  const startP = { x: from.x - 44, y: from.y + edgeY }
+  const endP = { x: to.x - 44 - lane * 10, y: to.y + edgeY }
+  const depth = direction * (96 + lane * 20)
+  const c1 = { x: startP.x, y: from.y + depth }
+  const c2 = { x: endP.x, y: to.y + depth }
   const mid = cubicPoint(startP, c1, c2, endP, 0.5)
   const label = edgeLabel(edge.weight, mid.x, mid.y)
   return route(
