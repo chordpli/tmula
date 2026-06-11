@@ -59,9 +59,12 @@ type Server struct {
 	// a RunSpec for POST /import. Injected so the api package avoids the
 	// importer/scenariofile import cycle (both depend on api).
 	importFn ImportFunc
-	seq      atomic.Int64
-	now      func() time.Time
-	mux      *http.ServeMux
+	// importStatsFn, when set (WithImporterStats), is preferred over importFn and
+	// additionally returns import coverage stats surfaced in the /import response.
+	importStatsFn ImportStatsFunc
+	seq           atomic.Int64
+	now           func() time.Time
+	mux           *http.ServeMux
 }
 
 // maxRetainedRuns and maxRetainedShares bound the in-memory registries so a
