@@ -1386,8 +1386,13 @@ a:hover {
   opacity: 0.88;
 }
 
+/* A thin surface-colored outline keeps an arrowhead legible even when it lands
+   on top of another dark edge. */
 .editor-preview__arrow {
   fill: #667085;
+  stroke: var(--surface);
+  stroke-width: 1.1;
+  paint-order: stroke;
 }
 
 .editor-preview__arrow--dep {

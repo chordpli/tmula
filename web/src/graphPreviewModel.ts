@@ -120,7 +120,7 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
     if (dx <= 0) {
       const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
       const lane = dx === 0 ? nextNoteLane(noteLanes, edge.from) : backLaneByIndex.get(index) ?? 0
-      return backArcRoute(edge, index, from, to, lane, routeTop, kind, showLabel)
+      return backArcRoute(edge, index, from, to, lane, routeTop, kind, showLabel, endOffset)
     }
     return forwardRoute(edge, index, from, to, startOffset, endOffset, kind, showLabel)
   })
@@ -326,11 +326,14 @@ function backArcRoute(
   routeTop: boolean,
   kind: PreviewEdgeKind,
   showLabel: boolean,
+  endOffset: number,
 ): PreviewRoute {
   if (from.x === to.x) {
-    // Vertical neighbors: a short arc out the left side of both nodes.
+    // Vertical neighbors: a short arc out the left side of both nodes. The
+    // arrival uses the edge's own incoming port so its arrowhead lands beside —
+    // not on top of — the forward edges entering the same target.
     const startP = { x: from.x - PREVIEW_NODE_HALF_W, y: from.y }
-    const endP = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y }
+    const endP = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y + endOffset }
     const bend = 46 + lane * 16
     const c1 = { x: startP.x - bend, y: startP.y }
     const c2 = { x: endP.x - bend, y: endP.y }
@@ -355,7 +358,10 @@ function backArcRoute(
   const direction = routeTop ? -1 : 1
   const edgeY = direction * PREVIEW_NODE_HALF_H
   const startP = { x: from.x - 44, y: from.y + edgeY }
-  const endP = { x: to.x - 44 - lane * 10, y: to.y + edgeY }
+  // Arrivals spread leftward per lane but stay clamped inside the node's
+  // bottom edge, so every arrowhead actually touches its target.
+  const endX = Math.max(to.x - 40 - lane * 6, to.x - PREVIEW_NODE_HALF_W + 2)
+  const endP = { x: endX, y: to.y + edgeY }
   const depth = direction * (96 + lane * 20)
   const c1 = { x: startP.x, y: from.y + depth }
   const c2 = { x: endP.x, y: to.y + depth }
