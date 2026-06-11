@@ -884,6 +884,9 @@ function ImportCoveragePanel({ report }: { report: CoverageReport | null }) {
             dropped: report.droppedEndpoints,
           })}
         </span>
+        {report.format && (
+          <span className="coverage__format">{t('import.coverage.format', { format: report.format })}</span>
+        )}
       </div>
       {report.partial ? (
         <p className="coverage__warning">

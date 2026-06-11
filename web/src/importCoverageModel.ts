@@ -18,6 +18,10 @@ export interface CoverageSample {
 
 // CoverageReport is the fully-defaulted shape the panel renders.
 export interface CoverageReport {
+  // format is the resolved access-log format profile reported by the server
+  // (e.g. "combined", "alb", "cloudfront"). Absent when the server omitted it
+  // (old server, OpenAPI/HAR conversion).
+  format?: string
   requests: number
   skipped: number
   sessions: number
@@ -55,7 +59,8 @@ export function coverageFromStats(stats: unknown): CoverageReport | null {
   // A zero-line report has nothing honest to say; stay quiet rather than
   // rendering "0 requests used" noise for a malformed or empty stats object.
   if (totalLines === 0) return null
-  return {
+  const format = typeof s.format === 'string' && s.format ? s.format : undefined
+  const report: CoverageReport = {
     requests,
     skipped,
     sessions: toCount(s.sessions),
@@ -66,6 +71,8 @@ export function coverageFromStats(stats: unknown): CoverageReport | null {
     partial: skipped > 0,
     samples: toSamples(s.skippedSamples),
   }
+  if (format !== undefined) report.format = format
+  return report
 }
 
 // toCount coerces an untrusted wire value into a non-negative whole number,

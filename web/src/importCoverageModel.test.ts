@@ -124,4 +124,28 @@ describe('coverageFromStats', () => {
     expect(text.length).toBeLessThanOrEqual(161) // 160 chars + ellipsis
     expect(text.endsWith('…')).toBe(true)
   })
+
+  // format field — detected log format surfaced in the coverage report
+  it('carries the detected format when the server provides one', () => {
+    const report = coverageFromStats({ requests: 10, skipped: 0, format: 'combined' })
+    expect(report?.format).toBe('combined')
+  })
+
+  it('carries format: undefined when the server omits it (old server / spec import)', () => {
+    const report = coverageFromStats({ requests: 10, skipped: 0 })
+    expect(report?.format).toBeUndefined()
+  })
+
+  it('ignores a non-string format value instead of propagating junk', () => {
+    const report = coverageFromStats({ requests: 10, skipped: 0, format: 42 })
+    expect(report?.format).toBeUndefined()
+  })
+
+  it('carries all supported format strings unchanged', () => {
+    const formats = ['combined', 'alb', 'cloudfront', 'caddy', 'traefik', 'jsonl']
+    for (const fmt of formats) {
+      const report = coverageFromStats({ requests: 5, skipped: 0, format: fmt })
+      expect(report?.format).toBe(fmt)
+    }
+  })
 })

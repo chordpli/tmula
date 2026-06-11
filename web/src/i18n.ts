@@ -259,6 +259,7 @@ const en: Record<string, string> = {
   'import.coverage.full': 'Every usable line is reflected in the learned graph.',
   'import.coverage.folded':
     '{count} colder endpoint(s) beyond the graph cap were folded out; their traffic bridges across the kept nodes.',
+  'import.coverage.format': 'Detected as {format} format',
   'import.coverage.samples': 'Skipped line samples',
   'import.coverage.sample.line': 'Line',
   'import.coverage.sample.text': 'Content',
@@ -569,6 +570,7 @@ const ko: Record<string, string> = {
   'import.coverage.full': '사용 가능한 모든 줄이 학습된 그래프에 반영되었습니다.',
   'import.coverage.folded':
     '그래프 상한을 넘는 한산한 엔드포인트 {count}개를 접었습니다 — 해당 트래픽은 남은 노드 사이로 이어집니다.',
+  'import.coverage.format': '{format} 포맷으로 감지됨',
   'import.coverage.samples': '건너뛴 줄 샘플',
   'import.coverage.sample.line': '줄',
   'import.coverage.sample.text': '내용',

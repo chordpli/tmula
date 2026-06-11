@@ -893,6 +893,10 @@ export interface ImportSkippedSample {
 // silently passing as full coverage. Old servers and spec conversions
 // (OpenAPI/HAR) omit it entirely.
 export interface ImportStats {
+  // format is the resolved access-log format profile (e.g. "combined", "alb",
+  // "cloudfront", "caddy", "traefik", "jsonl"). Omitted when the importer
+  // reports none (old server, OpenAPI/HAR conversion).
+  format?: string
   requests?: number
   skipped?: number
   sessions?: number
