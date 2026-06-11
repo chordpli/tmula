@@ -28,3 +28,18 @@ func Handler() http.Handler {
 	}
 	return http.FileServer(http.FS(sub))
 }
+
+// HasBuiltUI reports whether the embedded UI is a real `make web` build rather
+// than the committed placeholder page, so callers (e.g. `tmula demo`) can warn
+// that the live console is missing from this binary.
+func HasBuiltUI() bool {
+	return hasBuiltUI(staticFS)
+}
+
+// hasBuiltUI checks fsys for a non-empty static/assets directory: the bundler
+// always emits one and `make embed` copies it in, while the placeholder commit
+// ships only static/index.html.
+func hasBuiltUI(fsys fs.FS) bool {
+	entries, err := fs.ReadDir(fsys, "static/assets")
+	return err == nil && len(entries) > 0
+}

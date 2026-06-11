@@ -1,7 +1,12 @@
 package main
 
 import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -67,6 +72,67 @@ func TestSetupStoreLocalSnapshotRoundTrip(t *testing.T) {
 	defer closeSecond()
 	if r, err := second.GetRun("r1"); err != nil || r.Status != domain.RunCompleted {
 		t.Errorf("reloaded run = %+v, %v; history did not survive restart", r, err)
+	}
+}
+
+// TestEngineImportStatsWiredE2E is the regression guard for the production
+// import wiring: a review found WithImporterStats referenced only by the api
+// package's own tests while both real servers (serve and `tmula demo`) still
+// registered the legacy importer, so POST /api/import never returned stats and
+// the web coverage panel stayed invisible. Both servers now assemble their
+// engine through newEngineServer, so POSTing a real access log to that exact
+// surface proves the coverage report ships in production, not just in stubs.
+func TestEngineImportStatsWiredE2E(t *testing.T) {
+	_, handler := newEngineServer(domain.RoleLocal)
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	logData := sampleAccessLog + "definitely not an access log line\n"
+	resp, err := http.Post(ts.URL+"/api/import", "text/plain", strings.NewReader(logData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 200; body: %s", resp.StatusCode, body)
+	}
+	var got struct {
+		Start string `json:"start"`
+		Stats *struct {
+			Format         string `json:"format"`
+			Requests       int    `json:"requests"`
+			Skipped        int    `json:"skipped"`
+			Sessions       int    `json:"sessions"`
+			Clients        int    `json:"clients"`
+			SkippedSamples []struct {
+				Line   int    `json:"line"`
+				Text   string `json:"text"`
+				Reason string `json:"reason"`
+			} `json:"skippedSamples"`
+		} `json:"stats"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Start == "" {
+		t.Error("imported spec has no start node")
+	}
+	if got.Stats == nil {
+		t.Fatal("stats missing: the production server is not wired with the stats-aware importer")
+	}
+	if got.Stats.Requests != 3 || got.Stats.Sessions != 2 || got.Stats.Clients != 2 {
+		t.Errorf("stats = %+v, want requests/sessions/clients = 3/2/2", got.Stats)
+	}
+	if got.Stats.Format != "combined" {
+		t.Errorf("stats.format = %q, want combined", got.Stats.Format)
+	}
+	if got.Stats.Skipped != 1 || len(got.Stats.SkippedSamples) != 1 {
+		t.Fatalf("skipped = %d with %d sample(s), want the garbage line counted and sampled",
+			got.Stats.Skipped, len(got.Stats.SkippedSamples))
+	}
+	if s := got.Stats.SkippedSamples[0]; s.Line != 4 || s.Reason == "" {
+		t.Errorf("skipped sample = %+v, want line 4 with a reason", s)
 	}
 }
 

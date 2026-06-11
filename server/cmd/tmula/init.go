@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/chordpli/tmula/server/internal/api"
 	"github.com/chordpli/tmula/server/internal/importer"
 	"github.com/chordpli/tmula/server/internal/runspec"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
@@ -86,49 +87,118 @@ func initScenario(args []string) error {
 // kept and dropped (the access-log path reports its coverage; spec conversions
 // have nothing to add).
 func importScenario(data []byte, format, name string) (scenariofile.Scenario, string, error) {
+	sc, stats, err := importScenarioStats(data, format, name)
+	if err != nil || stats == nil {
+		return sc, "", err
+	}
+	return sc, accessLogNote(sc, *stats), nil
+}
+
+// importScenarioStats is importScenario's stats-carrying core: the access-log
+// path returns the learner's coverage report, spec conversions (OpenAPI/HAR)
+// return nil — they have no coverage to report.
+func importScenarioStats(data []byte, format, name string) (scenariofile.Scenario, *importer.AccessLogStats, error) {
 	switch detectFormat(format, name, data) {
 	case "openapi":
 		sc, err := importer.FromOpenAPI(data)
-		return sc, "", err
+		return sc, nil, err
 	case "har":
 		sc, err := importer.FromHAR(data)
-		return sc, "", err
+		return sc, nil, err
 	case "accesslog":
 		sc, stats, err := importer.FromAccessLog(data)
 		if err != nil {
-			return scenariofile.Scenario{}, "", err
+			return scenariofile.Scenario{}, nil, err
 		}
-		note := fmt.Sprintf("learned %d endpoint(s) from %d request(s) across %d session(s), %d client(s)",
-			len(sc.Templates), stats.Requests, stats.Sessions, stats.Clients)
-		if stats.DroppedEndpoints > 0 {
-			note += fmt.Sprintf("; folded %d colder endpoint(s) beyond the graph cap", stats.DroppedEndpoints)
-		}
-		if stats.Skipped > 0 {
-			note += fmt.Sprintf("; skipped %d unusable line(s)", stats.Skipped)
-		}
-		return sc, note, nil
+		return sc, &stats, nil
 	default:
-		return scenariofile.Scenario{}, "", fmt.Errorf("unknown format %q; use --format openapi|har|accesslog", format)
+		return scenariofile.Scenario{}, nil, fmt.Errorf("unknown format %q; use --format openapi|har|accesslog", format)
 	}
 }
 
-// importRunSpec converts an uploaded API description or access log into a
-// RunSpec for the web import endpoint (POST /api/import). That endpoint only
-// returns the graph, templates, start and maxSteps — the target env is
-// discarded — so inputs that name no host (access logs, server-less OpenAPI
-// specs) get a placeholder target instead of failing the expansion.
-func importRunSpec(data []byte, format string) (runspec.RunSpec, error) {
-	sc, note, err := importScenario(data, format, "")
-	if err != nil {
-		return runspec.RunSpec{}, err
+// noteSkippedSampleCap bounds how many skipped-line examples the init note
+// shows; the full sample list still travels with the web import stats.
+const noteSkippedSampleCap = 3
+
+// accessLogNote renders the learner's coverage for `tmula init`'s stderr: what
+// was kept, which format profile detection resolved (so a misdetection across
+// the six supported formats is visible instead of silent), and the first
+// skipped lines with their numbers and reasons.
+func accessLogNote(sc scenariofile.Scenario, stats importer.AccessLogStats) string {
+	note := fmt.Sprintf("learned %d endpoint(s) from %d request(s) across %d session(s), %d client(s)",
+		len(sc.Templates), stats.Requests, stats.Sessions, stats.Clients)
+	if stats.Format != "" {
+		note += fmt.Sprintf(" (%s format)", stats.Format)
 	}
-	if note != "" {
-		slog.Info("import", "note", note)
+	if stats.DroppedEndpoints > 0 {
+		note += fmt.Sprintf("; folded %d colder endpoint(s) beyond the graph cap", stats.DroppedEndpoints)
+	}
+	if stats.Skipped > 0 {
+		note += fmt.Sprintf("; skipped %d unusable line(s)", stats.Skipped)
+	}
+	samples := stats.SkippedSamples
+	if len(samples) > noteSkippedSampleCap {
+		samples = samples[:noteSkippedSampleCap]
+	}
+	for _, s := range samples {
+		note += fmt.Sprintf("\n  line %d: %s", s.Line, s.Reason)
+	}
+	if rest := len(stats.SkippedSamples) - len(samples); rest > 0 {
+		note += fmt.Sprintf("\n  … and %d more sampled line(s)", rest)
+	}
+	return note
+}
+
+// importRunSpecWithStats converts an uploaded API description or access log
+// into a RunSpec plus optional coverage stats for the web import endpoint
+// (POST /api/import). The endpoint only returns the graph, templates, start
+// and maxSteps — the target env is discarded — so inputs that name no host
+// (access logs, server-less OpenAPI specs) get a placeholder target instead of
+// failing the expansion. Access-log imports carry the learner's coverage
+// mapped onto the wire type; spec conversions return nil stats, which omits
+// the field from the response.
+func importRunSpecWithStats(data []byte, format string) (runspec.RunSpec, *api.ImportStats, error) {
+	sc, stats, err := importScenarioStats(data, format, "")
+	if err != nil {
+		return runspec.RunSpec{}, nil, err
 	}
 	if sc.Target == "" {
 		sc.Target = "http://localhost:9000"
 	}
-	return scenariofile.Expand(sc)
+	spec, err := scenariofile.Expand(sc)
+	if err != nil {
+		return runspec.RunSpec{}, nil, err
+	}
+	if stats == nil {
+		return spec, nil, nil
+	}
+	// Keep the server-side breadcrumb the legacy importer logged: the response
+	// carries the stats, but an operator tailing the engine log still sees what
+	// an upload learned.
+	slog.Info("import", "note", accessLogNote(sc, *stats))
+	return spec, toImportStats(*stats), nil
+}
+
+// toImportStats maps the learner's coverage report onto the wire type
+// field-for-field. The api package cannot name the importer's type directly
+// (the injection keeps those packages decoupled), so the mapping lives here.
+func toImportStats(stats importer.AccessLogStats) *api.ImportStats {
+	out := &api.ImportStats{
+		Format:           stats.Format,
+		Requests:         stats.Requests,
+		Skipped:          stats.Skipped,
+		Sessions:         stats.Sessions,
+		Clients:          stats.Clients,
+		DroppedEndpoints: stats.DroppedEndpoints,
+	}
+	for _, s := range stats.SkippedSamples {
+		out.SkippedSamples = append(out.SkippedSamples, api.ImportSkippedSample{
+			Line:   s.Line,
+			Text:   s.Text,
+			Reason: s.Reason,
+		})
+	}
+	return out
 }
 
 // detectFormat resolves an explicit --format, else infers it from the filename

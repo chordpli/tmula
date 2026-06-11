@@ -33,6 +33,11 @@ var version = "0.0.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
+		// --help is a successful outcome: the FlagSet already printed usage,
+		// so exit 0 without the fatal log.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		// --fail-on-findings (exit 2) and the --baseline regression gate
 		// (exit 3) are expected CI outcomes, not crashes: report them plainly
 		// rather than logging a fatal error. Distinct codes let a pipeline tell
@@ -53,8 +58,9 @@ func main() {
 // run dispatches subcommands. `tmula run ...` executes a one-shot experiment
 // from a scenario file (or flags) and prints the findings; `tmula reproduce`
 // replays a finished run's finding in isolation to classify its root cause;
-// every other invocation starts the long-running engine (the back-compatible
-// default).
+// `tmula demo` runs the whole loop self-contained against a built-in buggy
+// shop; every other invocation starts the long-running engine (the
+// back-compatible default).
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
@@ -66,6 +72,8 @@ func run(args []string) error {
 			return initScenario(args[1:])
 		case "bench":
 			return runBench(args[1:])
+		case "demo":
+			return runDemo(args[1:])
 		}
 	}
 	return serve(args)
@@ -104,14 +112,7 @@ func serve(args []string) error {
 		return runWorker(*addr)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","role":%q,"version":%q}`, role, version)
-	})
-
-	// Control plane under /api; the embedded UI under everything else. A
-	// --workers list (if any) becomes the default worker pool for experiments
+	// A --workers list (if any) becomes the default worker pool for experiments
 	// that do not specify their own.
 	defaultWorkers := splitCSV(*workersStr)
 	if len(defaultWorkers) > 0 {
@@ -128,21 +129,14 @@ func serve(args []string) error {
 	}
 	defer closeStore()
 
-	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second),
+	apiSrv, handler := newEngineServer(role,
 		api.WithDefaultWorkers(defaultWorkers),
 		api.WithStore(persistStore),
-		// Let the UI prefill an experiment from an uploaded OpenAPI spec, HAR
-		// capture, or access log. The conversion lives in cmd/tmula (which already
-		// depends on importer + scenariofile) and is injected so the api package
-		// avoids the cycle.
-		api.WithImporter(importRunSpec),
 	)
-	mux.Handle("/api/", http.StripPrefix("/api", apiSrv.Handler()))
-	mux.Handle("/", web.Handler())
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -170,6 +164,31 @@ func serve(args []string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// newEngineServer assembles the engine's HTTP surface shared by `tmula`
+// (serve) and `tmula demo`: /healthz, the control plane under /api, and the
+// embedded web console under everything else. The scenario importer is wired
+// here — stats-aware, so POST /api/import always carries the import coverage
+// report in production (a regression once slipped in when each server listed
+// its own importer option). Extra options extend the API server (worker pool,
+// store) without the callers re-listing the shared wiring.
+func newEngineServer(role domain.Role, opts ...api.Option) (*api.Server, http.Handler) {
+	// Let the UI prefill an experiment from an uploaded OpenAPI spec, HAR
+	// capture, or access log. The conversion lives in cmd/tmula (which already
+	// depends on importer + scenariofile) and is injected so the api package
+	// avoids the cycle.
+	opts = append(opts, api.WithImporterStats(importRunSpecWithStats))
+	apiSrv := api.NewServer(load.NewRESTAdapter(30*time.Second), opts...)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","role":%q,"version":%q}`, role, version)
+	})
+	mux.Handle("/api/", http.StripPrefix("/api", apiSrv.Handler()))
+	mux.Handle("/", web.Handler())
+	return apiSrv, mux
 }
 
 // runWorker serves the gRPC cluster service: a master distributes shards of a
