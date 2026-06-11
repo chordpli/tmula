@@ -58,7 +58,9 @@ func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	} else {
 		err = s.executeLocal(ctx, rs, spec, agg)
 	}
-	findings := agg.Classify(rs.exec.ID, obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5})
+	// The spec's optional findings block tunes the thresholds; a run without
+	// one classifies with the package defaults, exactly as before.
+	findings := agg.Classify(rs.exec.ID, spec.Findings.ClassifyConfig())
 	rs.mu.Lock()
 	rs.findings = findings
 	rs.mu.Unlock()
@@ -191,7 +193,9 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		User:     user,
 		Seed:     spec.Seed,
 		RunID:    rs.exec.ID,
-		Classify: obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5},
+		// The spec's optional findings block tunes the classifier thresholds
+		// (defaults when nil), identical to the closed paths.
+		Classify: spec.Findings.ClassifyConfig(),
 		// Feed the run's own collector so the SSE stream reports live progress
 		// while the open run is still generating traffic, not just at the end.
 		Collector: rs.collector,
@@ -213,7 +217,20 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 // the collector incrementally) are appended last so callers can layer on behavior
 // without duplicating the guard/event-sink wiring.
 func (s *Server) runnerFor(rs *runState, spec RunSpec, extra ...load.RunnerOption) *load.Runner {
-	opts := []load.RunnerOption{load.WithGuard(rs.guard), load.WithCorrelationIDs(rs.exec.ID, scenarioIDForSpec(spec))}
+	opts := []load.RunnerOption{
+		load.WithGuard(rs.guard),
+		load.WithCorrelationIDs(rs.exec.ID, scenarioIDForSpec(spec)),
+		// The experiment's deviation rate flows into every session's walk (both
+		// the closed Run fan-out and the open scheduler's RunSession); 0 — the
+		// default — leaves the weighted happy path untouched.
+		load.WithDeviation(spec.Experiment.Params.DeviationRate),
+	}
+	if spec.Workload != nil {
+		// Closed-model think time: Run paces each user from the workload model's
+		// range. The open path is unaffected — its scheduler passes think to
+		// RunSession explicitly, and the runner-level value applies only to Run.
+		opts = append(opts, load.WithThinkTime(spec.Workload.ThinkTime))
+	}
 	if rs.heat != nil || rs.trace != nil || rs.latency != nil {
 		heat, trace, latency := rs.heat, rs.trace, rs.latency
 		opts = append(opts, load.WithEventSink(func(e load.StepEvent) {
@@ -358,7 +375,10 @@ func (s *Server) executeDistributedSummary(ctx context.Context, rs *runState, sp
 	if err != nil {
 		return obs.Stats{}, nil, fmt.Errorf("api: distribute summary: %w", err)
 	}
-	cfg := obs.ClassifyConfig{ErrorRateThreshold: 0.2, AvailabilityRun: 5}
+	// Classification happens master-side on the merged summary, so the spec's
+	// findings block (defaults when nil) applies here without traveling to the
+	// workers.
+	cfg := spec.Findings.ClassifyConfig()
 	return summary.Stats(), obs.FindingsFromSummary(rs.exec.ID, summary, cfg), nil
 }
 
@@ -390,6 +410,13 @@ func dialWorkers(addrs []string) ([]grpc.ClientConnInterface, func(), error) {
 // to each worker. The per-worker user partition is computed by the Coordinator,
 // so only the run-wide fields cross here.
 func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
+	// Closed-model think time travels with the shard when a workload model was
+	// supplied (a distributed spec is never open — Validate refuses that), so a
+	// worker paces its users exactly like a local run.
+	var think domain.ThinkTime
+	if spec.Workload != nil {
+		think = spec.Workload.ThinkTime
+	}
 	return cluster.ShardSpec{
 		RunID:         runID,
 		ScenarioID:    scenarioIDForSpec(spec),
@@ -399,6 +426,10 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		Start:         spec.Start,
 		MaxSteps:      spec.MaxSteps,
 		Seed:          spec.Seed,
+		// Ship the experiment's deviation rate so each worker's sessions deviate
+		// exactly as a local run would.
+		DeviationRate: spec.Experiment.Params.DeviationRate,
+		ThinkTime:     think,
 		// Ship the safety policy so each worker enforces the same allowlist and
 		// rate/concurrency cap on the target it was handed.
 		Allowlist: spec.TargetEnv.Allowlist,

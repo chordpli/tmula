@@ -36,6 +36,16 @@ type ShardSpec struct {
 	// Seed is the run-wide base seed; a user's per-walk seed is Seed plus its
 	// global index, which keeps the whole run deterministic across any split.
 	Seed int64 `json:"seed"`
+	// DeviationRate is the per-step probability (0..1) that a shard's virtual
+	// user departs from the weighted happy path (the engine then abandons the
+	// journey or explores an unlikely transition; dependency edges are never
+	// violated). It ships with the spec so a distributed run deviates exactly
+	// like a local one. 0 (the default) keeps the plain weighted walk.
+	DeviationRate float64 `json:"deviationRate,omitempty"`
+	// ThinkTime paces each shard user's steps: a uniform pause in [MinMs, MaxMs]
+	// between consecutive requests, seeded per user like the traversal. The zero
+	// value means no pause — the historical closed-model behavior.
+	ThinkTime domain.ThinkTime `json:"thinkTime,omitempty"`
 
 	// Allowlist, RateCap and EnvClass carry the control plane's safety policy so
 	// a worker enforces the same host allowlist and rate/concurrency cap the
@@ -60,6 +70,14 @@ func (s ShardSpec) Validate() error {
 	}
 	if s.MaxSteps <= 0 {
 		return fmt.Errorf("cluster: shard spec: maxSteps must be > 0")
+	}
+	// Reject a malformed deviation rate or think range up front so a worker never
+	// runs a silently skewed shard from a bad shipped policy.
+	if s.DeviationRate < 0 || s.DeviationRate > 1 {
+		return fmt.Errorf("cluster: shard spec: deviationRate %v out of range [0,1]", s.DeviationRate)
+	}
+	if err := s.ThinkTime.Validate(); err != nil {
+		return fmt.Errorf("cluster: shard spec: %w", err)
 	}
 	// A shipped allowlist must come with a usable rate cap so the worker can
 	// build the guard (NewGuard requires positive caps).

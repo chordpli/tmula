@@ -153,10 +153,15 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 			cancel() // stop the other sessions; the first error is recorded
 		}
 	}
+	// Deviation and think time arrive with the spec so each shard's sessions
+	// walk and pace exactly as a local run would; both are no-ops at their zero
+	// values.
 	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates,
 		load.WithGuard(guard),
 		load.WithCorrelationIDs(spec.RunID, spec.ScenarioID),
 		load.WithResultSink(sink),
+		load.WithDeviation(spec.DeviationRate),
+		load.WithThinkTime(spec.ThinkTime),
 	)
 
 	// The Runner seeds user i (local) with seed+i. Offsetting the base seed by
@@ -207,10 +212,14 @@ func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunSh
 	// memory stays flat (one fixed-size Summary) no matter how many requests the
 	// shard makes.
 	sink := func(r load.StepResult) { summary.Add(toObservation(r)) }
+	// Deviation and think time ship with the spec, exactly as on the streaming
+	// path, so the two reporting modes drive identical traffic.
 	runner := load.NewRunner(w.adapter, spec.TargetBaseURL, spec.Templates,
 		load.WithGuard(guard),
 		load.WithCorrelationIDs(spec.RunID, spec.ScenarioID),
 		load.WithResultSink(sink),
+		load.WithDeviation(spec.DeviationRate),
+		load.WithThinkTime(spec.ThinkTime),
 	)
 
 	if _, err := runner.Run(ctx, spec.Graph, start, int(req.GetMaxSteps()), users, req.GetSeed()+int64(offset)); err != nil {
