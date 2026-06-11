@@ -34,9 +34,14 @@ whatever is hot. In tmula that journey is represented as nodes = API calls, weig
 transitions, and dependency edges that are never skipped. It surfaces issues in three modes:
 
 - **Scenario-following** - does the happy path hold up under realistic, branching traffic?
-- **Deviation** - probabilistic skips, step reordering, and payload mutation (never violating a
-  dependency) shake out the off-script bugs.
-- **Load-concentration** - funnel virtual users onto one API and watch where it degrades.
+- **Deviation** - a configurable per-step probability that a user goes off-script: it abandons
+  the journey mid-flow or wanders onto an unlikely transition, never violating a dependency -
+  shaking out the off-script bugs.
+- **Load-concentration** - aim a whole run at a single endpoint (`tmula run --get /path`), or
+  spike the open-model arrival rate, and watch where it degrades.
+
+(Payload mutation, step reordering, and time-shaped concentration profiles are built but not yet
+wired into a run - see the [Roadmap](#roadmap).)
 
 Observation is **client-side first** (status codes, latency tails, and error / availability /
 contract findings); server-side metrics are opt-in. A single Go binary with the web console baked
@@ -106,11 +111,16 @@ the issues it found. See [`examples/`](examples/) for the full walkthrough.
 
 ## How virtual users behave
 
-| Mode | What it does | Finds |
-|------|--------------|-------|
-| **Scenario-following** | Users walk the behavior graph by edge weight, honoring dependency edges | Whether the happy path survives realistic, branching traffic |
-| **Deviation** | Probabilistic skips, step reordering, payload mutation - never breaking a dependency | Off-script bugs manual testing misses |
-| **Load-concentration** | Funnel users onto a single API | Where it degrades or saturates under pressure |
+| Feature | What it does | Status |
+|---------|--------------|--------|
+| **Scenario-following** | Users walk the behavior graph by edge weight, honoring dependency edges | ✅ Works |
+| **Deviation** | Per-step probability (`deviationRate`, console **Deviation rate**) of abandoning the journey or exploring an unlikely transition - never breaking a dependency | ✅ Works |
+| **Load-concentration** | Aim a run at one endpoint (`--get`/`--post`, or a one-node graph), or spike the open arrival rate | ✅ Works |
+| **Think time** | A random pause between a user's steps, in both workload models | ✅ Works |
+| **Findings thresholds** | Per-run `findings` block tuning the error-rate / p95 / availability gates | ✅ Works |
+| **Payload mutation** | Mutated request bodies (null / type-swap / boundary values) surface input-validation bugs | 🚧 [Roadmap](#roadmap) |
+| **Step reordering** | Visit permitted steps out of their scripted order | 🚧 [Roadmap](#roadmap) |
+| **Concentration profiles** | Time-shaped concurrency aimed at one node of a larger graph | 🚧 [Roadmap](#roadmap) |
 
 Two workload models drive arrivals: **closed** (a fixed pool of looping users) and **open** (users
 arrive at a rate over time, for organic concurrency). Open is the realistic default and takes an
@@ -173,7 +183,7 @@ Health check: <http://localhost:8080/healthz>.
 
 `make web` builds the React control-plane UI into the binary and serves it at
 <http://localhost:8080>. Fill in the target, scenario, and load (virtual users / arrival rate /
-personas), hit **Run**, and watch it live:
+personas / deviation rate), hit **Run**, and watch it live:
 
 - a **Traffic flow** map of requests moving across your scenario, with completion / drop-off,
 - a **latency heatmap** (time × latency band),
@@ -214,6 +224,30 @@ Each ships a sample API server, a behavior graph + templates, and an importable 
 ([`examples/imports/`](examples/imports)). Full reference - the **User manual**
 ([English](docs/guide.en.md) · [한국어](docs/guide.ko.md)); a hands-on 0→100 walkthrough:
 [`examples/USAGE.md`](examples/USAGE.md).
+
+---
+
+## Roadmap
+
+These are designed (and in part built and tested) but **not yet wired into the run path**. The
+rest of this README and the [user manual](docs/guide.en.md) describe only what runs today; these
+move into the body when they do:
+
+- **Payload mutation** - the mutation engine (`null` / `empty-string` / `huge-number` /
+  `negative` / `type-swap` against one JSON field at a time, `server/internal/load/mutate.go`)
+  exists with tests, but no run path calls it yet. The `mutation` finding category is already
+  reserved for it and does not fire until then.
+- **Step reordering** - deviation today *abandons* journeys and *explores* unlikely transitions;
+  visiting permitted steps out of their scripted order is not implemented yet.
+- **Load-concentration profiles** - the time-shaped concurrency strategies aimed at a single
+  target API (`constant` / `ramp` / `spike` / `soak` in `server/internal/load/strategy.go`) are
+  built and tested but unwired. Today you concentrate load with a single-endpoint run or an
+  open-model `spike` arrival shape.
+
+> 위 항목들은 설계(일부는 구현·테스트까지) 되어 있지만 **아직 실행 경로에 연결되지 않은**
+> 기능입니다. README 본문과 사용자 매뉴얼은 현재 실제로 동작하는 기능만 설명하며, 페이로드
+> 변형(payload mutation) · 단계 재정렬(step reordering) · 부하 집중 프로파일은 배선이 끝나는
+> 시점에 본문으로 옮깁니다.
 
 ---
 

@@ -76,8 +76,10 @@ Between steps a user pauses for a **think time** (a random delay, because real p
 tmula surfaces issues in three overlapping ways:
 
 - **Scenario-following**: does the happy path hold up under realistic, branching traffic?
-- **Deviation**: probabilistic skips, step reordering, and payload mutation (never violating a dependency edge) shake out off-script bugs.
-- **Load-concentration**: funnel virtual users onto one API and watch where it degrades or saturates.
+- **Deviation**: a per-step probability (`deviationRate`, `0..1`; the console's **Deviation rate** field) that a user departs from the weighted happy path - abandoning the journey early or exploring an unlikely transition - without ever violating a dependency edge.
+- **Load-concentration**: aim a whole run at one endpoint (a single-endpoint `tmula run --get /path`, or a one-node graph) and watch where it degrades or saturates.
+
+> **Not in a run yet:** payload mutation, step reordering, and time-shaped concentration profiles are built but not wired into the execution path - see the [README roadmap](../README.md#roadmap). In particular the `mutation` finding category is reserved for payload mutation and does not fire today.
 
 ### What "findings" are
 
@@ -161,6 +163,7 @@ The fastest start: in the **Scenario** card click **Start from a template** and 
 |-------|------------|-----------------|--------|
 | **Start node** | The node id where every user begins. | `browse` (shop) | Must be an id that exists in the graph. |
 | **Max steps** | The longest path (number of transitions) a user may take before stopping. | 10-12 for the shop | Too low and users never reach `checkout`. |
+| **Deviation rate** | The % chance, at each step, that a user wanders off the weighted path - exploring another path or giving up mid-way. Dependency edges are never violated. | `0` to follow the scenario exactly; 5-15 to shake out off-script bugs | The console takes a percent (0-100) and maps it onto the RunSpec's `params.deviationRate` (`0..1`). |
 | **Virtual users** | Closed: the pool size. Open: a nominal upper bound. | 50 closed; any positive number open | In the open run this is *nominal* - sessions come from the arrival rate. It still must be > 0 (the experiment validation rejects 0). |
 | **Show live traffic** | Checkbox: visualize the run while it streams. | on for small runs | Per-request animation when small (≤ 200 users / max-concurrency), an aggregate flow map above that. |
 | **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
@@ -394,7 +397,7 @@ The complete, self-contained run definition: the raw body of `POST /api/experime
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `experiment` | object | Names the run and its run-time params. `name` required; `params.virtualUserCount` must be `> 0`; `params.deviationRate` in `[0,1]`; `params.authStrategy` is `pool` or `bootstrap-signup`. |
+| `experiment` | object | Names the run and its run-time params. `name` required; `params.virtualUserCount` must be `> 0`; `params.deviationRate` in `[0,1]` (the per-step off-script probability - see [The three modes](#the-three-modes)); `params.authStrategy` is `pool` or `bootstrap-signup`. |
 | `targetEnv` | object | The system under test + safety constraints. `baseUrl` required; `allowlist` non-empty; `rateCap.maxRps` and `rateCap.maxConcurrency` both `> 0`; `envClass` is `dev`, `staging`, or `prod-locked`. |
 | `graph` | object | The [scenario graph](#scenario-graph). |
 | `templates` | object | The [API templates](#api-templates) map. |
@@ -410,6 +413,7 @@ The complete, self-contained run definition: the raw body of `POST /api/experime
 | `aggregateWorkers` | bool | Workers fold their shard into a compact summary instead of streaming every request. Ignored unless `workers` is set. |
 | `credentialPool` | object | Optional [auth pool](#authenticated-runs). Nil = unauthenticated. |
 | `metrics` | object | Optional. `{ "prometheusUrl": string, "queries": [{ "name", "query" }] }` - server metrics fetched into the report after the run. The host must be allowlisted. |
+| `findings` | object | Optional. `{ "errorRate": number, "p95LatencyMs": number, "availabilityStreak": int }` - tunes the thresholds that classify observations into findings. An omitted (or `0`) field keeps its default. See [Tuning the thresholds](#tuning-the-thresholds-the-findings-block). |
 
 > **`virtualUserCount` must be > 0 even for open runs.** This trips people up. `experiment.params.virtualUserCount` is validated `> 0` regardless of workload model (`experiment: virtualUserCount must be > 0`). In an open run it is a *nominal* field (the actual users come from the arrival rate), but you still must set a positive number. The scenario-file path sets it to `1` automatically for open runs.
 
@@ -430,6 +434,7 @@ allow: [127.0.0.1]                # hosts the run may reach (defaults to the tar
 users: 80                         # closed-model pool size (default 20; ignored when `open:` is set)
 maxSteps: 10                      # default: the flow length
 seed: 1                           # default 1
+deviationRate: 0.1                # per-step chance of going off-script (default 0 = never)
 
 flow:                             # the ordered journey (required, >= 1 step)
   - id: browse
@@ -464,6 +469,12 @@ auth:
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
+
+# Optional finding thresholds - see "Findings explained":
+findings:
+  errorRate: 0.1                  # threshold finding above 10% overall errors (default 0.2)
+  p95LatencyMs: 800               # threshold finding when p95 exceeds 800 ms (omit = gate off)
+  availabilityStreak: 5           # consecutive failures on one API (default 5)
 ```
 
 **Scenario fields**
@@ -476,10 +487,12 @@ auth:
 | `users` | int | Closed pool size. Default `20`. Ignored when `open` is set. |
 | `maxSteps` | int | Walk bound. Default: the flow length. |
 | `seed` | int64 | Reproducibility. Default `1`. |
+| `deviationRate` | number | Per-step probability (`0..1`) a user departs from the weighted path - abandons the journey or explores an unlikely transition; dependency edges are never violated. Default `0` (every user follows the happy path). Out of range → `scenariofile: deviationRate <v> out of range [0,1]`. |
 | `open` | object | Switches to the open model (below). |
 | `segments` | array | Persona mix; requires `open` (else `scenariofile: segments require an open workload`). |
 | `auth` | object | Credentials (below). |
 | `metrics` | object | Optional. Fetch Prometheus series over the run's window into the report (see [Server metrics](#server-metrics-side-by-side-prometheus)). |
+| `findings` | object | Optional finding thresholds (below). |
 
 **Step fields**
 
@@ -505,6 +518,16 @@ auth:
 | `maxConcurrency` | int | Back-pressure cap. |
 
 **`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` defaults to `pool` (only `pool` is accepted here); `users` is a list of `{ subject, token }` (`token` is the secret, exposed to templates as `{{.token}}`).
+
+**`findings` fields** (every field optional; a `0`/omitted value keeps its default)
+
+| Field | Type | Meaning / default |
+|-------|------|-------------------|
+| `errorRate` | number | Overall error rate above this → a `threshold` finding. Default `0.2`. Must be in `[0,1]` (else `scenariofile: findings: errorRate <v> out of range [0,1]`). |
+| `p95LatencyMs` | number | Overall p95 latency (ms) above this → a `threshold` finding. Default `0` = the p95 gate stays **disabled**. Must not be negative. |
+| `availabilityStreak` | int | This many consecutive failures on one API → an `availability` finding. Default `5`. Must not be negative. |
+
+The same block (identical field names) is the RunSpec's `findings` field; see [Tuning the thresholds](#tuning-the-thresholds-the-findings-block).
 
 How `Expand` defaults things: it derives the graph and templates from `flow` (each request-bearing step becomes a template `t_<id>`), links consecutive steps with weighted edges, sets a `rateCap` of `{ maxRps: 10000, maxConcurrency: 1000 }`, `envClass: dev`, and `start` to the first step. The compact graph is validated with the stricter scenario rules (transition weights in `[0,1]`, per-node outgoing sum ≤ 1, dependency edges form a DAG).
 
@@ -535,8 +558,8 @@ templates:                         # the API template map (key = id, protocol de
 
 With `graph`, `start` is required (and must name a graph node), every node's
 template must exist in `templates`, and the remaining blocks - `open`,
-`segments`, `auth`, `users` - behave exactly as in the flow form. The same
-strict scenario validation applies.
+`segments`, `auth`, `users`, `deviationRate`, `findings` - behave exactly as in
+the flow form. The same strict scenario validation applies.
 
 ---
 
@@ -692,19 +715,28 @@ A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }
 | Category | Severity | Exactly how it's computed |
 |----------|----------|---------------------------|
 | **contract** | critical | A **non-mutated** request that returned a **5xx** or failed an **assertion** (`contractSignal`). This is "the happy path produced an error a developer likely missed." One finding per API: *"N contract violation(s) on `<api>` (unexpected error on the happy path)."* |
-| **mutation** | warning | A **mutated** input that **failed** (`mutationSignal`). Mutation testing fails inputs on purpose, so this is informational. One finding per API: *"mutated input surfaced N error(s) on `<api>`."* |
+| **mutation** | warning | A **mutated** input that **failed** (`mutationSignal`). Mutation testing fails inputs on purpose, so this is informational. One finding per API: *"mutated input surfaced N error(s) on `<api>`."* **Reserved:** payload mutation is not yet wired into the run path ([roadmap](../README.md#roadmap)), so no request is marked mutated and this category does not fire today. |
 | **availability** | critical | An API that suffered **`AvailabilityRun` or more consecutive `unavailable()` results**. The streak is evaluated per endpoint in timestamp order (so it is robust to the order results stream back). Disabled when `AvailabilityRun <= 0`. One finding per API: *"N consecutive failures on `<api>` (saturation or downtime)."* |
 | **threshold** | warning | Run-wide, excluding mutated requests. Two possible findings: error rate (`failed / total`) **>** `ErrorRateThreshold` → *"error rate X exceeded threshold Y"*; and p95 latency **>** `P95LatencyMs` (when that gate is `> 0`) → *"p95 latency Xms exceeded threshold Yms."* |
 
-### Tuning `ClassifyConfig`
+### Tuning the thresholds (the `findings` block)
 
-The thresholds live in `ClassifyConfig`:
+The thresholds are configurable per run: both the RunSpec and the compact scenario file take an optional `findings` block (`obs.FindingConfig`):
 
-| Field | Meaning |
-|-------|---------|
-| `ErrorRateThreshold` | Overall error rate above this → a threshold finding. `0` disables the error-rate gate. |
-| `P95LatencyMs` | Overall p95 latency above this → a threshold finding. `0` disables the p95 gate. |
-| `AvailabilityRun` | This many consecutive failures on one API → an availability finding. `0` disables availability detection. |
+```yaml
+findings:
+  errorRate: 0.1          # default 0.2
+  p95LatencyMs: 800       # default 0 (gate disabled)
+  availabilityStreak: 3   # default 5
+```
+
+| Field | Meaning / default |
+|-------|-------------------|
+| `errorRate` | Overall error rate above this → a threshold finding. Default `0.2`. |
+| `p95LatencyMs` | Overall p95 latency above this many ms → a threshold finding. Default `0`, which keeps the p95 gate **disabled**. |
+| `availabilityStreak` | This many consecutive failures on one API → an availability finding. Default `5`. |
+
+Every field is optional, and a `0` (or omitted) field falls back to its default - a spec without the block classifies exactly as before the block existed. Note the asymmetry this implies: the block can *tighten or loosen* the error-rate and availability gates but cannot disable them (`0` means "default", not "off"), while the p95 gate is off unless you set it. Internally the block resolves into `ClassifyConfig` (`ErrorRateThreshold` / `P95LatencyMs` / `AvailabilityRun`), where a resolved `0` disables that gate. The block applies on every path - single-node, distributed-streaming, and distributed-summary (classification happens on the master, so nothing moves to the workers).
 
 > **The distributed/aggregated path.** When workers aggregate their shards (`aggregateWorkers`), findings come from a merged `Summary` (`FindingsFromSummary`), which keeps only per-category tallies: no per-API breakdown and no ordering. It produces at most *one* finding per tripped category for the whole run, deliberately coarser than the per-endpoint single-node findings. That is the fidelity-for-scale trade you opt into. (A detail: the Summary's threshold error-rate/p95 count *all* observations including mutated ones, whereas the single-node classifier excludes mutated requests. This is latent today because the distributed path never carries mutated observations.)
 
