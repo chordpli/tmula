@@ -286,6 +286,12 @@ func LoadSummary(d SummaryData) (*Summary, error) {
 // fidelity for bounded memory is the entire point. The category order matches
 // Aggregator.Classify (mutation, contract, availability, threshold).
 //
+// For the same reason these findings carry NO evidence bundle (Finding.Evidence
+// stays nil): evidence needs per-request session context, and discarding
+// per-request data is precisely what the Summary buys its bounded memory with.
+// Runs that need diagnosable findings should use the streaming distributed path
+// (or a local run), where the Aggregator sees every observation.
+//
 // The threshold signals here (error rate and p95) are computed from the
 // Summary's Stats, i.e. from total/errors/the histogram, which count ALL
 // observations including mutated requests. Aggregator.classifyThreshold instead

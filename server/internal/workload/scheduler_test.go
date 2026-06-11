@@ -628,7 +628,7 @@ func TestRecordStampsPerResultRevealsAvailability(t *testing.T) {
 
 	collector := obs.NewCollector()
 	agg := obs.NewAggregator()
-	record(collector, agg, results, now)
+	record(collector, agg, results, "", 0, now)
 	if i != len(results) {
 		t.Fatalf("now() called %d times, want one per result (%d)", i, len(results))
 	}
@@ -656,7 +656,7 @@ func TestRecordReadsClockPerResult(t *testing.T) {
 	}
 	collector := obs.NewCollector()
 	agg := obs.NewAggregator()
-	record(collector, agg, results, now)
+	record(collector, agg, results, "", 0, now)
 	if calls != len(results) {
 		t.Fatalf("now() read %d times, want one read per result (%d): TS is not stamped per result", calls, len(results))
 	}

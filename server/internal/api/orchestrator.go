@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -269,6 +271,14 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 			LatencyMs:  res.Resp.LatencyMs,
 			ErrorClass: cls,
 			TS:         s.now(),
+			// Evidence context: the runner stamps each result with its session's
+			// walk seed (spec.Seed + pool index for the closed model), so the
+			// index reproduce needs is the seed's offset from the run seed. The
+			// path is attached to failed steps only — see load.StepResult.
+			SessionID: res.UserID,
+			Seed:      res.Seed,
+			UserIndex: res.Seed - spec.Seed,
+			Path:      res.Path,
 		})
 	}
 	// Wiring the sink at construction makes the Runner stream each result into the
@@ -339,13 +349,28 @@ func (s *Server) executeDistributed(ctx context.Context, rs *runState, spec RunS
 	// never a materialized user array.
 	sink := func(st cluster.ShardStep) {
 		rs.collector.Record(st.StatusCode, st.LatencyMs, st.ErrorClass)
-		agg.Add(obs.RequestObservation{
+		o := obs.RequestObservation{
 			APIID:      domain.ID(st.APIID),
 			StatusCode: st.StatusCode,
 			LatencyMs:  st.LatencyMs,
 			ErrorClass: st.ErrorClass,
 			TS:         s.now(),
-		})
+		}
+		// Evidence context, reconstructed master-side: workers name every user
+		// user-<global index> and seed it spec.Seed + global index (a stable
+		// contract — see cluster worker's buildUsers/RunShard), so the streamed
+		// id alone yields the reproduce coordinates. The per-request path does
+		// not cross the wire, so distributed evidence carries coordinates but
+		// no journeys; an id that does not match the contract carries nothing
+		// rather than fabricated coordinates. (The worker-aggregated Summary
+		// path is coarser still and carries no evidence at all — see
+		// obs.FindingsFromSummary.)
+		if idx, ok := globalUserIndex(st.UserID); ok {
+			o.SessionID = st.UserID
+			o.Seed = spec.Seed + idx
+			o.UserIndex = idx
+		}
+		agg.Add(o)
 	}
 	if _, err := coord.DistributeInto(ctx, shardSpec, spec.PoolSize(), sink); err != nil {
 		return fmt.Errorf("api: distribute run: %w", err)
@@ -436,6 +461,24 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		RateCap:   spec.TargetEnv.RateCap,
 		EnvClass:  spec.TargetEnv.EnvClass,
 	}
+}
+
+// globalUserIndex extracts the global user index from a worker-built session
+// id. Workers name shard users "user-<global index>" (cluster's buildUsers)
+// and seed each one spec.Seed + global index, so the id is the only thing the
+// master needs to recover a streamed result's reproduce coordinates. It
+// reports false for any id outside that contract, in which case the caller
+// must attach no coordinates rather than fabricated ones.
+func globalUserIndex(userID string) (int64, bool) {
+	const prefix = "user-"
+	if !strings.HasPrefix(userID, prefix) {
+		return 0, false
+	}
+	idx, err := strconv.ParseInt(userID[len(prefix):], 10, 64)
+	if err != nil || idx < 0 {
+		return 0, false
+	}
+	return idx, true
 }
 
 func scenarioIDForSpec(spec RunSpec) domain.ID {

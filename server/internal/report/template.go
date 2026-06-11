@@ -37,6 +37,11 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .finding.sev-critical { border-left-color: #cf222e; }
 .finding.sev-warning  { border-left-color: #bf8700; }
 .finding.sev-info     { border-left-color: #0969da; }
+.evidence { margin-top: 0.5rem; font-size: 0.85rem; }
+.evidence summary { cursor: pointer; color: #57606a; font-weight: 600; }
+.evidence table { margin: 0.4rem 0 0.6rem; font-size: 0.85rem; }
+.evidence .hint { color: #57606a; font-size: 0.8rem; margin: 0.5rem 0 0.25rem; }
+.evidence code { background: #eaeef2; padding: 0.05rem 0.3rem; border-radius: 4px; }
 .group-label { font-size: 0.95rem; font-weight: 600; margin: 1rem 0 0.5rem; }
 .group-label.sev-critical { color: #cf222e; }
 .group-label.sev-warning  { color: #bf8700; }
@@ -155,6 +160,38 @@ const reportHTML = `<!doctype html>
           <span class="cat">{{.Category}}</span>
           {{if .EvidenceRef}}<span class="ref">· {{.EvidenceRef}}</span>{{end}}
           <div>{{.Description}}</div>
+          {{if .Evidence}}
+          <details class="evidence">
+            <summary>Evidence{{with .Evidence.Sessions}} · {{len .}} representative session(s){{end}}</summary>
+            {{if .Evidence.Sessions}}
+            <p class="hint">Correlate with the target's logs by grepping for the <code>X-Tmula-Session-ID</code> header value below; reproduce a session from its seed and user index.</p>
+            <table>
+              <thead><tr><th>Session</th><th>Persona</th><th class="num">Seed</th><th class="num">User #</th><th>Path to failure</th><th class="num">Status</th><th class="num">Latency</th><th>Error</th><th>At</th></tr></thead>
+              <tbody>
+                {{range .Evidence.Sessions}}<tr><td><code>{{.ID}}</code></td><td>{{if .Persona}}{{.Persona}}{{else}}—{{end}}</td><td class="num">{{.Seed}}</td><td class="num">{{.UserIndex}}</td><td>{{if .Path}}{{.Path}}{{else}}—{{end}}</td><td class="num">{{if .StatusCode}}{{.StatusCode}}{{else}}—{{end}}</td><td class="num">{{.Latency}} ms</td><td>{{if .ErrorClass}}{{.ErrorClass}}{{else}}—{{end}}</td><td>{{fmtTime .TS}}</td></tr>{{end}}
+              </tbody>
+            </table>
+            {{end}}
+            {{if .Evidence.StatusCounts}}
+            <p class="hint">Status codes across all occurrences</p>
+            <table>
+              <thead><tr><th>Code</th><th class="num">Count</th></tr></thead>
+              <tbody>
+                {{range .Evidence.StatusCounts}}<tr><td>{{.Code}}</td><td class="num">{{.Count}}</td></tr>{{end}}
+              </tbody>
+            </table>
+            {{end}}
+            {{if .Evidence.TimeBuckets}}
+            <p class="hint">When in the run the occurrences landed</p>
+            <table>
+              <thead><tr><th>Run window</th><th class="num">Count</th></tr></thead>
+              <tbody>
+                {{range .Evidence.TimeBuckets}}<tr><td>{{.Label}}</td><td class="num">{{.Count}}</td></tr>{{end}}
+              </tbody>
+            </table>
+            {{end}}
+          </details>
+          {{end}}
         </li>
         {{end}}
       </ul>

@@ -35,6 +35,15 @@ type StepResult struct {
 	NodeID domain.ID
 	Resp   Response
 	Err    error
+	// Seed is the walk seed this session ran with, stamped on every result so
+	// downstream evidence carries the reproduce coordinate without a side
+	// channel (closed: run seed + pool index; open: run seed + arrival).
+	Seed int64
+	// Path is the node sequence the session had traversed up to and including
+	// this step. It is attached only when the step FAILED (an error, or a
+	// status >= 400) and is a reslice of the session's precomputed walk —
+	// shared, never copied — so healthy traffic pays no per-step path cost.
+	Path []domain.ID
 }
 
 // Runner drives many virtual users concurrently through a scenario graph,
@@ -343,7 +352,7 @@ func (r *Runner) RunSession(ctx context.Context, g domain.ScenarioGraph, start d
 func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmpl map[domain.ID]domain.APITemplate, start domain.ID, maxSteps int, u VirtualUser, seed int64, think ThinkFunc, emit func(StepResult)) {
 	walker, err := engine.NewWalker(g, seed)
 	if err != nil {
-		emit(StepResult{UserID: u.ID, Err: err})
+		emit(StepResult{UserID: u.ID, Err: err, Seed: seed})
 		return
 	}
 	// Deviation is injected at the walk. A configured rate takes WalkWithDeviation
@@ -364,7 +373,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		path, err = walker.Walk(start, maxSteps)
 	}
 	if err != nil {
-		emit(StepResult{UserID: u.ID, Err: err})
+		emit(StepResult{UserID: u.ID, Err: err, Seed: seed})
 		return
 	}
 
@@ -375,10 +384,13 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 	if scenarioID == "" {
 		scenarioID = g.ID
 	}
-	for _, nodeID := range path {
+	for stepIdx, nodeID := range path {
 		if ctx.Err() != nil {
 			break // cancelled (kill switch): stop this user's journey
 		}
+		// The journey up to and including this node — a reslice of the
+		// precomputed (immutable) walk, attached to failed results only.
+		walked := path[:stepIdx+1]
 		from := prevNode
 		prevNode = nodeID // advance even for pure-state nodes, so edges are correct
 		tmpl, ok := nodeTmpl[nodeID]
@@ -402,7 +414,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 		}
 		req, err := Render(tmpl, r.baseURL, u.Cred, sessionVars)
 		if err != nil {
-			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err})
+			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err, Seed: seed, Path: walked})
 			continue
 		}
 		req.Correlation = RequestCorrelation{
@@ -422,7 +434,11 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 				}
 			}
 		}
-		emit(StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr})
+		sr := StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr, Seed: seed}
+		if sErr != nil || resp.StatusCode >= 400 {
+			sr.Path = walked // failed step: carry the journey for evidence
+		}
+		emit(sr)
 		if r.eventSink != nil {
 			r.eventSink(StepEvent{
 				UserID:    u.ID,

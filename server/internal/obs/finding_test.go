@@ -200,6 +200,36 @@ func TestThresholdFindingEvidenceRefs(t *testing.T) {
 	}
 }
 
+// TestEmptyAPIIDProducesNoEmptyEvidenceRef pins the non-empty-EvidenceRef
+// invariant for the per-API classifiers: an observation with an empty APIID
+// (a walk/setup failure that never reached an endpoint) must not yield a
+// per-API finding carrying an empty evidence ref — the per-API classifiers
+// skip it. Any finding it does contribute to (e.g. the run-wide threshold)
+// must still carry a non-empty ref, so the run comparison's (category,
+// evidenceRef) key never collapses distinct issues.
+func TestEmptyAPIIDProducesNoEmptyEvidenceRef(t *testing.T) {
+	a := NewAggregator()
+	// A walk-construction failure: empty APIID, non-empty ErrorClass, no status.
+	a.Add(RequestObservation{APIID: "", ErrorClass: "transport"})
+
+	// Drive every per-API classifier at once (mutation/contract/availability via
+	// AvailabilityRun=1) plus the threshold classifier.
+	fs := a.Classify("r", ClassifyConfig{ErrorRateThreshold: 0.1, AvailabilityRun: 1})
+	for _, f := range fs {
+		if f.EvidenceRef == "" {
+			t.Fatalf("finding has an empty evidence ref: %+v", f)
+		}
+	}
+
+	// And specifically: the empty-APIID observation produced no per-API finding.
+	cat := findingsByCategory(fs)
+	for _, c := range []domain.FindingCategory{domain.FindingMutation, domain.FindingContract, domain.FindingAvailability} {
+		if cat[c] != 0 {
+			t.Fatalf("empty APIID should not produce a %v finding, got %d", c, cat[c])
+		}
+	}
+}
+
 // TestFindingCountField: per-API findings expose the occurrence count as a
 // structured field matching the number formatted into the description.
 func TestFindingCountField(t *testing.T) {
