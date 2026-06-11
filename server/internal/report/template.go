@@ -131,6 +131,19 @@ const reportHTML = `<!doctype html>
   </table>
   {{else}}<p class="empty">No responses recorded.</p>{{end}}
 
+  {{if or .ServerMetrics .MetricsError}}
+  <h2>Server metrics</h2>
+  {{if .MetricsError}}<p class="meta">some series could not be fetched: {{.MetricsError}}</p>{{end}}
+  {{if .ServerMetrics}}
+  <table>
+    <thead><tr><th>Series</th><th class="num">Samples</th><th class="num">Min</th><th class="num">Last</th><th class="num">Max</th></tr></thead>
+    <tbody>
+      {{range .ServerMetrics}}<tr><td>{{.Name}}</td><td class="num">{{.Samples}}</td><td class="num">{{.Min}}</td><td class="num">{{.Last}}</td><td class="num">{{.Max}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{end}}
+  {{end}}
+
   <h2>Findings</h2>
   {{if .HasFindings}}
     {{range .FindingGroup}}

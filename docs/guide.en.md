@@ -409,6 +409,7 @@ The complete, self-contained run definition: the raw body of `POST /api/experime
 | `workers` | array of string | gRPC worker addresses to distribute across. Empty = run locally. |
 | `aggregateWorkers` | bool | Workers fold their shard into a compact summary instead of streaming every request. Ignored unless `workers` is set. |
 | `credentialPool` | object | Optional [auth pool](#authenticated-runs). Nil = unauthenticated. |
+| `metrics` | object | Optional. `{ "prometheusUrl": string, "queries": [{ "name", "query" }] }` - server metrics fetched into the report after the run. The host must be allowlisted. |
 
 > **`virtualUserCount` must be > 0 even for open runs.** This trips people up. `experiment.params.virtualUserCount` is validated `> 0` regardless of workload model (`experiment: virtualUserCount must be > 0`). In an open run it is a *nominal* field (the actual users come from the arrival rate), but you still must set a positive number. The scenario-file path sets it to `1` automatically for open runs.
 
@@ -478,6 +479,7 @@ auth:
 | `open` | object | Switches to the open model (below). |
 | `segments` | array | Persona mix; requires `open` (else `scenariofile: segments require an open workload`). |
 | `auth` | object | Credentials (below). |
+| `metrics` | object | Optional. Fetch Prometheus series over the run's window into the report (see [Server metrics](#server-metrics-side-by-side-prometheus)). |
 
 **Step fields**
 
@@ -719,6 +721,36 @@ When **Show live traffic** is on, the console streams a live view; afterward you
 **Live metrics.** Running counters: requests, error rate, p50 / p95 / p99 / max latency, timeouts, and a status-code tally (e.g. `200:313 500:8`).
 
 **HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions.
+
+### Server metrics side-by-side (Prometheus)
+
+Client-side observation only says *what broke*. Attach a `metrics:` block to a
+run and, **after the run, over exactly its time window**, the named PromQL
+queries are fetched from Prometheus and shown beside the client-side stats -
+so you can read "the connection pool drained at the same moment checkout 5xxs
+spiked" on one screen.
+
+```yaml
+metrics:
+  prometheus: http://localhost:9090
+  queries:
+    - { name: db conns, query: pg_stat_activity_count }
+    - { name: cpu,      query: rate(process_cpu_seconds_total[30s]) }
+```
+
+- **Where it shows.** The web report (a sparkline per series with
+  min/last/max), the standalone HTML report (a table), and the `--summary`
+  markdown (a table).
+- **Opt-in and never fails the run.** A dead Prometheus or a bad query becomes
+  a note on the report; series from the queries that succeeded still render.
+- **Allowlist applies.** Like every other host the engine reaches, the
+  Prometheus host must be on the allowlist.
+- **Live reports only.** The series are not persisted, so a report rebuilt
+  after a restart/eviction omits them.
+- At most 5 series per query, sampled at ~60 steps across the run window, so
+  an over-broad query cannot swamp the report.
+
+In a raw RunSpec this is the `metrics: { "prometheusUrl": ..., "queries": [...] }` field.
 
 **Share links.** You can mint a read-only **viewer** share link for a report. The viewer is told *"Read-only. Sensitive fields are redacted."* The run's `killReason` is scrubbed on a shared report, so an internal kill reason never leaks to an external viewer. Shared links can carry an expiry; an expired or unknown token yields a localized "expired"/"not found" message.
 

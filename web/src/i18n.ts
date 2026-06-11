@@ -285,6 +285,8 @@ const en: Record<string, string> = {
   'stat.timeouts': 'Timeouts',
 
   // Findings (ReportView)
+  'metrics.title': 'Server metrics',
+  'metrics.fetchError': 'Some series could not be fetched:',
   'findings.title': 'Findings',
   'findings.empty': 'No issues detected.',
 
@@ -543,6 +545,8 @@ const ko: Record<string, string> = {
   'stat.timeouts': '타임아웃',
 
   // Findings (ReportView)
+  'metrics.title': '서버 메트릭',
+  'metrics.fetchError': '일부 시계열을 가져오지 못했습니다:',
   'findings.title': '발견 항목',
   'findings.empty': '발견된 문제가 없습니다.',
 

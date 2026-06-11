@@ -12,6 +12,7 @@ import (
 	"github.com/chordpli/tmula/server/internal/cluster"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
+	"github.com/chordpli/tmula/server/internal/metrics"
 	"github.com/chordpli/tmula/server/internal/obs"
 	"github.com/chordpli/tmula/server/internal/workload"
 )
@@ -84,9 +85,58 @@ func (s *Server) finalizeRun(ctx context.Context, rs *runState, spec RunSpec, er
 	}
 	rs.mu.Unlock()
 
+	// Server-side metric correlation happens here, after the end time is
+	// stamped, so the fetch window covers exactly the run. It must complete
+	// before persistRun only in the trivial sense of ordering — the series are
+	// live-report extras and are not persisted.
+	s.fetchServerMetrics(rs, spec)
+
 	// Persist outside rs.mu: report()/stats() take rs.mu themselves, so reading
 	// them here while holding the lock would deadlock.
 	s.persistRun(rs, spec)
+}
+
+// fetchServerMetrics pulls the run's opted-in Prometheus queries over the
+// run's window and attaches them to the live run state. It is observability
+// only and strictly fail-soft: any problem (host not allowlisted, Prometheus
+// down, a bad query) becomes the report's MetricsError, never a run failure.
+// It uses its own context: the run's context is often already canceled here
+// (a kill or timeout), and a killed run is exactly when the operator wants the
+// server-side picture.
+func (s *Server) fetchServerMetrics(rs *runState, spec RunSpec) {
+	if spec.Metrics == nil {
+		return
+	}
+	// The engine reaches out only to hosts the run was allowed to touch; the
+	// metrics fetch obeys the same allowlist as the simulated traffic.
+	if err := rs.guard.AllowHost(spec.Metrics.PrometheusURL); err != nil {
+		rs.mu.Lock()
+		rs.metricsErr = err.Error()
+		rs.mu.Unlock()
+		return
+	}
+
+	rs.mu.Lock()
+	start := rs.exec.StartedAt
+	end := s.now()
+	if rs.exec.EndedAt != nil {
+		end = *rs.exec.EndedAt
+	}
+	rs.mu.Unlock()
+
+	// 15s caps how long a slow Prometheus can hold up finalize (and with it a
+	// graceful shutdown); each query is additionally bounded by the metrics
+	// client's own per-request timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	series, err := metrics.Fetch(ctx, *spec.Metrics, start, end)
+	rs.mu.Lock()
+	rs.serverMetrics = series
+	if err != nil {
+		rs.metricsErr = err.Error()
+		slog.Warn("server metrics fetch incomplete", "run", rs.exec.ID, "err", err)
+	}
+	rs.mu.Unlock()
 }
 
 // persistRun writes a finalized run's experiment, run row, aggregate stats and

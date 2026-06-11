@@ -17,6 +17,12 @@ type Report struct {
 	Stats    obs.Stats           `json:"stats"`
 	Findings []domain.Finding    `json:"findings"`
 	Workers  int                 `json:"workers"`
+	// ServerMetrics carries the Prometheus series fetched over the run's window
+	// when the run opted in (RunSpec.Metrics); MetricsError notes a fetch
+	// problem. Both are live-report extras: they are not persisted, so a report
+	// rebuilt from the store omits them.
+	ServerMetrics []domain.MetricSeries `json:"serverMetrics,omitempty"`
+	MetricsError  string                `json:"metricsError,omitempty"`
 }
 
 // report assembles the report for a run (caller must not hold rs.mu). Workers is
@@ -26,8 +32,13 @@ func (rs *runState) report() Report {
 	rs.mu.Lock()
 	exec := rs.exec
 	findings := append([]domain.Finding(nil), rs.findings...)
+	serverMetrics := append([]domain.MetricSeries(nil), rs.serverMetrics...)
+	metricsErr := rs.metricsErr
 	rs.mu.Unlock()
-	return Report{Run: exec, Stats: rs.stats(), Findings: findings, Workers: exec.Workers}
+	return Report{
+		Run: exec, Stats: rs.stats(), Findings: findings, Workers: exec.Workers,
+		ServerMetrics: serverMetrics, MetricsError: metricsErr,
+	}
 }
 
 // reportFor returns a run's report and whether it was found. A live run in the

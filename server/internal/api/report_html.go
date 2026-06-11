@@ -13,10 +13,12 @@ import (
 // renderer never has to import api (which would close an import cycle).
 func reportData(rep Report) report.Data {
 	return report.Data{
-		Run:      rep.Run,
-		Stats:    rep.Stats,
-		Findings: rep.Findings,
-		Workers:  rep.Workers,
+		Run:           rep.Run,
+		Stats:         rep.Stats,
+		Findings:      rep.Findings,
+		Workers:       rep.Workers,
+		ServerMetrics: rep.ServerMetrics,
+		MetricsError:  rep.MetricsError,
 	}
 }
 

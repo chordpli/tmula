@@ -58,6 +58,14 @@ type RunSpec struct {
 	// it — it is an inspect view, not a millions-scale feature.
 	Trace bool `json:"trace,omitempty"`
 
+	// Metrics, when set, opts the run into server-side metric correlation: after
+	// the run finishes the named PromQL queries are fetched from Prometheus over
+	// the run's window and attached to the report beside the client-side stats.
+	// It is observability only — a fetch failure becomes a note on the report,
+	// never a run failure. The Prometheus host must be in the target allowlist,
+	// like every other host the engine reaches.
+	Metrics *domain.MetricsSource `json:"metrics,omitempty"`
+
 	// CredentialPool, when set, authenticates the run: each virtual user (closed)
 	// or session (open) is assigned a credential by index from the pool, so the
 	// simulated traffic carries real auth material instead of running anonymously.
@@ -143,6 +151,11 @@ func (r RunSpec) Validate() error {
 	}
 	if err := r.validateCredentialPool(); err != nil {
 		return err
+	}
+	if r.Metrics != nil {
+		if err := r.Metrics.Validate(); err != nil {
+			return fmt.Errorf("api: %w", err)
+		}
 	}
 	return nil
 }

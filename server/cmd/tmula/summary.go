@@ -59,6 +59,8 @@ func markdownReport(r cliReport) string {
 		fmt.Fprintf(&b, "Status codes: `%s`\n\n", formatStatusCounts(r.Stats.StatusCounts))
 	}
 
+	writeMetricsSection(&b, r)
+
 	if len(r.Findings) == 0 {
 		b.WriteString("No findings — the target handled this traffic cleanly.\n")
 		return b.String()
@@ -78,6 +80,41 @@ func markdownReport(r cliReport) string {
 			severityBadge(f.Severity), mdEscape(f.Category), mdEscape(f.Description), where)
 	}
 	return b.String()
+}
+
+// writeMetricsSection tabulates the run's server-side Prometheus correlation
+// (when the run opted in) as min/last/max per series, plus the fetch problem
+// when one occurred.
+func writeMetricsSection(b *strings.Builder, r cliReport) {
+	if len(r.ServerMetrics) == 0 && r.MetricsError == "" {
+		return
+	}
+	b.WriteString("### Server metrics\n\n")
+	if r.MetricsError != "" {
+		fmt.Fprintf(b, "> Some series could not be fetched: %s\n\n", mdEscape(r.MetricsError))
+	}
+	if len(r.ServerMetrics) == 0 {
+		return
+	}
+	b.WriteString("| Series | Samples | Min | Last | Max |\n|:--|---:|---:|---:|---:|\n")
+	for _, s := range r.ServerMetrics {
+		if len(s.Points) == 0 {
+			fmt.Fprintf(b, "| %s | 0 | — | — | — |\n", mdEscape(s.Name))
+			continue
+		}
+		minV, maxV := s.Points[0].V, s.Points[0].V
+		for _, p := range s.Points[1:] {
+			if p.V < minV {
+				minV = p.V
+			}
+			if p.V > maxV {
+				maxV = p.V
+			}
+		}
+		fmt.Fprintf(b, "| %s | %d | %.4g | %.4g | %.4g |\n",
+			mdEscape(s.Name), len(s.Points), minV, s.Points[len(s.Points)-1].V, maxV)
+	}
+	b.WriteString("\n")
 }
 
 // severityBadge renders a severity with a glanceable marker.

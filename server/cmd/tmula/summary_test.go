@@ -76,6 +76,31 @@ func TestMarkdownReportKilledRunShowsReason(t *testing.T) {
 	}
 }
 
+func TestMarkdownReportTabulatesServerMetrics(t *testing.T) {
+	r := sampleReport()
+	r.ServerMetrics = []cliMetricSeries{{Name: "db conns"}}
+	r.ServerMetrics[0].Points = []struct {
+		TS int64   `json:"ts"`
+		V  float64 `json:"v"`
+	}{{TS: 1, V: 12}, {TS: 2, V: 3}, {TS: 3, V: 7}}
+	r.MetricsError = "broken: prometheus: unknown query"
+	md := markdownReport(r)
+	if !strings.Contains(md, "### Server metrics") {
+		t.Fatalf("metrics section missing:\n%s", md)
+	}
+	if !strings.Contains(md, "| db conns | 3 | 3 | 7 | 12 |") {
+		t.Errorf("metrics row min/last/max wrong:\n%s", md)
+	}
+	if !strings.Contains(md, "unknown query") {
+		t.Errorf("fetch error note missing:\n%s", md)
+	}
+
+	// Without the opt-in, no section appears.
+	if md := markdownReport(sampleReport()); strings.Contains(md, "Server metrics") {
+		t.Errorf("metrics section should be absent when not opted in:\n%s", md)
+	}
+}
+
 func TestWriteSummaryAppends(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "summary.md")
 	if err := os.WriteFile(path, []byte("earlier step\n"), 0o644); err != nil {

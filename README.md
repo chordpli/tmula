@@ -178,6 +178,7 @@ personas), hit **Run**, and watch it live:
 - a **Traffic flow** map of requests moving across your scenario, with completion / drop-off,
 - a **latency heatmap** (time × latency band),
 - findings, a standalone **HTML report**, **compare with previous run**, and read-only **share** links,
+- opt-in **server metrics**: Prometheus series fetched over the run's window, shown beside the client-side stats,
 - a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic) and scenario **presets**, in a bilingual UI (English / 한국어).
 
 <p align="center">

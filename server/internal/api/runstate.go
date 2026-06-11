@@ -26,6 +26,11 @@ type runState struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	findings []domain.Finding
+	// serverMetrics / metricsErr hold the post-run Prometheus correlation for a
+	// run that opted in (RunSpec.Metrics): the fetched series, and the fetch
+	// problem when one occurred. Both are observability-only report extras.
+	serverMetrics []domain.MetricSeries
+	metricsErr    string
 	// finalStats holds stats produced directly by a run (the open model returns
 	// an aggregate rather than feeding the collector). When nil, the live
 	// collector snapshot is used instead.

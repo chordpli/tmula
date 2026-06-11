@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -273,6 +275,63 @@ type Finding struct {
 	EvidenceRef string          `json:"evidenceRef,omitempty"`
 	FirstSeen   time.Time       `json:"firstSeen"`
 	Description string          `json:"description"`
+}
+
+// MetricQuery names one PromQL expression to correlate with a run.
+type MetricQuery struct {
+	// Name labels the series in the report (e.g. "db connections").
+	Name string `json:"name"`
+	// Query is the PromQL expression evaluated over the run's window.
+	Query string `json:"query"`
+}
+
+// MetricsSource opts a run into server-side metric correlation: after the run
+// finishes, each query is fetched from Prometheus over the run's time window
+// and the series are placed beside the client-side stats in the report. It is
+// observability only — fetch failures never fail the run.
+type MetricsSource struct {
+	PrometheusURL string        `json:"prometheusUrl"`
+	Queries       []MetricQuery `json:"queries"`
+}
+
+// Validate checks the source is fetchable: an absolute http(s) URL and at
+// least one named, non-empty query with no duplicate names.
+func (m MetricsSource) Validate() error {
+	u, err := url.Parse(m.PrometheusURL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("metrics: prometheusUrl %q must be an absolute http(s) URL", m.PrometheusURL)
+	}
+	if len(m.Queries) == 0 {
+		return fmt.Errorf("metrics: at least one query is required")
+	}
+	seen := make(map[string]bool, len(m.Queries))
+	for i, q := range m.Queries {
+		if strings.TrimSpace(q.Name) == "" {
+			return fmt.Errorf("metrics: query %d: name is required", i)
+		}
+		if strings.TrimSpace(q.Query) == "" {
+			return fmt.Errorf("metrics: query %q: query is required", q.Name)
+		}
+		if seen[q.Name] {
+			return fmt.Errorf("metrics: duplicate query name %q", q.Name)
+		}
+		seen[q.Name] = true
+	}
+	return nil
+}
+
+// MetricPoint is one sample of a fetched series: a unix-millisecond timestamp
+// and its value.
+type MetricPoint struct {
+	TS int64   `json:"ts"`
+	V  float64 `json:"v"`
+}
+
+// MetricSeries is one server-side time series fetched for a run, rendered
+// beside the run's own timeline in the report.
+type MetricSeries struct {
+	Name   string        `json:"name"`
+	Points []MetricPoint `json:"points"`
 }
 
 // ReportShare grants read-only access to a run report via an opaque token.

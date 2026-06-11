@@ -19,6 +19,11 @@ type Data struct {
 	// Workers is the number of remote workers a distributed run fanned out to
 	// (0 for a local run).
 	Workers int
+	// ServerMetrics carries the Prometheus series fetched over the run's window
+	// when the run opted in; MetricsError notes a fetch problem. Both are
+	// optional report extras.
+	ServerMetrics []domain.MetricSeries
+	MetricsError  string
 }
 
 // HTML renders one run's report as a standalone HTML page: a header, a stats
@@ -52,12 +57,23 @@ func CompareHTML(a, b Data) ([]byte, error) {
 // renders. Keeping formatting here (not in the template) keeps the template
 // declarative and the rounding rules testable.
 type reportView struct {
-	Run          domain.RunExecution
-	Workers      int
-	Stats        statsRow
-	StatusCodes  []statusCount
-	FindingGroup []findingGroup
-	HasFindings  bool
+	Run           domain.RunExecution
+	Workers       int
+	Stats         statsRow
+	StatusCodes   []statusCount
+	FindingGroup  []findingGroup
+	HasFindings   bool
+	ServerMetrics []metricRow
+	MetricsError  string
+}
+
+// metricRow is one server-side series formatted for the report table.
+type metricRow struct {
+	Name    string
+	Samples int
+	Min     string
+	Last    string
+	Max     string
 }
 
 // statsRow is the formatted metric line for one run.
@@ -89,13 +105,41 @@ type findingGroup struct {
 
 func newReportView(d Data) reportView {
 	return reportView{
-		Run:          d.Run,
-		Workers:      d.Workers,
-		Stats:        newStatsRow(d.Stats),
-		StatusCodes:  statusCounts(d.Stats.StatusCounts),
-		FindingGroup: groupFindings(d.Findings),
-		HasFindings:  len(d.Findings) > 0,
+		Run:           d.Run,
+		Workers:       d.Workers,
+		Stats:         newStatsRow(d.Stats),
+		StatusCodes:   statusCounts(d.Stats.StatusCounts),
+		FindingGroup:  groupFindings(d.Findings),
+		HasFindings:   len(d.Findings) > 0,
+		ServerMetrics: metricRows(d.ServerMetrics),
+		MetricsError:  d.MetricsError,
 	}
+}
+
+// metricRows summarizes each fetched series as min/last/max over its samples;
+// a series without points is shown with dashes rather than dropped, so the
+// operator sees the query returned nothing.
+func metricRows(series []domain.MetricSeries) []metricRow {
+	rows := make([]metricRow, 0, len(series))
+	for _, s := range series {
+		row := metricRow{Name: s.Name, Samples: len(s.Points), Min: "—", Last: "—", Max: "—"}
+		if len(s.Points) > 0 {
+			minV, maxV := s.Points[0].V, s.Points[0].V
+			for _, p := range s.Points[1:] {
+				if p.V < minV {
+					minV = p.V
+				}
+				if p.V > maxV {
+					maxV = p.V
+				}
+			}
+			row.Min = fmt.Sprintf("%.4g", minV)
+			row.Last = fmt.Sprintf("%.4g", s.Points[len(s.Points)-1].V)
+			row.Max = fmt.Sprintf("%.4g", maxV)
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func newStatsRow(s obs.Stats) statsRow {

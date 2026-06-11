@@ -71,6 +71,19 @@ type Scenario struct {
 	// (open) is assigned a credential by index so the simulated traffic carries
 	// real auth material. Omit it to run unauthenticated (the default).
 	Auth *Auth `json:"auth,omitempty"`
+	// Metrics, when set, correlates the run with server-side Prometheus series:
+	// each named query is fetched over the run's window and shown in the report
+	// beside the client-side stats. The Prometheus host must be allowlisted.
+	Metrics *Metrics `json:"metrics,omitempty"`
+}
+
+// Metrics is the compact server-metrics block: a Prometheus base URL and the
+// named PromQL queries to fetch over the run's window.
+type Metrics struct {
+	// Prometheus is the Prometheus base URL (e.g. http://localhost:9090).
+	Prometheus string `json:"prometheus"`
+	// Queries names the PromQL expressions to correlate with the run.
+	Queries []domain.MetricQuery `json:"queries"`
 }
 
 // Auth supplies the run's credentials in the compact file. It carries the secret
@@ -266,6 +279,14 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 		}
 		spec.CredentialPool = &pool
 		spec.Experiment.Params.AuthStrategy = pool.Strategy
+	}
+
+	if s.Metrics != nil {
+		src := domain.MetricsSource{PrometheusURL: s.Metrics.Prometheus, Queries: s.Metrics.Queries}
+		if err := src.Validate(); err != nil {
+			return runspec.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
+		}
+		spec.Metrics = &src
 	}
 	return spec, nil
 }

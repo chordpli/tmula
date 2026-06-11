@@ -155,11 +155,21 @@ export interface Finding {
   description: string
 }
 
+// MetricSeries is one server-side Prometheus series fetched over the run's
+// window (RunSpec.metrics opt-in); points are [unix-ms, value] samples.
+export interface MetricSeries {
+  name: string
+  points: { ts: number; v: number }[]
+}
+
 export interface Report {
   run: { id: string; status: string; killReason?: string; mode?: string; workers?: number }
   stats: Stats
   findings: Finding[]
   workers?: number
+  // Present only when the run opted into server-metric correlation.
+  serverMetrics?: MetricSeries[]
+  metricsError?: string
 }
 
 // MAX_TRACE_USERS is the run size at or below which the backend additionally emits

@@ -392,6 +392,19 @@ type cliReport struct {
 	} `json:"stats"`
 	Findings []cliFinding `json:"findings"`
 	Workers  int          `json:"workers"`
+	// ServerMetrics / MetricsError mirror the report's optional Prometheus
+	// correlation (RunSpec metrics opt-in); the markdown summary tabulates them.
+	ServerMetrics []cliMetricSeries `json:"serverMetrics"`
+	MetricsError  string            `json:"metricsError"`
+}
+
+// cliMetricSeries is one fetched server-side series as the CLI consumes it.
+type cliMetricSeries struct {
+	Name   string `json:"name"`
+	Points []struct {
+		TS int64   `json:"ts"`
+		V  float64 `json:"v"`
+	} `json:"points"`
 }
 
 // cliFinding is one finding as the CLI consumes it.

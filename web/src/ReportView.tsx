@@ -1,4 +1,4 @@
-import type { Report, Stats } from './api'
+import type { MetricSeries, Report, Stats } from './api'
 import { useI18n } from './i18n'
 
 // errorRateKind picks a stat color by how alarming the error rate is, so a glance
@@ -75,9 +75,30 @@ export default function ReportView({ report }: { report: Report }) {
   const { t } = useI18n()
   // A Go nil slice marshals to JSON null, so default to an empty list.
   const findings = report.findings ?? []
+  const serverMetrics = report.serverMetrics ?? []
   return (
     <div>
       <StatsView stats={report.stats} />
+
+      {(serverMetrics.length > 0 || report.metricsError) && (
+        <div style={{ marginTop: 22 }}>
+          <div className="findings__head">
+            <h3 className="findings__title">{t('metrics.title')}</h3>
+            <span className="findings__count">{serverMetrics.length}</span>
+          </div>
+          {report.metricsError && (
+            <div className="finding">
+              <span className="finding__sev finding__sev--warning">warn</span>
+              <span className="finding__desc">
+                {t('metrics.fetchError')} {report.metricsError}
+              </span>
+            </div>
+          )}
+          {serverMetrics.map((s, i) => (
+            <Sparkline key={i} series={s} />
+          ))}
+        </div>
+      )}
 
       <div className="findings__head" style={{ marginTop: 22 }}>
         <h3 className="findings__title">{t('findings.title')}</h3>
@@ -105,6 +126,65 @@ export default function ReportView({ report }: { report: Report }) {
           })}
         </div>
       )}
+    </div>
+  )
+}
+
+// metricFmt renders a sample value compactly (1.2M / 3.4k / 0.31), so a series
+// label stays one short line whatever the metric's magnitude.
+export function metricFmt(v: number): string {
+  const a = Math.abs(v)
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M'
+  if (a >= 1e3) return (v / 1e3).toFixed(1) + 'k'
+  if (a >= 100) return v.toFixed(0)
+  return String(Math.round(v * 100) / 100)
+}
+
+// sparklinePath maps a series onto an SVG path across a fixed viewBox, scaling
+// x to the time span and y to the value range (a flat series draws mid-height).
+// Exported for tests.
+export function sparklinePath(series: MetricSeries, w = 240, h = 36): string {
+  const pts = series.points
+  if (pts.length === 0) return ''
+  const t0 = pts[0].ts
+  const t1 = pts[pts.length - 1].ts
+  let vMin = Infinity
+  let vMax = -Infinity
+  for (const p of pts) {
+    if (p.v < vMin) vMin = p.v
+    if (p.v > vMax) vMax = p.v
+  }
+  const pad = 2
+  const x = (ts: number) => (t1 === t0 ? w / 2 : pad + ((ts - t0) / (t1 - t0)) * (w - 2 * pad))
+  const y = (v: number) =>
+    vMax === vMin ? h / 2 : h - pad - ((v - vMin) / (vMax - vMin)) * (h - 2 * pad)
+  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(p.ts).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ')
+}
+
+// Sparkline draws one fetched server-side series as a small inline chart with
+// its name and min/last/max, sharing the run's wall-clock window so it reads
+// against the latency timeline above it.
+function Sparkline({ series }: { series: MetricSeries }) {
+  const pts = series.points
+  if (pts.length === 0) return null
+  let vMin = Infinity
+  let vMax = -Infinity
+  for (const p of pts) {
+    if (p.v < vMin) vMin = p.v
+    if (p.v > vMax) vMax = p.v
+  }
+  const last = pts[pts.length - 1].v
+  return (
+    <div className="finding" style={{ alignItems: 'center', gap: 12 }}>
+      <svg width="240" height="36" viewBox="0 0 240 36" aria-hidden="true" style={{ flex: 'none' }}>
+        <path d={sparklinePath(series)} fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.8" />
+      </svg>
+      <span>
+        <span className="finding__cat">{series.name}</span>{' '}
+        <span className="finding__desc">
+          min {metricFmt(vMin)} · last {metricFmt(last)} · max {metricFmt(vMax)}
+        </span>
+      </span>
     </div>
   )
 }

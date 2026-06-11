@@ -349,6 +349,29 @@ func TestGraphFirstRejects(t *testing.T) {
 	}
 }
 
+func TestExpandCarriesMetrics(t *testing.T) {
+	s := Scenario{
+		Target: "http://h:1",
+		Flow:   []Step{{ID: "a", Request: "GET /a"}},
+		Metrics: &Metrics{
+			Prometheus: "http://prom:9090",
+			Queries:    []domain.MetricQuery{{Name: "cpu", Query: "node_cpu"}},
+		},
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.Metrics == nil || spec.Metrics.PrometheusURL != "http://prom:9090" || len(spec.Metrics.Queries) != 1 {
+		t.Errorf("spec.Metrics = %+v, want the mapped source", spec.Metrics)
+	}
+
+	s.Metrics.Queries = nil // invalid: a source needs at least one query
+	if _, err := Expand(s); err == nil {
+		t.Error("expected an error for a metrics block without queries")
+	}
+}
+
 func TestParseJSON(t *testing.T) {
 	// JSON is valid YAML, so the same parser handles it.
 	const j = `{"target":"http://h:1","flow":[{"id":"a","request":"GET /a"}],"users":5}`
