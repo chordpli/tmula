@@ -136,7 +136,30 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
     }
     return forwardRoute(edge, index, from, to, startOffset, endOffset, kind, showLabel)
   })
-  const routes = separateLabels(rawRoutes).sort((a, b) => routeRank(a.kind) - routeRank(b.kind) || a.index - b.index)
+  // Labels must keep clear of every node's port strips — the short stretch just
+  // left (arrivals) and right (departures) of a node — or a chip can sit on an
+  // edge's final segment and visually sever the line from its arrowhead.
+  const portKeepOut = graph.nodes
+    .filter((node) => !isExitNode(node.id))
+    .map((node) => positions[node.id])
+    .filter((point): point is { x: number; y: number } => Boolean(point))
+    .flatMap((point) => [
+      {
+        minX: point.x - PREVIEW_NODE_HALF_W - 24,
+        maxX: point.x - PREVIEW_NODE_HALF_W + 2,
+        minY: point.y - 14,
+        maxY: point.y + 14,
+      },
+      {
+        minX: point.x + PREVIEW_NODE_HALF_W - 2,
+        maxX: point.x + PREVIEW_NODE_HALF_W + 24,
+        minY: point.y - 14,
+        maxY: point.y + 14,
+      },
+    ])
+  const routes = separateLabels(rawRoutes, portKeepOut).sort(
+    (a, b) => routeRank(a.kind) - routeRank(b.kind) || a.index - b.index,
+  )
 
   const routeBounds = routes.flatMap((r) => [r.bounds])
   const minX = Math.min(
@@ -449,15 +472,27 @@ function noteRoute(
   return route(edge, index, kind, showLabel, `M ${fmt(x)} ${fmt(chipEdgeY)} L ${fmt(x)} ${fmt(nodeEdgeY)}`, points, label)
 }
 
-function separateLabels(routes: PreviewRoute[]): PreviewRoute[] {
+function separateLabels(
+  routes: PreviewRoute[],
+  keepOut: { minX: number; maxX: number; minY: number; maxY: number }[] = [],
+): PreviewRoute[] {
   const placed: { minX: number; maxX: number; minY: number; maxY: number }[] = []
   const offsets = [0, -20, 20, -40, 40, -60, 60, -80, 80]
   return routes.map((route) => {
     if (!route.showLabel) return route
-    const label =
-      offsets
-        .map((offset) => ({ ...route.label, y: route.label.y + offset }))
-        .find((candidate) => !placed.some((rect) => overlaps(labelRect(candidate), rect))) ?? route.label
+    const candidates = offsets.map((offset) => ({ ...route.label, y: route.label.y + offset }))
+    const clearOfBoth = candidates.find((candidate) => {
+      const rect = labelRect(candidate)
+      return !placed.some((other) => overlaps(rect, other)) && !keepOut.some((zone) => overlaps(rect, zone))
+    })
+    // Degrade gracefully: overlapping another label is worse than entering a
+    // port strip, so when every candidate hits a strip, take the first one
+    // that at least avoids the other labels.
+    const clearOfLabels = candidates.find((candidate) => {
+      const rect = labelRect(candidate)
+      return !placed.some((other) => overlaps(rect, other))
+    })
+    const label = clearOfBoth ?? clearOfLabels ?? route.label
     const next = label === route.label ? route : withLabel(route, label)
     placed.push(labelRect(next.label))
     return next
