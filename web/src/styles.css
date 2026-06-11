@@ -637,6 +637,24 @@ a:hover {
   margin-top: 1px;
 }
 
+/* notice is the informational sibling of .alert: same shape, warning tones. Used
+   for the ?run attach fallback ("run not found — set up a new run below"). */
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13.5px;
+  padding: 12px 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.notice__icon {
+  flex: none;
+  margin-top: 1px;
+}
+
 /* --------------------------------------------------------------- Run header -- */
 .runhead {
   display: flex;
@@ -1363,6 +1381,117 @@ a:hover {
 .doctor__more {
   font-size: 12px;
   color: var(--text-muted);
+}
+
+/* Import coverage: what the last import kept vs dropped, beside the graph
+   preview. Mirrors the doctor panel's tones: ok = full coverage, warning =
+   the learned miniature replays only part of the captured traffic. */
+.coverage {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+
+.coverage--ok {
+  background: var(--ok-soft);
+  border-color: var(--ok-border);
+}
+
+.coverage--warning {
+  background: var(--warn-soft);
+  border-color: var(--warn-border);
+}
+
+.coverage__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.coverage__title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.coverage__summary {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.coverage__warning {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--warn);
+}
+
+.coverage__warning svg {
+  flex: none;
+  align-self: center;
+}
+
+.coverage__note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.coverage__scroll {
+  margin-top: 10px;
+  overflow-x: auto;
+}
+
+.coverage__samplesTitle {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.coverage__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.coverage__table th {
+  font-weight: 650;
+  color: var(--text-muted);
+}
+
+.coverage__table th,
+.coverage__table td {
+  text-align: left;
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.coverage__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.coverage__table th.num,
+.coverage__table td.num {
+  text-align: right;
+}
+
+.coverage__line {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
 }
 
 /* --------------------------------------------------------- Graph editor ---- */

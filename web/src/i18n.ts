@@ -251,6 +251,18 @@ const en: Record<string, string> = {
   'import.success': 'Imported — review the scenario below.',
   'import.emptyError': 'Choose a file or paste a spec first.',
   'import.unavailable': 'Import is not available on this server.',
+  'import.coverage.title': 'Import coverage',
+  'import.coverage.summary':
+    '{requests} requests used · {skipped} lines skipped · {sessions} sessions · {clients} clients · {dropped} endpoints folded',
+  'import.coverage.partial':
+    'This import reflects only part of the captured traffic — {skipped} of {total} lines ({pct}%) were skipped.',
+  'import.coverage.full': 'Every usable line is reflected in the learned graph.',
+  'import.coverage.folded':
+    '{count} colder endpoint(s) beyond the graph cap were folded out; their traffic bridges across the kept nodes.',
+  'import.coverage.samples': 'Skipped line samples',
+  'import.coverage.sample.line': 'Line',
+  'import.coverage.sample.text': 'Content',
+  'import.coverage.sample.reason': 'Reason',
 
   // Run
   'run.button': 'Run experiment',
@@ -267,6 +279,10 @@ const en: Record<string, string> = {
   'live.flow': 'aggregate flow map (>{max} {unit})',
   'unit.maxConcurrency': 'max concurrency',
   'unit.users': 'users',
+
+  // Attach mode (?run=<run-id> links, e.g. opened by `tmula demo`)
+  'attach.notFound':
+    'Run "{id}" was not found on this server — it may have finished and been cleaned up. Set up a new run below.',
 
   // Live run section
   'run.title': 'Run',
@@ -545,6 +561,18 @@ const ko: Record<string, string> = {
   'import.success': '가져왔습니다 — 아래 시나리오를 검토하세요.',
   'import.emptyError': '먼저 파일을 고르거나 명세를 붙여 넣으세요.',
   'import.unavailable': '이 서버에서는 가져오기를 사용할 수 없습니다.',
+  'import.coverage.title': '임포트 커버리지',
+  'import.coverage.summary':
+    '요청 {requests}건 사용 · {skipped}줄 스킵 · 세션 {sessions}개 · 클라이언트 {clients} · 접힌 엔드포인트 {dropped}개',
+  'import.coverage.partial':
+    '이 임포트는 캡처된 트래픽의 일부만 반영합니다 — 전체 {total}줄 중 {skipped}줄({pct}%)을 건너뛰었습니다.',
+  'import.coverage.full': '사용 가능한 모든 줄이 학습된 그래프에 반영되었습니다.',
+  'import.coverage.folded':
+    '그래프 상한을 넘는 한산한 엔드포인트 {count}개를 접었습니다 — 해당 트래픽은 남은 노드 사이로 이어집니다.',
+  'import.coverage.samples': '건너뛴 줄 샘플',
+  'import.coverage.sample.line': '줄',
+  'import.coverage.sample.text': '내용',
+  'import.coverage.sample.reason': '사유',
 
   // Run
   'run.button': '실험 실행',
@@ -561,6 +589,10 @@ const ko: Record<string, string> = {
   'live.flow': '집계 흐름도 (>{max} {unit})',
   'unit.maxConcurrency': '최대 동시 실행',
   'unit.users': '사용자',
+
+  // 어태치 모드 (?run=<run-id> 링크 — 예: `tmula demo`가 여는 주소)
+  'attach.notFound':
+    '실행 "{id}"을(를) 이 서버에서 찾을 수 없습니다 — 이미 끝나 정리되었을 수 있습니다. 아래에서 새 실행을 설정하세요.',
 
   // Live run section
   'run.title': '실행',

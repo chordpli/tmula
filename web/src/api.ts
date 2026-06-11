@@ -210,7 +210,17 @@ export interface MetricSeries {
 }
 
 export interface Report {
-  run: { id: string; status: string; killReason?: string; mode?: string; workers?: number }
+  // experimentId links a run back to its stored spec (GET /experiments/{id});
+  // the ?run attach flow uses it to re-hydrate the form with the run's actual
+  // scenario. Optional: legacy/store-rebuilt reports may omit it.
+  run: {
+    id: string
+    status: string
+    experimentId?: string
+    killReason?: string
+    mode?: string
+    workers?: number
+  }
   stats: Stats
   findings: Finding[]
   workers?: number
@@ -328,6 +338,93 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
   // per-edge aggregates). The render mode is chosen client-side via traceable().
   if (form.traceEnabled) spec.trace = true
   return spec
+}
+
+// formFromRunSpec is buildRunSpec's inverse for the ?run attach flow: it maps a
+// server-stored RunSpec (GET /experiments/{id}) back onto the console form, so
+// attaching to a server-started run (e.g. one `tmula demo` opened) converges on
+// the same state the form-submit path produces — the live flow map draws the
+// run's actual scenario, the target fields match the run's spec, and traceable()
+// picks the same render mode the run streams. It is deliberately forgiving: it
+// returns null when the spec carries no usable scenario graph (the caller keeps
+// the form defaults) and omits any field that does not match the expected shape
+// rather than clobbering the form with garbage.
+export function formFromRunSpec(spec: unknown): Partial<ExperimentForm> | null {
+  if (typeof spec !== 'object' || spec === null) return null
+  const s = spec as Record<string, unknown>
+  const graph = s.graph as { nodes?: unknown; edges?: unknown } | null | undefined
+  if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) return null
+
+  const patch: Partial<ExperimentForm> = {
+    graphJSON: JSON.stringify(graph, null, 2),
+    // Trace is an explicit opt-in on the spec; absent means the run streams no
+    // visualization, so the attached view should not pretend otherwise.
+    traceEnabled: s.trace === true,
+  }
+  if (typeof s.templates === 'object' && s.templates !== null) {
+    patch.templatesJSON = JSON.stringify(s.templates, null, 2)
+  }
+  if (typeof s.start === 'string' && s.start) patch.start = s.start
+  if (typeof s.maxSteps === 'number' && s.maxSteps > 0) patch.maxSteps = s.maxSteps
+
+  const env = s.targetEnv as { baseUrl?: unknown; allowlist?: unknown } | null | undefined
+  if (env && typeof env.baseUrl === 'string' && env.baseUrl) patch.baseUrl = env.baseUrl
+  if (env && Array.isArray(env.allowlist) && env.allowlist.every((h) => typeof h === 'string')) {
+    patch.allowlist = (env.allowlist as string[]).join(', ')
+  }
+
+  // The wire carries the deviation as a 0..1 fraction; the form speaks percent.
+  const params = (s.experiment as { params?: { deviationRate?: unknown } } | null | undefined)
+    ?.params
+  if (params && typeof params.deviationRate === 'number') {
+    patch.deviationPct = Math.min(100, Math.max(0, Math.round(params.deviationRate * 100)))
+  }
+
+  if (Array.isArray(s.workers) && s.workers.length > 0 && s.workers.every((w) => typeof w === 'string')) {
+    patch.workers = (s.workers as string[]).join(', ')
+  }
+  if (typeof s.aggregateWorkers === 'boolean') patch.aggregateWorkers = s.aggregateWorkers
+
+  const wl = s.workload as
+    | {
+        kind?: unknown
+        arrival?: { startRate?: unknown; peakRate?: unknown }
+        durationSeconds?: unknown
+        maxConcurrency?: unknown
+        thinkTime?: { minMs?: unknown; maxMs?: unknown }
+      }
+    | null
+    | undefined
+  if (wl && wl.kind === 'open') {
+    patch.workloadKind = 'open'
+    // The form models a constant arrival; the peak is the honest single number
+    // for a ramp (startRate is the fallback for an open block without a peak).
+    const rate = typeof wl.arrival?.peakRate === 'number' ? wl.arrival.peakRate : wl.arrival?.startRate
+    if (typeof rate === 'number' && rate > 0) patch.arrivalRate = rate
+    if (typeof wl.durationSeconds === 'number' && wl.durationSeconds > 0) {
+      patch.durationSeconds = wl.durationSeconds
+    }
+    if (typeof wl.maxConcurrency === 'number' && wl.maxConcurrency >= 0) {
+      patch.maxConcurrency = wl.maxConcurrency
+    }
+    if (typeof wl.thinkTime?.minMs === 'number') patch.thinkMinMs = wl.thinkTime.minMs
+    if (typeof wl.thinkTime?.maxMs === 'number') patch.thinkMaxMs = wl.thinkTime.maxMs
+    if (Array.isArray(s.segments) && s.segments.length > 0) {
+      patch.segmentsJSON = JSON.stringify(s.segments, null, 2)
+    }
+  } else {
+    patch.workloadKind = 'closed'
+    // Closed pool size: the compact userCount wins; an explicit user list is the
+    // legacy form. Neither present leaves the form's pool size untouched.
+    const count =
+      typeof s.userCount === 'number' && s.userCount > 0
+        ? s.userCount
+        : Array.isArray(s.users)
+          ? s.users.length
+          : 0
+    if (count > 0) patch.users = count
+  }
+  return patch
 }
 
 export interface CapacityPlan {
@@ -781,13 +878,38 @@ export async function startRun(experimentId: string): Promise<string> {
   return (await res.json()).runId as string
 }
 
+// ImportSkippedSample is one example line the importer dropped, as the server
+// reports it; every field is best-effort (an importer that tracks no
+// diagnostics omits them all).
+export interface ImportSkippedSample {
+  line?: number
+  text?: string
+  reason?: string
+}
+
+// ImportStats is the optional coverage report POST /api/import attaches when
+// the importer learned from real traffic (the access-log path): what was kept
+// and what was dropped, so a capped or noisy import is visible instead of
+// silently passing as full coverage. Old servers and spec conversions
+// (OpenAPI/HAR) omit it entirely.
+export interface ImportStats {
+  requests?: number
+  skipped?: number
+  sessions?: number
+  clients?: number
+  droppedEndpoints?: number
+  skippedSamples?: ImportSkippedSample[]
+}
+
 // ImportResult is what POST /api/import returns on success: a ready-to-edit
-// scenario the caller can drop straight into the Scenario card's fields.
+// scenario the caller can drop straight into the Scenario card's fields, plus
+// the optional coverage stats behind the import.
 export interface ImportResult {
   graph: unknown
   templates: unknown
   start: string
   maxSteps: number
+  stats?: ImportStats
 }
 
 // importScenario converts a raw OpenAPI / HAR / access-log document into a
@@ -824,6 +946,32 @@ export async function getReport(runId: string): Promise<Report> {
   const res = await fetch(`${API}/runs/${runId}/report`)
   if (!res.ok) throw new Error(`report failed: ${res.status}`)
   return (await res.json()) as Report
+}
+
+// probeRun looks a run up for the ?run attach flow. The report endpoint answers
+// for live and finalized runs alike, so it doubles as the existence probe: the
+// report when the run exists, null when the server does not know the id (404),
+// and a throw on any other failure so the caller can fall back to the form. The
+// id comes straight from the URL, so it is escaped into the path.
+export async function probeRun(runId: string): Promise<Report | null> {
+  const res = await fetch(`${API}/runs/${encodeURIComponent(runId)}/report`)
+  if (res.status === 404) return null
+  if (!res.ok) throw new Error(`report failed: ${res.status}`)
+  return (await res.json()) as Report
+}
+
+// getExperimentSpec fetches the stored RunSpec behind an experiment id, or null
+// when it cannot (evicted spec, restarted server, network failure). Attach-mode
+// form hydration is best-effort: without the spec the console still follows the
+// run's stream, it just keeps the default scenario fields.
+export async function getExperimentSpec(experimentId: string): Promise<unknown | null> {
+  try {
+    const res = await fetch(`${API}/experiments/${encodeURIComponent(experimentId)}`)
+    if (!res.ok) return null
+    return (await res.json()) as unknown
+  } catch {
+    return null
+  }
 }
 
 export async function killRun(runId: string): Promise<void> {
@@ -892,4 +1040,13 @@ export async function getSharedReport(token: string): Promise<Report> {
 export function shareTokenFromQuery(search: string): string | null {
   const t = new URLSearchParams(search).get('share')
   return t && t.trim() ? t.trim() : null
+}
+
+// runIdFromQuery extracts a run id from a query string, e.g. "?run=run-1" ->
+// "run-1". Returns null when absent or blank. This is the attach contract:
+// `tmula demo` opens the console as /?run=<run-id> so the page attaches
+// straight to the demo's live run instead of showing only the form.
+export function runIdFromQuery(search: string): string | null {
+  const id = new URLSearchParams(search).get('run')
+  return id && id.trim() ? id.trim() : null
 }

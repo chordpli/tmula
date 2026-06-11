@@ -6,19 +6,24 @@ import {
   buildRunSpec,
   compareURL,
   createExperiment,
+  formFromRunSpec,
+  getExperimentSpec,
   getReport,
   hostFromBaseUrl,
   importScenario,
   killRun,
   MAX_TRACE_USERS,
   parseAllowlist,
+  probeRun,
   reportHTMLURL,
   runDisabled,
+  runIdFromQuery,
   shareTokenFromQuery,
   startRun,
   streamURL,
   traceable,
   type ExperimentForm,
+  type ImportStats,
   type OutcomeSummary,
   type Report,
   type Stats,
@@ -27,6 +32,7 @@ import GraphEditor from './GraphEditor'
 import { parseEditableGraph } from './graphEditorModel'
 import HelpTip from './HelpTip'
 import { LANGS, useI18n } from './i18n'
+import { coverageFromStats, type CoverageReport } from './importCoverageModel'
 import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
@@ -83,7 +89,9 @@ const segmentsPlaceholder = `[
 ]`
 
 // App routes to the read-only viewer when a ?share=<token> link is opened,
-// otherwise it shows the operator console.
+// otherwise it shows the operator console. A ?run=<run-id> link (the attach
+// contract `tmula demo` opens) is handled inside Operator; share wins when both
+// are somehow present, since a share link is explicitly read-only.
 export default function App() {
   const token = shareTokenFromQuery(window.location.search)
   return token ? <Viewer token={token} /> : <Operator />
@@ -106,13 +114,84 @@ function Operator() {
   // (instead of a rendered string) so the "Loaded template" confirmation re-renders
   // in the active language when the operator switches EN/한국어.
   const [loadedPresetKey, setLoadedPresetKey] = useState<string>('')
+  // importCoverage is the coverage report behind the last import (what the
+  // access-log learner kept and dropped), rendered beside the graph preview so a
+  // partial miniature is visible the moment it appears. Presets and spec imports
+  // carry no stats and clear it.
+  const [importCoverage, setImportCoverage] = useState<CoverageReport | null>(null)
   // history is the ids of completed runs, in order, so a finished run can be
   // compared against the one before it.
   const [history, setHistory] = useState<string[]>([])
+  // attachMissingId is the run id from a ?run=<run-id> link the server did not
+  // recognize (404 / unreachable). Kept as the raw id — not a rendered string —
+  // so the fallback notice re-renders in the active language, mirroring
+  // loadedPresetKey.
+  const [attachMissingId, setAttachMissingId] = useState<string>('')
   const esRef = useRef<EventSource | null>(null)
   const doneRef = useRef(false)
 
   useEffect(() => () => esRef.current?.close(), [])
+
+  // Attach mode (the ?run=<run-id> contract): when the console is opened with a
+  // run id — `tmula demo` opens the browser this way — it attaches straight to
+  // that run's live view instead of showing only the configuration form. The
+  // parameter is read once on mount (the URL stays the single source of truth;
+  // back/forward and shared links just re-mount and re-read it). The run's
+  // stored spec re-hydrates the form so the flow map draws the run's actual
+  // scenario, then the state converges on exactly what the form-submit path
+  // produces: the SSE stream drives status/stats and the terminal frame fetches
+  // the report. An unknown run (404) or unreachable server falls back to the
+  // form with a short notice.
+  useEffect(() => {
+    const id = runIdFromQuery(window.location.search)
+    if (!id) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const rep = await probeRun(id)
+        if (cancelled) return
+        if (!rep) {
+          setAttachMissingId(id)
+          return
+        }
+        // Best-effort form hydration from the run's spec. A missing spec (evicted
+        // or restarted server) keeps the defaults; the stream still attaches —
+        // the live view then simply has no scenario graph to draw, and LiveGraph
+        // ignores traffic on nodes it does not know, so a mismatch never breaks.
+        if (rep.run.experimentId) {
+          const spec = await getExperimentSpec(rep.run.experimentId)
+          if (cancelled) return
+          const patch = spec ? formFromRunSpec(spec) : null
+          if (patch) setForm((f) => ({ ...f, ...patch }))
+        }
+        const workerCount = rep.run.workers ?? 0
+        setRunMode(
+          workerCount > 0
+            ? t('mode.distributed', { count: workerCount, plural: workerCount === 1 ? '' : 's' })
+            : t('mode.local'),
+        )
+        setRunId(id)
+        setStatus(rep.run.status)
+        if (runDisabled(rep.run.status)) {
+          // Still in flight: follow the live stream, same as after a form submit.
+          listen(id)
+        } else {
+          // Already terminal: converge straight on the post-run state the stream
+          // path would have produced.
+          setStats(rep.stats)
+          setHistory((h) => (h.includes(id) ? h : [...h, id]))
+          setReport(rep)
+        }
+      } catch {
+        if (!cancelled) setAttachMissingId(id)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // Mount-only by design: the parameter is read once; later runs are driven by
+    // the form, not the URL.
+  }, [])
 
   function set<K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) {
     setForm((f) => ({ ...f, [key]: value }))
@@ -139,14 +218,18 @@ function Operator() {
   // applyScenario fills the scenario fields from a loaded template or import,
   // pretty-printing the graph/templates and carrying over start/maxSteps (and an
   // optional baseUrl). It is the one place both presets and imports converge so
-  // the fields are written consistently.
+  // the fields are written consistently. The optional stats become the import
+  // coverage report; a source without stats (presets, spec imports, old servers)
+  // clears any previous report, since it no longer describes the loaded scenario.
   function applyScenario(s: {
     graph: unknown
     templates: unknown
     start: string
     maxSteps: number
     baseUrl?: string
+    stats?: ImportStats
   }) {
+    setImportCoverage(coverageFromStats(s.stats))
     setForm((f) => ({
       ...f,
       graphJSON: stringify(s.graph),
@@ -276,6 +359,18 @@ function Operator() {
       </header>
 
       <div className="stack">
+        {/* Attach fallback: a ?run link pointed at a run this server does not
+            know (finished and cleaned up, or a stale share). Quietly fall back
+            to the form with a short notice instead of a dead end. */}
+        {attachMissingId && (
+          <div className="notice" role="status">
+            <span className="notice__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>{t('attach.notFound', { id: attachMissingId })}</span>
+          </div>
+        )}
+
         {/* ---- Target ---- */}
         <section className="card" aria-labelledby="card-target">
           <div className="card__head">
@@ -463,6 +558,10 @@ function Operator() {
             {/* Presets (Feature A): one-click starting points. */}
             <PresetRow onPick={applyPreset} loadedKey={loadedPresetKey} />
             <ScenarioDoctorPanel issues={doctorIssues} />
+            {/* Import coverage (import honesty): what the last import kept vs
+                dropped, kept next to the graph preview so a partial miniature is
+                visible the moment it appears, not after a run. */}
+            <ImportCoveragePanel report={importCoverage} />
             <GraphEditor
               graphJSON={form.graphJSON}
               templatesJSON={form.templatesJSON}
@@ -763,6 +862,77 @@ function ScenarioDoctorPanel({ issues }: { issues: DoctorIssue[] }) {
   )
 }
 
+// ImportCoveragePanel is the import honesty report: what the last import kept
+// and what it dropped ("N requests used / M lines skipped / …"). It renders
+// beside the graph preview so a capped or noisy import is visible the moment
+// the learned miniature appears. Quiet by default — nothing renders until an
+// import actually carries coverage stats (the access-log learner does; presets
+// and OpenAPI/HAR conversions do not).
+function ImportCoveragePanel({ report }: { report: CoverageReport | null }) {
+  const { t } = useI18n()
+  if (!report) return null
+  return (
+    <div className={`coverage coverage--${report.partial ? 'warning' : 'ok'}`} role="status">
+      <div className="coverage__head">
+        <span className="coverage__title">{t('import.coverage.title')}</span>
+        <span className="coverage__summary">
+          {t('import.coverage.summary', {
+            requests: report.requests,
+            skipped: report.skipped,
+            sessions: report.sessions,
+            clients: report.clients,
+            dropped: report.droppedEndpoints,
+          })}
+        </span>
+      </div>
+      {report.partial ? (
+        <p className="coverage__warning">
+          <AlertIcon />
+          <span>
+            {t('import.coverage.partial', {
+              skipped: report.skipped,
+              total: report.totalLines,
+              pct: report.skippedPct,
+            })}
+          </span>
+        </p>
+      ) : (
+        <p className="coverage__note">{t('import.coverage.full')}</p>
+      )}
+      {report.droppedEndpoints > 0 && (
+        <p className="coverage__note">
+          {t('import.coverage.folded', { count: report.droppedEndpoints })}
+        </p>
+      )}
+      {report.samples.length > 0 && (
+        <div className="coverage__scroll">
+          <span className="coverage__samplesTitle">{t('import.coverage.samples')}</span>
+          <table className="coverage__table">
+            <thead>
+              <tr>
+                <th className="num">{t('import.coverage.sample.line')}</th>
+                <th>{t('import.coverage.sample.text')}</th>
+                <th>{t('import.coverage.sample.reason')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.samples.map((sample, i) => (
+                <tr key={i}>
+                  <td className="num">{sample.line ?? '—'}</td>
+                  <td>
+                    <code className="coverage__line">{sample.text || '—'}</code>
+                  </td>
+                  <td>{sample.reason || '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ImportPanel is the OpenAPI / HAR importer (Feature B). It accepts either an
 // uploaded file (read as text client-side) or pasted text, plus a format selector
 // (Auto / OpenAPI / HAR). On Import it calls the backend and, on success, fills the
@@ -772,7 +942,13 @@ function ScenarioDoctorPanel({ issues }: { issues: DoctorIssue[] }) {
 function ImportPanel({
   onImported,
 }: {
-  onImported: (s: { graph: unknown; templates: unknown; start: string; maxSteps: number }) => void
+  onImported: (s: {
+    graph: unknown
+    templates: unknown
+    start: string
+    maxSteps: number
+    stats?: ImportStats
+  }) => void
 }) {
   const { t } = useI18n()
   const [text, setText] = useState('')
