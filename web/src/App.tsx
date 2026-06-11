@@ -23,6 +23,7 @@ import {
   type Stats,
 } from './api'
 import GraphEditor from './GraphEditor'
+import { parseEditableGraph } from './graphEditorModel'
 import HelpTip from './HelpTip'
 import { LANGS, useI18n } from './i18n'
 import LatencyHeatmap from './LatencyHeatmap'
@@ -460,12 +461,17 @@ function Operator() {
               templatesJSON={form.templatesJSON}
               start={form.start}
               onGraphJSONChange={(json) => set('graphJSON', json)}
+              onTemplatesJSONChange={(json) => set('templatesJSON', json)}
               onStartChange={(next) => set('start', next)}
             />
 
             <div className="field-row">
               <Field label={t('field.start')} help={t('help.start')}>
-                <input className="input" value={form.start} onChange={(e) => set('start', e.target.value)} />
+                <StartNodeControl
+                  graphJSON={form.graphJSON}
+                  value={form.start}
+                  onChange={(next) => set('start', next)}
+                />
               </Field>
               <Field label={t('field.maxSteps')} help={t('help.maxSteps')}>
                 <input
@@ -476,15 +482,17 @@ function Operator() {
                   onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
                 />
               </Field>
-              <Field label={t('field.users')} help={t('help.users')}>
-                <input
-                  className="input"
-                  type="number"
-                  min={1}
-                  value={form.users}
-                  onChange={(e) => set('users', Math.max(1, Number(e.target.value) || 1))}
-                />
-              </Field>
+              {!openModel && (
+                <Field label={t('field.users')} help={t('help.users')}>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    value={form.users}
+                    onChange={(e) => set('users', Math.max(1, Number(e.target.value) || 1))}
+                  />
+                </Field>
+              )}
             </div>
 
             <Check
@@ -496,42 +504,40 @@ function Operator() {
 
             <hr className="divider" />
 
-            <Field
-              label={
-                <>
-                  {t('field.graph')}
-                  <span className="field__badge">{t('badge.jsonAdvanced')}</span>
-                </>
-              }
-              help={t('help.graph')}
-              tip={<HelpTip label={t('field.graph')} text={t('help.graph.tip')} />}
-            >
-              <textarea
-                className="textarea"
-                value={form.graphJSON}
-                onChange={(e) => set('graphJSON', e.target.value)}
-                rows={12}
-                spellCheck={false}
-              />
-            </Field>
-            <Field
-              label={
-                <>
-                  {t('field.templates')}
-                  <span className="field__badge">{t('badge.jsonAdvanced')}</span>
-                </>
-              }
-              help={t('help.templates')}
-              tip={<HelpTip label={t('field.templates')} text={t('help.templates.tip')} />}
-            >
-              <textarea
-                className="textarea"
-                value={form.templatesJSON}
-                onChange={(e) => set('templatesJSON', e.target.value)}
-                rows={9}
-                spellCheck={false}
-              />
-            </Field>
+            <details className="advanced">
+              <summary className="advanced__summary">
+                {t('advanced.json')}
+                <span className="field__badge">{t('badge.jsonAdvanced')}</span>
+              </summary>
+              <div className="stack advanced__body" style={{ gap: 16 }}>
+                <Field
+                  label={t('field.graph')}
+                  help={t('help.graph')}
+                  tip={<HelpTip label={t('field.graph')} text={t('help.graph.tip')} />}
+                >
+                  <textarea
+                    className="textarea"
+                    value={form.graphJSON}
+                    onChange={(e) => set('graphJSON', e.target.value)}
+                    rows={12}
+                    spellCheck={false}
+                  />
+                </Field>
+                <Field
+                  label={t('field.templates')}
+                  help={t('help.templates')}
+                  tip={<HelpTip label={t('field.templates')} text={t('help.templates.tip')} />}
+                >
+                  <textarea
+                    className="textarea"
+                    value={form.templatesJSON}
+                    onChange={(e) => set('templatesJSON', e.target.value)}
+                    rows={9}
+                    spellCheck={false}
+                  />
+                </Field>
+              </div>
+            </details>
 
             <hr className="divider" />
 
@@ -693,6 +699,17 @@ function ScenarioDoctorPanel({ issues }: { issues: DoctorIssue[] }) {
   const level = errors > 0 ? 'error' : warnings > 0 ? 'warning' : 'ok'
   const visible = issues.slice(0, 8)
   const hidden = Math.max(0, issues.length - visible.length)
+  // A clean bill of health should be quiet: one slim line instead of a panel, so
+  // the doctor only claims space when it actually has something to say.
+  if (issues.length === 0) {
+    return (
+      <p className="doctor-slim" role="status">
+        <CheckMini />
+        <span className="doctor-slim__title">{t('doctor.title')}</span>
+        {t('doctor.clean')}
+      </p>
+    )
+  }
   return (
     <div className={`doctor doctor--${level}`}>
       <div className="doctor__head">
@@ -928,6 +945,35 @@ function Field({
       {children}
       {help && <span className="field__help">{help}</span>}
     </label>
+  )
+}
+
+// StartNodeControl picks the start node from the graph's actual nodes, so a typo
+// can never point a run at a node that does not exist. When the graph JSON is
+// invalid (no node list to offer) it degrades to the old free-text input.
+function StartNodeControl({
+  graphJSON,
+  value,
+  onChange,
+}: {
+  graphJSON: string
+  value: string
+  onChange: (next: string) => void
+}) {
+  const graph = parseEditableGraph(graphJSON)
+  const nodeIDs = graph?.nodes.map((n) => n.id).filter(Boolean) ?? []
+  if (nodeIDs.length === 0) {
+    return <input className="input" value={value} onChange={(e) => onChange(e.target.value)} />
+  }
+  return (
+    <select className="select" value={value} onChange={(e) => onChange(e.target.value)}>
+      {value && !nodeIDs.includes(value) && <option value={value}>{value}</option>}
+      {nodeIDs.map((id) => (
+        <option key={id} value={id}>
+          {id}
+        </option>
+      ))}
+    </select>
   )
 }
 

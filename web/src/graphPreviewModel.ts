@@ -361,9 +361,17 @@ function noteRoute(
   const direction = routeTop ? -1 : 1
   const x = from.x
   const y = from.y + direction * (PREVIEW_NODE_HALF_H + 28 + lane * 18)
-  const point = { x, y }
   const label = noteLabel(value, x, y)
-  return route(edge, index, kind, showLabel, `M ${fmt(x)} ${fmt(y)} L ${fmt(x)} ${fmt(y)}`, [point], label)
+  // A short connector stub from the chip's near edge to the node boundary, so the
+  // floating note label reads as attached to its source node instead of orphaned.
+  const chipEdgeY = y - direction * 11
+  const nodeEdgeY = from.y + direction * PREVIEW_NODE_HALF_H
+  const points = [
+    { x, y: chipEdgeY },
+    { x, y: nodeEdgeY },
+    { x, y },
+  ]
+  return route(edge, index, kind, showLabel, `M ${fmt(x)} ${fmt(chipEdgeY)} L ${fmt(x)} ${fmt(nodeEdgeY)}`, points, label)
 }
 
 function separateLabels(routes: PreviewRoute[]): PreviewRoute[] {
