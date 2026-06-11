@@ -13,8 +13,8 @@ recruiting real users**.
 | `shop/{graph,templates}.json`, `shop/scenario.yaml` | The shop journey (`browse → search/category → product → cart → checkout`) with exit drop-offs |
 | `../server/examples/ticketing-api/` | A second tiny API: **concert ticketing** - seat-contention 409s, a payment rush, sold-out 404s (:9100) |
 | `ticketing/{graph,templates}.json`, `ticketing/scenario.yaml` | The ticketing journey (`events → detail → seats → hold → pay`) with exit drop-offs |
-| `imports/` | Importable **OpenAPI + HAR** samples for both domains (web UI → *Import from OpenAPI / HAR*, or `tmula init --from`) |
-| `run-demo.sh` | One command: starts everything, runs an experiment, prints the findings |
+| `imports/` | Importable **OpenAPI** samples for both domains, plus a **HAR** recording and an **access log** for the shop (web UI → *Import from OpenAPI / HAR*, or `tmula init --from`) |
+| `run-demo.sh` | The **manual** demo path: a readable script (curl/jq) that starts everything, runs an experiment, prints the findings - `tmula demo` does this in one built-in command |
 
 ### Two example domains
 
@@ -57,7 +57,25 @@ It boots an in-process engine, runs the experiment, and prints the findings.
 `--json` emits the raw report; `--engine http://host:8080` targets a running
 engine instead. See [`USAGE.md`](USAGE.md) for the full guide.
 
-## Quick start (one command)
+## Quick start (one command): `tmula demo`
+
+```bash
+( cd server && go build -o ../bin/tmula ./cmd/tmula )   # or use the installed binary
+./bin/tmula demo                # --duration 30s to shorten, --no-browser to stay headless
+```
+
+`tmula demo` is the built-in version of this walkthrough: it boots a planted-bug
+shop on an ephemeral port, **learns** the behavior graph from the shop's access
+log, replays the learned traffic against it (engine + web console on `:8080`),
+prints the findings with next steps (a ready `tmula reproduce` command, the
+HTML report URL), and stays up until Ctrl-C. No jq/curl needed. (The browser
+console page needs a binary with the embedded UI - prebuilt binary or `make
+web`; the terminal summary and report.html work with any build.)
+
+### Manual path: `run-demo.sh`
+
+Prefer a script you can read end to end? `run-demo.sh` does a similar loop with
+the example shop API and explicit curl/jq calls against the REST API:
 
 ```bash
 ./examples/run-demo.sh          # or: ./examples/run-demo.sh 100   (100 virtual users)

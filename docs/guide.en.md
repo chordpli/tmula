@@ -95,6 +95,12 @@ A plain load tool hammers one URL with identical requests and tells you a throug
 
 This section is intentionally brief; the [README Quickstart](../README.md#quickstart) is the canonical source. Pick whichever fits you.
 
+**One command, zero setup: `tmula demo`.** With the binary installed (install script below), this runs the whole loop self-contained: it boots a tiny planted-bug shop on an ephemeral local port, *learns* a behavior graph from the shop's access log, replays the learned traffic against it (engine + web console on `--addr`, default `:8080`), and prints the findings with concrete next steps. See [`tmula demo`](#tmula-demo--the-whole-loop-one-command) for the full reference.
+
+```bash
+tmula demo                 # ~1 minute of learned traffic, then findings + next steps
+```
+
 **Docker (no toolchain).** One command brings up the console (real UI baked in) plus both example APIs:
 
 ```bash
@@ -168,7 +174,7 @@ The fastest start: in the **Scenario** card click **Start from a template** and 
 | **Show live traffic** | Checkbox: visualize the run while it streams. | on for small runs | Per-request animation when small (≤ 200 users / max-concurrency), an aggregate flow map above that. |
 | **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
 | **API templates** (JSON) | The request each node sends: method, path, optional payload. *Advanced.* | use a preset | See [API templates](#api-templates). |
-| **Import** | Turn an OpenAPI spec or a HAR recording into the graph + templates. | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
+| **Import** | Turn an OpenAPI spec, a HAR recording, or an access log into the graph + templates (logs come with an [import coverage report](#learning-a-graph-from-an-access-log)). | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
 
 When you press **Run**, the console assembles a [RunSpec](#the-full-runspec) and POSTs it. Two things happen automatically: it sends `users: []` plus a `userCount` for closed runs (so a huge run is a tiny request body, and the server synthesizes `u0..uN-1`), and it sizes the safety `rateCap` to your configured load. You never write those by hand in the UI.
 
@@ -567,6 +573,31 @@ the flow form. The same strict scenario validation applies.
 
 The `tmula` binary is one command with subcommands. With no recognized subcommand it starts the long-running engine (`serve`).
 
+### `tmula demo` - the whole loop, one command
+
+The first-run experience: boot a built-in buggy shop, learn its behavior graph from traffic, replay that traffic, read the findings - no scenario file, no second terminal.
+
+```bash
+tmula demo [--addr :8080] [--duration 60s] [--no-browser]
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--addr <addr>` | `:8080` | Listen address for the demo's engine + web console. A taken port fails fast with an error that points at this flag (e.g. `--addr :8081`). |
+| `--duration <dur>` | `60s` | How long the learned traffic keeps arriving. Must be positive. |
+| `--no-browser` | false | Do not open the web console in a browser. (Opening uses macOS `open` / Linux `xdg-open`; on other platforms the demo warns and the printed URL is the fallback.) |
+
+What it does, stage by stage (the staged `[1/4]`..`[4/4]` output mirrors this):
+
+1. **Boots the demo shop** - a tiny store with planted bugs (a flaky cart, a checkout that degrades under load, a rare broken product link) - on an *ephemeral* loopback port, so the only port you can ever collide on is the engine's `--addr`.
+2. **Learns a behavior graph** from the shop's bundled access log with the same [access-log learner](#learning-a-graph-from-an-access-log) `tmula init` uses: endpoints, branch weights, drop-offs, think time, and an open-workload suggestion. The pacing is compressed into the demo window (enough sessions that the planted bugs reliably surface); the learned graph and its weights are untouched.
+3. **Starts the local engine + embedded web console** on `--addr` and runs the learned traffic against the shop. The run spec expands through the same scenario path every `tmula run` uses - the allowlist defaults to the shop's host only, and the [safety guard](#safety) applies in full. The run is created with live tracing on, and the browser is opened to `/?run=<run-id>`, so a console with the embedded UI attaches straight to the run's live view - the traffic flow map and live metrics, no form to fill.
+4. **Prints the results** when the window closes: the standard run summary with findings, then **Next steps** - a ready-to-paste `tmula reproduce` command for the first finding, the run's `report.html` URL, the console URL, and the `tmula init --from <your access log>` / `tmula run` pair that points the same loop at your own service.
+
+After the summary the demo **stays up** (engine and shop both) so those commands keep working; **Ctrl-C** shuts both down gracefully and exits `0` - at any stage, including mid-run. Failures exit `1`. There is deliberately **no findings gate**: the demo *finding* bugs is the success, so unlike `tmula run` there is no `--fail-on-findings` and findings never affect the exit code.
+
+> **Embedded UI note.** The browser console page is only the real console in a binary that embeds the UI (the prebuilt/install-script binary, the Docker image, or a `make web` build). With a plain `go build` the demo still runs end to end - the terminal summary and the `report.html` URL are the result surfaces - but the console root shows the placeholder page. With the embedded UI, the `/?run=<run-id>` link the demo opens attaches the console straight to its run's live view (flow map + live metrics, then the report when the run finishes); without it, the demo's own run reports through the terminal summary and the linked HTML report.
+
 ### `tmula run` - run a scenario and print findings
 
 Builds a RunSpec from a scenario file (or single-endpoint flags), executes it (in-process by default, or against a running `--engine`), and prints the findings.
@@ -691,6 +722,38 @@ jobs:
           comment: true            # post the summary on the PR
 ```
 
+**Gating on regressions from the action.** The action's inputs mirror the
+CLI's baseline gate:
+
+- `baseline-file`: path to a previous `tmula run --json` report (the natural
+  shape: the main-branch job uploads its report as an artifact, the PR job
+  downloads it). Setting it turns on the regression gate - the job fails with
+  exit `3` only on findings **new** vs the baseline. Combine with
+  `fail-on: none` to gate purely on regressions.
+- `known-issues`: path to a known-issues YAML, passed through to
+  `--known-issues`. Only valid together with `baseline-file` (the CLI rejects
+  it alone, early, before the run).
+- `pr-comment: 'true'`: on `pull_request` events, posts the **Baseline gate**
+  verdict table as a PR comment and *edits the same comment in place* on
+  re-runs (unlike `comment`, which adds a new comment every run). Without a
+  baseline it posts the full run summary instead. It needs the workflow's
+  `pull-requests: write` permission; fork PRs get a read-only token, so there
+  the comment is skipped with a warning - the job's red/green always tracks
+  the run's own exit code, never the comment plumbing.
+
+```yaml
+      - uses: actions/download-artifact@v4
+        with: { name: tmula-baseline, path: baseline }   # main's saved report
+      - uses: chordpli/tmula@main
+        with:
+          scenario: tests/journey.yaml
+          target: http://localhost:9000
+          fail-on: none                        # gate on regressions only
+          baseline-file: baseline/report.json  # exit 3 only on NEW findings
+          known-issues: tests/known-issues.yaml
+          pr-comment: true                     # upsert the gate verdict on the PR
+```
+
 Without the action, plain `tmula run` already cooperates with GitHub Actions:
 when `GITHUB_STEP_SUMMARY` is set the markdown summary is appended there
 automatically, and the summary is written even when the run failed or the gate
@@ -785,7 +848,7 @@ OpenAPI/HAR scaffold a linear flow; an access log goes further - tmula [*learns*
 
 ### `serve` (default) and roles
 
-Any invocation without `run` / `bench` / `init` starts the long-running engine.
+Any invocation without `run` / `reproduce` / `init` / `bench` / `demo` starts the long-running engine.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
@@ -939,9 +1002,15 @@ so tmula **learns** the behavior graph itself from it. The result is a
 miniature of the observed traffic: replay it against staging and you see where
 the real traffic pattern breaks things, before a deploy.
 
-- **Input.** Apache/nginx **combined format** or **JSON lines** (one object per
-  line; common key spellings - `time`/`ts`/`timestamp`, `method`+`path` or
-  `request`, `remote_addr`, `user_agent` - are auto-detected).
+- **Input - six formats, auto-detected from content.** Apache/nginx **combined
+  format**; generic **JSON lines** (one object per line; common key spellings -
+  `time`/`ts`/`timestamp`, `method`+`path` or `request`, `remote_addr`,
+  `user_agent`); **AWS ALB** access logs; **CloudFront standard logs** (the
+  tab-separated W3C format - the parser follows whatever column order the
+  `#Fields` header declares); **Caddy** structured JSON; and **Traefik** JSON
+  access logs. Detection (`importer.DetectAccessLogFormat`) probes the first
+  few non-empty lines, so a file whose first line was truncated by log
+  rotation still detects.
 - **Sessionization.** Requests group per client (IP + user agent) and split
   into visits on a 30-minute idle gap.
 - **Endpoint collapsing.** Queries are stripped and volatile segments (numbers,
@@ -961,6 +1030,46 @@ The learner emits a [graph-first scenario file](#graph-first-scenario-files)
 rather than a linear flow - the branching *is* the learned information. Paste a
 log into the web console's Import and the graph + template editors fill in
 directly.
+
+**The coverage report - what the learner kept and dropped.** A capped or noisy
+import must not silently pass as full coverage, so the learner reports its
+stats: requests used, lines skipped, sessions, distinct clients, and folded
+endpoints, plus up to ten *sampled parse failures* (line number, the line's
+first 120 characters, and the reason) so a half-broken real-world log explains
+*why* coverage is partial. Lines filtered by design (static assets, non-journey
+methods) are counted but never sampled. The surfaces:
+
+- `tmula init` prints the summary note on stderr (`learned N endpoint(s) from
+  N request(s) across N session(s)…; skipped N unusable line(s)`).
+- `POST /api/import` can return the stats as an optional `stats` object
+  (omitted when the wired importer does not produce them, so old clients see
+  the pre-stats response unchanged).
+- The web console renders the stats as an **Import coverage** panel above the
+  graph preview: the used/skipped/sessions/clients/folded summary, a warning
+  tone when any line was skipped ("this import reflects only part of the
+  captured traffic"), and a skipped-line samples table when the server sent
+  samples.
+- A log with **zero usable requests** fails the import, and the error message
+  carries the first sampled failure's line number and reason - actionable from
+  the error text alone.
+
+**Variable promotion (Go API).** By default each collapsed `{id}` endpoint pins
+to its single most-observed concrete path. The Go API can instead *promote*
+those segments into template variables: `importer.FromAccessLogWithOptions`
+with `PromoteVariables` emits paths like `/product/{{.product_id}}` (the
+standard `{{.var}}` [template interpolation](#api-templates)) and reports each
+variable's observed value pool (hottest first, capped at `MaxVariableSamples`,
+default 5) in the stats. Variables with the same name share one pool across
+endpoints - `/product/{id}` and `/product/{id}/reviews` draw from the same
+`product_id` values. It is **off by default** because a promoted scenario only
+renders once the caller seeds those pools into the virtual users' `vars`; the
+default concrete paths run as-is.
+
+The learner's knobs - the format hint, the node cap (default 30; a negative
+value removes the cap), the session gap (default 30 minutes), and variable
+promotion - live on `importer.AccessLogOptions` /
+`importer.FromAccessLogWithOptions` in the Go API. The CLI and the web import
+use the defaults (auto-detection included).
 
 ---
 

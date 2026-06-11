@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/01-flow-map.png" width="840"
-       alt="tmula traffic-flow map: virtual users walking a branching shop journey (browse → search / category → product → cart → checkout → done); edge thickness is request volume and red counts mark where the happy path broke">
+  <img src="docs/images/demo-live.gif" width="840"
+       alt="tmula web console during a live run: requests stream across the branching shop journey on the traffic-flow map while the latency heatmap and live metrics fill in">
   <br>
-  <sub><i>Live traffic flow from a branching-shop run - edge thickness is request volume, and the red counts mark where the happy path broke (cart / checkout 5xx).</i></sub>
+  <sub><i>The web console during a live run - requests stream across the behavior graph (edge thickness is request volume, red marks errors) while the latency heatmap fills in.</i></sub>
 </p>
 
 ---
@@ -60,7 +60,30 @@ in runs **locally first** and **scales out** to distributed master/worker mode f
 
 Requirements: macOS / Linux. (Building from source needs Go 1.25+ and Node 20+.)
 
-**Try it instantly (Docker)** - no Go/Node, no install. One command brings up the console (real UI
+**Fastest - install one line, run one command, read real findings in ~3 minutes:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+tmula demo
+```
+
+`tmula demo` runs the whole loop self-contained - no config file, no second terminal. It
+**[1/4]** boots a tiny shop API with planted bugs (a flaky cart, a checkout that degrades under
+load, a rare broken product link) on an ephemeral local port, **[2/4]** **learns** a behavior
+graph from that shop's access log, **[3/4]** starts the engine + web console (default `:8080`,
+change with `--addr`), opens the browser straight into the run's live view (`/?run=<run-id>` -
+the flow map and live metrics, no form to fill), and replays the learned traffic against the
+shop for `--duration` (default 60s), then **[4/4]** prints the findings summary plus concrete
+next steps: a ready-to-paste
+`tmula reproduce` command to triage a finding in isolation, the run's HTML report URL, and the
+`tmula init` / `tmula run` pair that points the same loop at your own service. It stays up until
+Ctrl-C so those commands keep working; `--no-browser` skips opening the console.
+
+> The browser console page needs a binary with the embedded UI - the install script's prebuilt
+> binary and the Docker image ship it. With a plain `go build` the demo still works end to end;
+> the terminal summary and the `report.html` link are the result surfaces either way.
+
+**Try it with Docker** - no Go/Node, no install. One command brings up the console (real UI
 baked in) plus both example APIs, each with planted bugs:
 
 ```bash
@@ -73,13 +96,7 @@ API: set **Base URL** to `http://sample-api:9000` (shop) or `http://ticketing-ap
 add that host (`sample-api` / `ticketing-api`) to the **Allowlist**, then hit **Run**. Inside the
 Compose network the engine reaches the SUTs by service name (not `localhost`), so both fields use it.
 
-**Install it** - one line downloads a prebuilt single binary with the web UI baked in:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
-```
-
-Then start the browser console, or run a scenario straight from the CLI:
+**Run it for real** - the same installed binary serves the console or runs scenarios:
 
 ```bash
 tmula --role local --addr :8080      # open http://localhost:8080
@@ -98,14 +115,9 @@ make web                             # just the console on :8080
 With `make demo` the presets work as-is - they target `localhost:9000` / `:9100`, which the bundled
 shop and ticketing APIs serve. Ctrl-C stops all three.
 
-**Or just watch it find bugs** - one command, a sample API with planted bugs:
-
-```bash
-./examples/run-demo.sh               # needs go, jq, curl
-```
-
-It starts a sample shop API (with deliberate bugs) + the engine, runs an experiment, and prints
-the issues it found. See [`examples/`](examples/) for the full walkthrough.
+Prefer a demo script you can read end to end? [`examples/run-demo.sh`](examples/) is the manual
+version of `tmula demo` (explicit curl/jq calls; needs `go`, `jq`, `curl`) - see
+[`examples/`](examples/) for the full walkthrough.
 
 ---
 
@@ -217,11 +229,12 @@ The `tmula` CLI - one binary, no curl/jq, no separately running server:
 
 | Command | What it does |
 |---------|--------------|
+| `tmula demo` | The whole loop in one command: boot a planted-bug shop, **learn** its behavior graph from an access log, replay the learned traffic (engine + web console included), print the findings and next steps - `--addr :8080`, `--duration 60s`, `--no-browser` |
 | `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
 | `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues), `--baseline <run-id>`/`--baseline-file <report.json>` + `--known-issues <yaml>` (regression gate, exit 3 only on findings *new* vs a baseline run), `--summary` (markdown report; auto-lands on the GitHub Actions step summary) |
 | `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
 | `tmula reproduce --engine <url> --run <id> --finding <category/ref>` | Replay one finding's evidence session alone (no load) and classify it `functional` / `load-dependent` / `flaky` |
-| `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time) |
+| `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time). Log formats are auto-detected: nginx/Apache combined, JSON lines, AWS ALB, CloudFront, Caddy, Traefik |
 
 Gate merges on it with the bundled **GitHub Action** (`uses: chordpli/tmula@main` - installs the binary, runs the scenario, posts the findings summary on the workflow page and optionally the PR). See [Running in CI](docs/guide.en.md#running-in-ci).
 
@@ -250,7 +263,14 @@ personas / deviation rate), hit **Run**, and watch it live:
   coordinates, status-code and timing distributions), a standalone **HTML report**, **compare
   with previous run**, and read-only **share** links,
 - opt-in **server metrics**: Prometheus series fetched over the run's window, shown beside the client-side stats,
-- a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic) and scenario **presets**, in a bilingual UI (English / 한국어).
+- a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic, and the import reports its **coverage** - how many lines were used, skipped, and why) and scenario **presets**, in a bilingual UI (English / 한국어).
+
+<p align="center">
+  <img src="docs/images/01-flow-map.png" width="840"
+       alt="tmula traffic-flow map: virtual users walking a branching shop journey (browse → search / category → product → cart → checkout → done); edge thickness is request volume and red counts mark where the happy path broke">
+  <br>
+  <sub><i>The traffic-flow map from a branching-shop run - edge thickness is request volume, and the red counts mark where the happy path broke (cart / checkout 5xx).</i></sub>
+</p>
 
 <p align="center">
   <img src="docs/images/02-config-load-model.png" width="480"
@@ -320,7 +340,7 @@ metrics are opt-in.
 
 ```
 server/                  Go backend module
-server/cmd/tmula         entrypoint: serve (--role local|master|worker), run, init
+server/cmd/tmula         entrypoint: serve (--role local|master|worker), run, reproduce, init, bench, demo
 server/internal/domain   core model: experiments, scenario graphs, virtual users, ...
 server/internal/engine   scenario graph execution (dependency edges inviolable)
 server/internal/load     virtual users, load profiles, protocol adapters
@@ -330,6 +350,7 @@ server/internal/safety   allowlist, rate cap, kill switch
 server/internal/store    in-memory (local) + Postgres (distributed) persistence
 server/internal/cluster  gRPC master/worker for distributed runs
 server/internal/web      embedded React UI
+server/internal/demo     the `tmula demo` shop SUT (planted bugs) + its embedded access log
 server/proto             protobuf contracts for distributed workers
 server/examples          Go sample API servers used by the demos
 web/                     React + Vite control-plane UI
@@ -341,7 +362,7 @@ examples/                scenario files, imports, one-command demo, USAGE guide
 ## Requirements
 
 - macOS / Linux for the prebuilt binary, **or** Go 1.25+ and Node 20+ to build from source
-- `jq` + `curl` for the one-command demo
+- `jq` + `curl` only for the manual demo script (`examples/run-demo.sh`); `tmula demo` needs nothing extra
 - Docker + Postgres - optional, only for the distributed-store integration test
 
 ## License
