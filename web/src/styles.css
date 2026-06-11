@@ -1451,10 +1451,6 @@ a:hover {
   opacity: 1;
 }
 
-.editor-preview__label {
-  cursor: pointer;
-}
-
 .editor-preview__label--selected rect {
   stroke: var(--accent);
 }
@@ -1665,7 +1661,7 @@ a:hover {
   gap: 7px;
   margin: 0;
   font-size: 13px;
-  color: var(--ok, #15803d);
+  color: var(--ok);
 }
 
 .doctor-slim__title {

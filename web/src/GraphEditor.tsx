@@ -17,10 +17,12 @@ import { buildPreviewGeometry, previewGeometryForMode, type PreviewEdgeMode } fr
 import { useI18n } from './i18n'
 
 // Selection is what the operator last clicked in the preview: one node or one
-// edge, addressed by its index in the parsed graph. The graph itself stays the
-// single source of truth (in the JSON the parent owns); selection is only a view
-// state, cleared whenever the addressed item is removed.
-type Selection = { kind: 'node'; index: number } | { kind: 'edge'; index: number } | null
+// edge, addressed by identity (node id, edge from→to) rather than index, so an
+// out-of-band edit — e.g. reordering the raw JSON in the accordion — can never
+// silently retarget the panel at a different item. The selection is re-resolved
+// against the freshly parsed graph on every render and simply dissolves when the
+// addressed item no longer exists.
+type Selection = { kind: 'node'; id: string } | { kind: 'edge'; from: string; to: string } | null
 
 export default function GraphEditor({
   graphJSON,
@@ -65,7 +67,15 @@ export default function GraphEditor({
   function changeNodeID(index: number, nextID: string) {
     const oldID = graph!.nodes[index]?.id
     commit(updateNode(graph!, index, { id: nextID }))
+    setSelection({ kind: 'node', id: nextID.trim() })
     if (oldID && start === oldID) onStartChange(nextID)
+  }
+
+  function changeEdgeEndpoint(index: number, patch: { from?: string; to?: string }) {
+    const edge = graph!.edges[index]
+    if (!edge) return
+    commit(updateEdge(graph!, index, patch))
+    setSelection({ kind: 'edge', from: patch.from ?? edge.from, to: patch.to ?? edge.to })
   }
 
   function deleteNode(index: number) {
@@ -84,26 +94,32 @@ export default function GraphEditor({
   function createNode() {
     const nextID = newNodeID.trim()
     if (!nextID) return
-    const next = addNode(graph!, nextID, newNodeTemplate)
-    commit(next)
+    commit(addNode(graph!, nextID, newNodeTemplate))
     if (!start) onStartChange(nextID)
     setNewNodeID('')
-    const created = next.nodes.findIndex((n) => n.id === nextID)
-    if (created >= 0) setSelection({ kind: 'node', index: created })
+    setSelection({ kind: 'node', id: nextID })
   }
 
   function createEdge() {
     const from = newEdgeFrom || graph!.nodes[0]?.id || ''
     const to = newEdgeTo || graph!.nodes[1]?.id || graph!.nodes[0]?.id || ''
-    const next = addEdge(graph!, from, to)
-    commit(next)
-    const created = next.edges.findIndex((e) => e.from === from && e.to === to)
-    if (created >= 0) setSelection({ kind: 'edge', index: created })
+    if (!from || !to) return
+    commit(addEdge(graph!, from, to))
+    setSelection({ kind: 'edge', from, to })
   }
 
   const nodeIDs = graph.nodes.map((n) => n.id)
-  const selectedNode = selection?.kind === 'node' ? graph.nodes[selection.index] : undefined
-  const selectedEdge = selection?.kind === 'edge' ? graph.edges[selection.index] : undefined
+  // Re-resolve the identity-based selection against the current graph; a stale
+  // identity (item edited away in the raw JSON) resolves to nothing and the
+  // panel quietly closes instead of editing the wrong item.
+  const selectedNodeIndex =
+    selection?.kind === 'node' ? graph.nodes.findIndex((n) => n.id === selection.id) : -1
+  const selectedNode = selectedNodeIndex >= 0 ? graph.nodes[selectedNodeIndex] : undefined
+  const selectedEdgeIndex =
+    selection?.kind === 'edge'
+      ? graph.edges.findIndex((e) => e.from === selection.from && e.to === selection.to)
+      : -1
+  const selectedEdge = selectedEdgeIndex >= 0 ? graph.edges[selectedEdgeIndex] : undefined
 
   return (
     <div className="editor">
@@ -134,9 +150,16 @@ export default function GraphEditor({
           graph={graph}
           start={start}
           mode={previewMode}
-          selection={selection}
-          onSelectNode={(index) => setSelection({ kind: 'node', index })}
-          onSelectEdge={(index) => setSelection({ kind: 'edge', index })}
+          selectedNodeID={selectedNode?.id}
+          selectedEdgeIndex={selectedEdgeIndex}
+          onSelectNode={(index) => {
+            const node = graph.nodes[index]
+            if (node) setSelection({ kind: 'node', id: node.id })
+          }}
+          onSelectEdge={(index) => {
+            const edge = graph.edges[index]
+            if (edge) setSelection({ kind: 'edge', from: edge.from, to: edge.to })
+          }}
         />
       </div>
 
@@ -156,7 +179,7 @@ export default function GraphEditor({
               <input
                 className="input"
                 value={selectedNode.id}
-                onChange={(e) => changeNodeID(selection.index, e.target.value)}
+                onChange={(e) => changeNodeID(selectedNodeIndex, e.target.value)}
               />
             </label>
             <label className="field">
@@ -164,7 +187,7 @@ export default function GraphEditor({
               <TemplateSelect
                 value={selectedNode.apiTemplateId ?? ''}
                 templateIDs={templateIDs}
-                onChange={(value) => commit(updateNode(graph, selection.index, { apiTemplateId: value }))}
+                onChange={(value) => commit(updateNode(graph, selectedNodeIndex, { apiTemplateId: value }))}
               />
             </label>
             {selectedNode.apiTemplateId && (
@@ -187,7 +210,7 @@ export default function GraphEditor({
             <button
               type="button"
               className="btn btn--ghost editor-row__button"
-              onClick={() => deleteNode(selection.index)}
+              onClick={() => deleteNode(selectedNodeIndex)}
             >
               {t('editor.remove')}
             </button>
@@ -212,7 +235,7 @@ export default function GraphEditor({
                 label={t('editor.from')}
                 value={selectedEdge.from}
                 nodeIDs={nodeIDs}
-                onChange={(value) => commit(updateEdge(graph, selection.index, { from: value }))}
+                onChange={(value) => changeEdgeEndpoint(selectedEdgeIndex, { from: value })}
               />
             </label>
             <label className="field">
@@ -221,7 +244,7 @@ export default function GraphEditor({
                 label={t('editor.to')}
                 value={selectedEdge.to}
                 nodeIDs={nodeIDs}
-                onChange={(value) => commit(updateEdge(graph, selection.index, { to: value }))}
+                onChange={(value) => changeEdgeEndpoint(selectedEdgeIndex, { to: value })}
               />
             </label>
             <label className="field">
@@ -232,14 +255,14 @@ export default function GraphEditor({
                 min={0}
                 step={0.1}
                 value={selectedEdge.weight}
-                onChange={(e) => commit(updateEdge(graph, selection.index, { weight: Number(e.target.value) || 0 }))}
+                onChange={(e) => commit(updateEdge(graph, selectedEdgeIndex, { weight: Number(e.target.value) || 0 }))}
               />
             </label>
             <label className="editor-row__check">
               <input
                 type="checkbox"
                 checked={Boolean(selectedEdge.dependency)}
-                onChange={(e) => commit(updateEdge(graph, selection.index, { dependency: e.target.checked }))}
+                onChange={(e) => commit(updateEdge(graph, selectedEdgeIndex, { dependency: e.target.checked }))}
               />
               {t('editor.dependency')}
             </label>
@@ -248,7 +271,7 @@ export default function GraphEditor({
             <button
               type="button"
               className="btn btn--ghost editor-row__button"
-              onClick={() => deleteEdge(selection.index)}
+              onClick={() => deleteEdge(selectedEdgeIndex)}
             >
               {t('editor.remove')}
             </button>
@@ -308,7 +331,7 @@ function TemplateMiniForm({
   const summary = templateSummaryFromJSON(templatesJSON, templateID) ?? { method: '', path: '' }
   return (
     <>
-      <label className="field editor-sel__method">
+      <label className="field">
         <span className="field__label">{t('editor.method')}</span>
         <select
           className="select"
@@ -395,14 +418,16 @@ function GraphPreview({
   graph,
   start,
   mode,
-  selection,
+  selectedNodeID,
+  selectedEdgeIndex,
   onSelectNode,
   onSelectEdge,
 }: {
   graph: EditableGraph
   start: string
   mode: PreviewEdgeMode
-  selection: Selection
+  selectedNodeID?: string
+  selectedEdgeIndex: number
   onSelectNode: (index: number) => void
   onSelectEdge: (index: number) => void
 }) {
@@ -424,8 +449,6 @@ function GraphPreview({
       visibleNodeIDs.add(route.edge.to)
     }
   }
-  const selectedEdgeIndex = selection?.kind === 'edge' ? selection.index : -1
-  const selectedNodeID = selection?.kind === 'node' ? graph.nodes[selection.index]?.id : undefined
   return (
     <svg
       className={`editor-preview editor-preview--${mode}`}
@@ -505,7 +528,6 @@ function GraphPreview({
             route.index === selectedEdgeIndex ? 'editor-preview__label--selected' : '',
           ].join(' ')}
           transform={`translate(${route.label.x}, ${route.label.y})`}
-          onClick={() => onSelectEdge(route.index)}
         >
           <rect x={-route.label.width / 2} y="-11" width={route.label.width} height="22" rx="7" />
           <text y="0">{route.label.value}</text>
