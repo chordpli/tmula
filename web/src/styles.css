@@ -267,7 +267,7 @@ a:hover {
 }
 
 .field__help {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-faint);
   letter-spacing: -0.005em;
   margin-top: -1px;
@@ -1296,10 +1296,12 @@ a:hover {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
+/* The preview always fits its container: the SVG scales via its viewBox, so the
+   whole journey (including the last node) is visible without horizontal scroll. */
 .editor-preview-wrap {
+  position: relative;
   width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
   contain: layout paint;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
@@ -1308,7 +1310,6 @@ a:hover {
 
 .editor-preview {
   width: 100%;
-  min-width: 720px;
   height: 300px;
   display: block;
 }
@@ -1386,12 +1387,16 @@ a:hover {
   opacity: 0.88;
 }
 
+/* The arrowhead inherits its own edge's stroke color (context-stroke, with a
+   static fallback for older engines) so head and line always read as one piece. */
 .editor-preview__arrow {
   fill: #667085;
+  fill: context-stroke;
 }
 
 .editor-preview__arrow--dep {
   fill: var(--accent);
+  fill: context-stroke;
 }
 
 .editor-preview__label rect {
@@ -1433,10 +1438,55 @@ a:hover {
   stroke: none;
 }
 
+/* Invisible wide stroke over each edge so a thin line is comfortably clickable. */
+.editor-preview__hit {
+  stroke: transparent;
+  stroke-width: 16;
+  fill: none;
+  cursor: pointer;
+}
+
+.editor-preview__hit:focus-visible {
+  outline: none;
+  stroke: var(--accent-ring);
+}
+
+.editor-preview__edge--selected {
+  stroke: var(--accent);
+  opacity: 1;
+}
+
+.editor-preview__label--selected rect {
+  stroke: var(--accent);
+}
+
+.editor-preview__node {
+  cursor: pointer;
+}
+
+.editor-preview__node:focus-visible {
+  outline: none;
+}
+
+.editor-preview__node:focus-visible rect {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
 .editor-preview__node rect {
   fill: var(--surface);
   stroke: var(--border-strong);
   stroke-width: 1.5;
+}
+
+.editor-preview__node:hover rect {
+  stroke: var(--accent);
+}
+
+.editor-preview__node--selected rect {
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  fill: var(--accent-soft);
 }
 
 .editor-preview__node--start rect {
@@ -1461,56 +1511,123 @@ a:hover {
   fill: var(--text-muted) !important;
 }
 
-.editor__grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
+/* Instant readout of the hovered node/edge — faster and steadier than the
+   browser's native title tooltip. */
+.editor-hoverinfo {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  padding: 3px 8px;
 }
 
-.editor__panel {
-  border: 1px solid var(--border);
+/* Hover focus: unrelated elements fade so the hovered node/edge neighborhood
+   can be traced through a dense graph. */
+.editor-preview__cold {
+  opacity: 0.16;
+  transition: opacity 0.12s ease;
+}
+
+.editor-preview__edge,
+.editor-preview__node,
+.editor-preview__label {
+  transition: opacity 0.12s ease;
+}
+
+/* Legend: a one-line decoder for the preview's visual language. */
+.editor-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.editor-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-legend__line {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 2.4px solid #344054;
+}
+
+.editor-legend__line--back {
+  border-top: 1.6px dashed #7b8494;
+}
+
+.editor-legend__line--dep {
+  border-top: 2px dashed var(--accent);
+}
+
+.editor-legend__box {
+  display: inline-block;
+  width: 16px;
+  height: 11px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+/* Selection panel: the inline editor for whatever node/edge was clicked. */
+.editor-sel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
   border-radius: var(--r-sm);
   background: var(--surface);
   padding: 12px;
 }
 
-.editor__panelhead {
+.editor-sel__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  width: 100%;
-  appearance: none;
-  border: 0;
-  border-radius: var(--r-xs);
-  background: transparent;
-  padding: 6px 8px;
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  margin-bottom: 10px;
-  cursor: pointer;
-  text-align: left;
 }
 
-.editor__panelhead:hover {
-  background: var(--surface-sunken);
+.editor-sel__title {
+  font-size: 13px;
+  font-weight: 700;
   color: var(--text);
 }
 
-.editor__panelhead:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-ring);
+.editor-sel__title code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--r-xs);
+  padding: 1px 6px;
 }
 
-.editor__panelmeta {
-  flex: none;
-  font-size: 11.5px;
-  font-weight: 650;
-  color: var(--text-muted);
+.editor-sel__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  align-items: end;
 }
 
-.editor__rows {
+.editor-sel__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Add-node / add-edge rows under the preview. */
+.editor-add {
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -1558,6 +1675,72 @@ a:hover {
   .editor-row__button {
     width: 100%;
   }
+}
+
+/* ------------------------------------------------------- Advanced (raw JSON) -- */
+/* The raw graph/templates JSON lives behind this accordion so the default
+   scenario card stays graph-first; experts can still drop to text. */
+.advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+.advanced__summary {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-secondary);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.advanced__summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced__summary::before {
+  content: '▸';
+  margin-right: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+
+.advanced[open] .advanced__summary::before {
+  transform: rotate(90deg);
+}
+
+.advanced__summary:hover {
+  color: var(--text);
+}
+
+.advanced__summary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-radius: var(--r-md);
+}
+
+.advanced__body {
+  padding: 0 14px 14px;
+}
+
+/* Scenario doctor, clean state: a single quiet line instead of a panel. */
+.doctor-slim {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--ok);
+}
+
+.doctor-slim__title {
+  font-weight: 700;
+  color: var(--text-secondary);
 }
 
 /* ---------------------------------------------------------------- Import ---- */

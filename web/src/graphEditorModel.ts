@@ -61,6 +61,48 @@ export function templateIDsFromJSON(json: string): string[] {
   }
 }
 
+// TemplateSummary is the slice of an API template the visual editor can edit
+// inline: the request method and path. Everything else in the template object
+// (payloadTemplate, extract, …) is preserved untouched by updateTemplateInJSON.
+export interface TemplateSummary {
+  method: string
+  path: string
+}
+
+export function templateSummaryFromJSON(json: string, id: string): TemplateSummary | null {
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const tpl = parsed[id]
+    if (!tpl || typeof tpl !== 'object' || Array.isArray(tpl)) return null
+    const t = tpl as Record<string, unknown>
+    return {
+      method: typeof t.method === 'string' ? t.method : '',
+      path: typeof t.path === 'string' ? t.path : '',
+    }
+  } catch {
+    return null
+  }
+}
+
+// updateTemplateInJSON patches method/path on one template, creating the template
+// object when it does not exist yet, and re-serializes the whole document the same
+// way the textarea holds it. On unparseable JSON the original text is returned so
+// an inline edit can never destroy what the operator typed.
+export function updateTemplateInJSON(json: string, id: string, patch: Partial<TemplateSummary>): string {
+  if (!id) return json
+  try {
+    const parsed = (json.trim() ? JSON.parse(json) : {}) as Record<string, unknown>
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return json
+    const prev = parsed[id]
+    const base = prev && typeof prev === 'object' && !Array.isArray(prev) ? (prev as Record<string, unknown>) : {}
+    parsed[id] = { ...base, ...patch }
+    return JSON.stringify(parsed, null, 2)
+  } catch {
+    return json
+  }
+}
+
 export function addNode(g: EditableGraph, id: string, apiTemplateId = ''): EditableGraph {
   const nextID = id.trim()
   if (!nextID || g.nodes.some((n) => n.id === nextID)) return g
@@ -98,10 +140,10 @@ export function removeNode(g: EditableGraph, index: number): EditableGraph {
   }
 }
 
-export function addEdge(g: EditableGraph, from: string, to: string): EditableGraph {
+export function addEdge(g: EditableGraph, from: string, to: string, weight = 1): EditableGraph {
   if (!from || !to) return g
   if (g.edges.some((e) => e.from === from && e.to === to)) return g
-  return { ...g, edges: [...g.edges, { from, to, weight: 1 }] }
+  return { ...g, edges: [...g.edges, { from, to, weight: Math.max(0, weight) }] }
 }
 
 export function updateEdge(g: EditableGraph, index: number, patch: Partial<EditableEdge>): EditableGraph {

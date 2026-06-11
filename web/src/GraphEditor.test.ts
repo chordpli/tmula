@@ -29,17 +29,15 @@ describe('buildPreviewGeometry', () => {
     expect(preview!.routes).toHaveLength(branchingGraph.edges.length)
     for (const route of preview!.routes) {
       expect(route.d).toMatch(/^M /)
-      if (route.kind === 'back' || route.kind === 'exit') {
+      if (route.kind === 'exit') {
+        // Exit edges stay a chip with a short connector stub to the node.
         expect(route.d).toContain(' L ')
       } else {
-        expect(route.d).toContain(' C ')
+        // Everything else is a real arrow: curved (C) for forward/vertical
+        // edges, orthogonal with rounded corners (Q) for backward buses.
+        expect(route.d).toMatch(/ [CQ] /)
       }
-      const expectedLabel =
-        route.kind === 'exit'
-          ? `exit ${route.edge.weight}`
-          : route.kind === 'back'
-            ? `to ${route.edge.to} ${route.edge.weight}`
-            : String(route.edge.weight)
+      const expectedLabel = route.kind === 'exit' ? `exit ${route.edge.weight}` : String(route.edge.weight)
       expect(route.label.value).toBe(expectedLabel)
       expect(route.label.width).toBeGreaterThan(0)
     }
@@ -51,9 +49,9 @@ describe('buildPreviewGeometry', () => {
       'browse->category:0.4',
       'browse->exit:exit 0.2',
       'browse->search:0.4',
-      'category->browse:to browse 0.15',
+      'category->browse:0.15',
       'category->product:0.7',
-      'search->category:to category 0.15',
+      'search->category:0.15',
     ])
     expect(findRoute(preview!, 'browse', 'exit').kind).toBe('exit')
     expect(findRoute(preview!, 'browse', 'exit').showLabel).toBe(true)
@@ -72,18 +70,23 @@ describe('buildPreviewGeometry', () => {
     expect(new Set(startYs).size).toBe(3)
   })
 
-  it('moves lateral and back edges outside the node centers', () => {
+  it('arcs lateral and back edges around the node row as real arrows', () => {
     const preview = buildPreviewGeometry(branchingGraph, 'browse')!
     const sameColumn = preview.routes.find((route) => route.edge.from === 'search' && route.edge.to === 'category')!
     const back = preview.routes.find((route) => route.edge.from === 'category' && route.edge.to === 'browse')!
     const exit = preview.routes.find((route) => route.edge.from === 'browse' && route.edge.to === 'exit')!
 
+    // Vertical neighbors arc out the left side of both nodes.
     expect(sameColumn.kind).toBe('back')
-    expect(sameColumn.d).toContain(' L ')
-    expect(sameColumn.label.value).toBe('to category 0.15')
-    expect(back.d).toContain(' L ')
+    expect(sameColumn.d).toContain(' C ')
+    expect(sameColumn.label.value).toBe('0.15')
+    expect(sameColumn.bounds.minX).toBeLessThan(preview.positions.search.x - 48)
+    // Backward edges run an orthogonal bus around the row from source to target.
+    expect(back.d).toContain(' Q ')
     expect(back.d).not.toContain(' C ')
-    expect(back.label.value).toBe('to browse 0.15')
+    expect(back.label.value).toBe('0.15')
+    expect(back.bounds.minX).toBeLessThanOrEqual(preview.positions.browse.x)
+    // Exit edges remain a chip with a short connector stub.
     expect(exit.d).toContain(' L ')
     expect(exit.bounds.maxX - exit.bounds.minX).toBeLessThan(120)
     expect(preview.positions.exit.y).toBeGreaterThan(preview.positions.category.y)

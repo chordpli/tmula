@@ -84,8 +84,20 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
       Boolean(item.from && item.to),
     )
 
-  const outgoing = groupEdgeIndexes(validEdges, 'from')
-  const incoming = groupEdgeIndexes(validEdges, 'to')
+  // Only edges that actually use a node's side ports take part in port
+  // assignment; back and exit edges route around the row, and counting them
+  // would leave phantom empty slots that push real arrows onto the nodes'
+  // rounded corners. Right-side (outgoing) ports serve forward departures;
+  // left-side (incoming) ports also serve vertical-neighbor arcs, which arrive
+  // at the target's left edge alongside the forward arrows.
+  const outgoing = groupEdgeIndexes(
+    validEdges.filter(({ edge, from, to }) => to.x > from.x && !isExitNode(edge.to)),
+    'from',
+  )
+  const incoming = groupEdgeIndexes(
+    validEdges.filter(({ edge, from, to }) => to.x >= from.x && !isExitNode(edge.to)),
+    'to',
+  )
   const outgoingMax = maxOutgoingWeights(validEdges)
   const terminalIDs = new Set(graph.nodes.filter((node) => !node.apiTemplateId).map((node) => node.id))
   const mainPoints = graph.nodes
@@ -96,6 +108,13 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
   const mainTop = Math.min(...railPoints.map((p) => p.y - PREVIEW_NODE_HALF_H))
 
   const noteLanes = new Map<string, number>()
+  // Backward edges get globally assigned depth lanes, shortest span first, so
+  // two back arcs nest like contour lines instead of crossing each other.
+  const backLaneByIndex = new Map<number, number>()
+  validEdges
+    .filter(({ from, to }) => to.x < from.x)
+    .sort((a, b) => (a.from.x - a.to.x) - (b.from.x - b.to.x))
+    .forEach((item, lane) => backLaneByIndex.set(item.index, lane))
   const rawRoutes = validEdges.map(({ edge, index, from, to }) => {
     const outList = outgoing.get(edge.from) ?? [index]
     const inList = incoming.get(edge.to) ?? [index]
@@ -110,19 +129,37 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
       const lane = nextNoteLane(noteLanes, edge.from)
       return exitRoute(edge, index, from, lane, routeTop, kind, showLabel)
     }
-    if (dx === 0) {
+    if (dx <= 0) {
       const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
-      const lane = nextNoteLane(noteLanes, edge.from)
-      return sameColumnRoute(edge, index, from, lane, routeTop, kind, showLabel)
-    }
-    if (dx < 0) {
-      const routeTop = from.y < mainTop + PREVIEW_NODE_HALF_H * 2
-      const lane = nextNoteLane(noteLanes, edge.from)
-      return backRoute(edge, index, from, lane, routeTop, kind, showLabel)
+      const lane = dx === 0 ? nextNoteLane(noteLanes, edge.from) : backLaneByIndex.get(index) ?? 0
+      return backArcRoute(edge, index, from, to, lane, routeTop, kind, showLabel, endOffset)
     }
     return forwardRoute(edge, index, from, to, startOffset, endOffset, kind, showLabel)
   })
-  const routes = separateLabels(rawRoutes).sort((a, b) => routeRank(a.kind) - routeRank(b.kind) || a.index - b.index)
+  // Labels must keep clear of every node's port strips — the short stretch just
+  // left (arrivals) and right (departures) of a node — or a chip can sit on an
+  // edge's final segment and visually sever the line from its arrowhead.
+  const portKeepOut = graph.nodes
+    .filter((node) => !isExitNode(node.id))
+    .map((node) => positions[node.id])
+    .filter((point): point is { x: number; y: number } => Boolean(point))
+    .flatMap((point) => [
+      {
+        minX: point.x - PREVIEW_NODE_HALF_W - 24,
+        maxX: point.x - PREVIEW_NODE_HALF_W + 2,
+        minY: point.y - 14,
+        maxY: point.y + 14,
+      },
+      {
+        minX: point.x + PREVIEW_NODE_HALF_W - 2,
+        maxX: point.x + PREVIEW_NODE_HALF_W + 24,
+        minY: point.y - 14,
+        maxY: point.y + 14,
+      },
+    ])
+  const routes = separateLabels(rawRoutes, portKeepOut).sort(
+    (a, b) => routeRank(a.kind) - routeRank(b.kind) || a.index - b.index,
+  )
 
   const routeBounds = routes.flatMap((r) => [r.bounds])
   const minX = Math.min(
@@ -282,9 +319,14 @@ function routeRank(kind: PreviewEdgeKind): number {
   }
 }
 
+// portOffset spreads a node's ports along its side, compressing the spacing when
+// needed so the outermost port stays on the flat edge, clear of the rounded
+// corners (8px radius) where a line visually detaches from the node.
 function portOffset(order: number, total: number): number {
   const safeOrder = Math.max(0, order)
-  return (safeOrder - (total - 1) / 2) * PREVIEW_PORT_SPACING
+  const spacing =
+    total <= 1 ? 0 : Math.min(PREVIEW_PORT_SPACING, (PREVIEW_NODE_HALF_H * 2 - 16) / (total - 1))
+  return (safeOrder - (total - 1) / 2) * spacing
 }
 
 function forwardRoute(
@@ -299,41 +341,101 @@ function forwardRoute(
 ): PreviewRoute {
   const start = { x: from.x + PREVIEW_NODE_HALF_W, y: from.y + startOffset }
   const end = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y + endOffset }
-  const curve = Math.max(28, Math.min(62, Math.abs(end.x - start.x) * 0.3))
+  // Long horizontal handles (45% of the span) flatten the curve gradually, so
+  // it arrives at the node visibly horizontal — the arrowhead points the same
+  // way the line is going, with no elbow snapped in front of the node.
+  const curve = Math.max(40, Math.abs(end.x - start.x) * 0.45)
   const c1 = { x: start.x + curve, y: start.y }
   const c2 = { x: end.x - curve, y: end.y }
   const labelPoint = cubicPoint(start, c1, c2, end, 0.5)
   const label = edgeLabel(edge.weight, labelPoint.x, labelPoint.y - 10)
-  return route(edge, index, kind, showLabel, `M ${fmt(start.x)} ${fmt(start.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(end.x)} ${fmt(end.y)}`, [
-    start,
-    c1,
-    c2,
-    end,
-  ], label)
+  return route(
+    edge,
+    index,
+    kind,
+    showLabel,
+    `M ${fmt(start.x)} ${fmt(start.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(end.x)} ${fmt(end.y)}`,
+    [start, c1, c2, end],
+    label,
+  )
 }
 
-function sameColumnRoute(
+// backArcRoute draws a real arrow for a backward or same-column transition,
+// arcing around the node row (left side for vertical neighbors, under/over the
+// row otherwise) so the destination is visible instead of implied by a chip.
+function backArcRoute(
   edge: EditableEdge,
   index: number,
   from: { x: number; y: number },
+  to: { x: number; y: number },
   lane: number,
   routeTop: boolean,
   kind: PreviewEdgeKind,
   showLabel: boolean,
+  endOffset: number,
 ): PreviewRoute {
-  return noteRoute(edge, index, from, lane, routeTop, kind, showLabel, `to ${edge.to} ${edge.weight}`)
-}
-
-function backRoute(
-  edge: EditableEdge,
-  index: number,
-  from: { x: number; y: number },
-  lane: number,
-  routeTop: boolean,
-  kind: PreviewEdgeKind,
-  showLabel: boolean,
-): PreviewRoute {
-  return noteRoute(edge, index, from, lane, routeTop, kind, showLabel, `to ${edge.to} ${edge.weight}`)
+  if (from.x === to.x) {
+    // Vertical neighbors: a short arc out the left side of both nodes. The
+    // arrival uses the edge's own incoming port so its arrowhead lands beside —
+    // not on top of — the forward edges entering the same target.
+    const startP = { x: from.x - PREVIEW_NODE_HALF_W, y: from.y }
+    const endP = { x: to.x - PREVIEW_NODE_HALF_W, y: to.y + endOffset }
+    const bend = 46 + lane * 16
+    const c1 = { x: startP.x - bend, y: startP.y }
+    const c2 = { x: endP.x - bend, y: endP.y }
+    const mid = cubicPoint(startP, c1, c2, endP, 0.5)
+    const label = edgeLabel(edge.weight, mid.x, mid.y)
+    return route(
+      edge,
+      index,
+      kind,
+      showLabel,
+      `M ${fmt(startP.x)} ${fmt(startP.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(endP.x)} ${fmt(endP.y)}`,
+      [startP, c1, c2, endP],
+      label,
+    )
+  }
+  // Backward edge: orthogonal "bus" routing (mirrored above the row when the
+  // source sits on the top row) — straight down from the source's bottom-left,
+  // a straight horizontal run along the edge's own depth lane, then straight up
+  // into the target's bottom-left. Straight segments never bulge past the
+  // target the way a bezier U did, the label sits directly on the horizontal
+  // run so its edge is unambiguous, and the globally assigned lane depths keep
+  // concurrent buses parallel instead of crossing. The bottom-left corridor is
+  // free because exit chips hang right of center.
+  const direction = routeTop ? -1 : 1
+  const corner = 10
+  const edgeY = direction * PREVIEW_NODE_HALF_H
+  const startX = from.x - 36
+  // Arrivals spread rightward per lane but stop short of the exit chip zone.
+  const endX = Math.min(to.x - 36 + lane * 10, to.x - 26)
+  const startY = from.y + edgeY
+  const endY = to.y + edgeY
+  const rowY = direction === 1 ? Math.max(from.y, to.y) : Math.min(from.y, to.y)
+  const busY = rowY + direction * (96 + lane * 20)
+  const d = [
+    `M ${fmt(startX)} ${fmt(startY)}`,
+    `L ${fmt(startX)} ${fmt(busY - direction * corner)}`,
+    `Q ${fmt(startX)} ${fmt(busY)} ${fmt(startX - corner)} ${fmt(busY)}`,
+    `L ${fmt(endX + corner)} ${fmt(busY)}`,
+    `Q ${fmt(endX)} ${fmt(busY)} ${fmt(endX)} ${fmt(busY - direction * corner)}`,
+    `L ${fmt(endX)} ${fmt(endY)}`,
+  ].join(' ')
+  const label = edgeLabel(edge.weight, (startX + endX) / 2, busY)
+  return route(
+    edge,
+    index,
+    kind,
+    showLabel,
+    d,
+    [
+      { x: startX, y: startY },
+      { x: startX - corner, y: busY },
+      { x: endX, y: busY },
+      { x: endX, y: endY },
+    ],
+    label,
+  )
 }
 
 function exitRoute(
@@ -358,23 +460,45 @@ function noteRoute(
   showLabel: boolean,
   value: string,
 ): PreviewRoute {
+  // Chips hang slightly right of center so the bottom-left corridor stays free
+  // for back-edge buses arriving at the same node.
   const direction = routeTop ? -1 : 1
-  const x = from.x
+  const x = from.x + 18
   const y = from.y + direction * (PREVIEW_NODE_HALF_H + 28 + lane * 18)
-  const point = { x, y }
   const label = noteLabel(value, x, y)
-  return route(edge, index, kind, showLabel, `M ${fmt(x)} ${fmt(y)} L ${fmt(x)} ${fmt(y)}`, [point], label)
+  // A short connector stub from the chip's near edge to the node boundary, so the
+  // floating note label reads as attached to its source node instead of orphaned.
+  const chipEdgeY = y - direction * 10
+  const nodeEdgeY = from.y + direction * PREVIEW_NODE_HALF_H
+  const points = [
+    { x, y: chipEdgeY },
+    { x, y: nodeEdgeY },
+    { x, y },
+  ]
+  return route(edge, index, kind, showLabel, `M ${fmt(x)} ${fmt(chipEdgeY)} L ${fmt(x)} ${fmt(nodeEdgeY)}`, points, label)
 }
 
-function separateLabels(routes: PreviewRoute[]): PreviewRoute[] {
+function separateLabels(
+  routes: PreviewRoute[],
+  keepOut: { minX: number; maxX: number; minY: number; maxY: number }[] = [],
+): PreviewRoute[] {
   const placed: { minX: number; maxX: number; minY: number; maxY: number }[] = []
   const offsets = [0, -20, 20, -40, 40, -60, 60, -80, 80]
   return routes.map((route) => {
     if (!route.showLabel) return route
-    const label =
-      offsets
-        .map((offset) => ({ ...route.label, y: route.label.y + offset }))
-        .find((candidate) => !placed.some((rect) => overlaps(labelRect(candidate), rect))) ?? route.label
+    const candidates = offsets.map((offset) => ({ ...route.label, y: route.label.y + offset }))
+    const clearOfBoth = candidates.find((candidate) => {
+      const rect = labelRect(candidate)
+      return !placed.some((other) => overlaps(rect, other)) && !keepOut.some((zone) => overlaps(rect, zone))
+    })
+    // Degrade gracefully: overlapping another label is worse than entering a
+    // port strip, so when every candidate hits a strip, take the first one
+    // that at least avoids the other labels.
+    const clearOfLabels = candidates.find((candidate) => {
+      const rect = labelRect(candidate)
+      return !placed.some((other) => overlaps(rect, other))
+    })
+    const label = clearOfBoth ?? clearOfLabels ?? route.label
     const next = label === route.label ? route : withLabel(route, label)
     placed.push(labelRect(next.label))
     return next
@@ -383,7 +507,7 @@ function separateLabels(routes: PreviewRoute[]): PreviewRoute[] {
 
 function edgeLabel(weight: number, x: number, y: number): PreviewRoute['label'] {
   const value = String(weight)
-  return { value, x, y, width: Math.max(34, value.length * 8 + 16) }
+  return { value, x, y, width: Math.max(30, value.length * 7 + 12) }
 }
 
 function noteLabel(value: string, x: number, y: number): PreviewRoute['label'] {
@@ -405,13 +529,13 @@ function withLabel(route: PreviewRoute, label: PreviewRoute['label']): PreviewRo
 }
 
 function labelRect(label: PreviewRoute['label']): { minX: number; maxX: number; minY: number; maxY: number } {
-  const xPad = 6
-  const yPad = 5
+  const xPad = 5
+  const yPad = 4
   return {
     minX: label.x - label.width / 2 - xPad,
     maxX: label.x + label.width / 2 + xPad,
-    minY: label.y - 12 - yPad,
-    maxY: label.y + 8 + yPad,
+    minY: label.y - 10 - yPad,
+    maxY: label.y + 10 + yPad,
   }
 }
 
