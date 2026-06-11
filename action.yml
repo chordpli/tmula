@@ -1,0 +1,119 @@
+name: tmula run
+description: >-
+  Run a tmula traffic scenario against your service and gate CI on what broke:
+  journey regressions, contract violations, availability dips. The run summary
+  lands on the workflow page, and optionally as a PR comment.
+branding:
+  icon: activity
+  color: orange
+
+inputs:
+  scenario:
+    description: Path to the scenario file (YAML/JSON). Omit only if extra-args supplies a single-endpoint probe.
+    required: false
+    default: ''
+  target:
+    description: Target base URL; overrides the scenario file's target.
+    required: false
+    default: ''
+  users:
+    description: Closed-model virtual user count.
+    required: false
+    default: ''
+  open:
+    description: Open model arrivals per second.
+    required: false
+    default: ''
+  for:
+    description: Open model duration in seconds.
+    required: false
+    default: ''
+  fail-on:
+    description: "Gate: 'findings' fails on any finding, 'warning'/'critical' on that severity and above, 'none' never fails."
+    required: false
+    default: findings
+  version:
+    description: tmula release tag to install (default latest).
+    required: false
+    default: ''
+  comment:
+    description: Post the run summary as a PR comment (needs the workflow's pull-requests write permission).
+    required: false
+    default: 'false'
+  extra-args:
+    description: Extra raw arguments appended to `tmula run`.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Install tmula
+      shell: bash
+      env:
+        TMULA_VERSION: ${{ inputs.version }}
+      run: |
+        curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Run scenario
+      shell: bash
+      env:
+        SCENARIO: ${{ inputs.scenario }}
+        TARGET: ${{ inputs.target }}
+        USERS: ${{ inputs.users }}
+        OPEN: ${{ inputs.open }}
+        FOR: ${{ inputs.for }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        EXTRA: ${{ inputs.extra-args }}
+      run: |
+        args=()
+        [ -n "$SCENARIO" ] && args+=("$SCENARIO")
+        [ -n "$TARGET" ]   && args+=(--target "$TARGET")
+        [ -n "$USERS" ]    && args+=(--users "$USERS")
+        [ -n "$OPEN" ]     && args+=(--open "$OPEN")
+        [ -n "$FOR" ]      && args+=(--for "$FOR")
+        case "$FAIL_ON" in
+          findings)         args+=(--fail-on-findings) ;;
+          warning|critical) args+=(--fail-on-severity "$FAIL_ON") ;;
+          none|'') ;;
+          *) echo "fail-on must be findings|warning|critical|none, got '$FAIL_ON'" >&2; exit 1 ;;
+        esac
+        if [ -n "$EXTRA" ]; then
+          # Word-split the raw args without glob-expanding a * or ? in them.
+          set -f
+          # shellcheck disable=SC2206  # intentional word-splitting of raw args
+          args+=($EXTRA)
+          set +f
+        fi
+        if [ ${#args[@]} -eq 0 ]; then
+          echo "provide a scenario, or a probe via extra-args" >&2; exit 1
+        fi
+
+        summary="$RUNNER_TEMP/tmula-summary.md"
+        # Share the path with the comment step (separate shells).
+        echo "TMULA_SUMMARY=$summary" >> "$GITHUB_ENV"
+        # The gate exits 2 on findings; keep going so the summary still lands,
+        # then re-raise the code at the end.
+        set +e
+        tmula run "${args[@]}" --summary "$summary"
+        code=$?
+        set -e
+        if [ -f "$summary" ]; then
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit "$code"
+
+    - name: Comment on the PR
+      if: ${{ always() && inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        # Context values cross into the script as env vars, never as ${{ }}
+        # template expansion inside run: (the classic script-injection vector).
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        if [ -n "${TMULA_SUMMARY:-}" ] && [ -f "$TMULA_SUMMARY" ]; then
+          gh pr comment "$PR_NUMBER" -R "$REPO" --body-file "$TMULA_SUMMARY"
+        fi

@@ -560,6 +560,7 @@ Builds a RunSpec from a scenario file (or single-endpoint flags), executes it (i
 | `--json` | false | Print the raw report JSON instead of a summary. |
 | `--fail-on-findings` | false | Exit non-zero if any finding is detected (CI gate). |
 | `--fail-on-severity <s>` | - | Gate only on findings at/above `warning` or `critical`. |
+| `--summary <file>` | `$GITHUB_STEP_SUMMARY` | Append a markdown run summary (stats + findings table) to this file. Defaults to GitHub Actions' step summary when that env var is set, so CI gets it with zero configuration. |
 | `--timeout <dur>` | 2m | Max time to wait for the run to finish. |
 
 **Worked examples:**
@@ -587,6 +588,37 @@ tmula run examples/shop/scenario.yaml --users 50 --fail-on-severity critical
 **Exit codes:** `0` ok · `1` error (or a failed/killed run) · `2` findings detected under a gate. The gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals. A run that did not complete cleanly (failed or killed, e.g. a timeout or a kill-switch trip) exits non-zero **regardless** of findings, so it never silently passes CI.
 
 The flag parser collects positionals in a loop, so `tmula run scenario.yaml --users 50` and `tmula run --users 50 scenario.yaml` both work.
+
+### Running in CI
+
+The exit codes above make `tmula run` a merge gate: run the journey against the
+service the job just built, and the step fails when the journey breaks. The
+repo ships a **GitHub Action** that installs the binary, runs the scenario,
+appends the markdown summary to the workflow page, and (optionally) posts it as
+a PR comment:
+
+```yaml
+jobs:
+  journey:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write        # only needed for comment: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d my-service   # start the SUT however you do
+      - uses: chordpli/tmula@main
+        with:
+          scenario: tests/journey.yaml
+          target: http://localhost:9000
+          users: 50
+          fail-on: critical        # findings | warning | critical | none
+          comment: true            # post the summary on the PR
+```
+
+Without the action, plain `tmula run` already cooperates with GitHub Actions:
+when `GITHUB_STEP_SUMMARY` is set the markdown summary is appended there
+automatically, and the summary is written even when the run failed or the gate
+trips - a red job links straight to *what broke*, not just an exit code.
 
 ### `tmula bench` - capacity probe
 

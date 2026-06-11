@@ -150,9 +150,11 @@ The `tmula` CLI - one binary, no curl/jq, no separately running server:
 | Command | What it does |
 |---------|--------------|
 | `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
-| `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues) |
+| `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues), `--summary` (markdown report; auto-lands on the GitHub Actions step summary) |
 | `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
 | `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time) |
+
+Gate merges on it with the bundled **GitHub Action** (`uses: chordpli/tmula@main` - installs the binary, runs the scenario, posts the findings summary on the workflow page and optionally the PR). See [Running in CI](docs/guide.en.md#running-in-ci).
 
 Build & run from source:
 

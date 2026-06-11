@@ -554,6 +554,7 @@ templates:                         # API 템플릿 맵 (키 = id, protocol은 re
 | `--json` | false | 요약 대신 원시 보고서 JSON 출력. |
 | `--fail-on-findings` | false | finding이 하나라도 감지되면 비정상 종료(CI 게이트). |
 | `--fail-on-severity <s>` | - | `warning` 또는 `critical` 이상 finding에 대해서만 게이트. |
+| `--summary <file>` | `$GITHUB_STEP_SUMMARY` | 마크다운 실행 요약(지표 + finding 표)을 이 파일에 덧붙입니다. 해당 환경변수가 설정된 GitHub Actions에서는 기본으로 스텝 요약에 실리므로 CI에서 설정 없이 동작합니다. |
 | `--timeout <dur>` | 2m | 실행 완료를 기다리는 최대 시간. |
 
 **실전 예시:**
@@ -581,6 +582,30 @@ tmula run examples/shop/scenario.yaml --users 50 --fail-on-severity critical
 **종료 코드:** `0` 정상 · `1` 오류(또는 failed/killed 실행) · `2` 게이트 아래 finding 감지됨. 게이트는 `--fail-on-findings` 또는 `--fail-on-severity warning`에 대해서는 모든 finding을 세고, `--fail-on-severity critical`은 critical만 셉니다. 깨끗하게 완료되지 못한 실행(failed 또는 killed, 예를 들어 타임아웃이나 kill-switch 작동)은 finding과 **무관하게** 비정상 종료하므로, CI 게이트를 조용히 통과하지 않습니다.
 
 플래그 파서는 위치 인자를 루프로 수집하므로 `tmula run scenario.yaml --users 50`과 `tmula run --users 50 scenario.yaml`이 모두 동작합니다.
+
+### CI에서 쓰기
+
+위의 종료 코드 덕분에 `tmula run`은 머지 게이트가 됩니다. 잡이 방금 빌드한 서비스에 여정을 돌리고, 여정이 깨지면 스텝이 실패합니다. 저장소에는 바이너리 설치 → 시나리오 실행 → 마크다운 요약을 워크플로 페이지에 게시 → (선택) PR 코멘트까지 해 주는 **GitHub Action**이 들어 있습니다:
+
+```yaml
+jobs:
+  journey:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write        # comment: true일 때만 필요
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d my-service   # SUT를 평소 방식으로 기동
+      - uses: chordpli/tmula@main
+        with:
+          scenario: tests/journey.yaml
+          target: http://localhost:9000
+          users: 50
+          fail-on: critical        # findings | warning | critical | none
+          comment: true            # 요약을 PR 코멘트로
+```
+
+액션 없이도 맨 `tmula run`이 GitHub Actions와 협력합니다. `GITHUB_STEP_SUMMARY`가 설정돼 있으면 마크다운 요약이 자동으로 덧붙고, 실행이 실패했거나 게이트가 작동했을 때도 요약은 기록됩니다 - 빨간 잡이 종료 코드가 아니라 *무엇이 깨졌는지*로 바로 이어집니다.
 
 ### `tmula bench` - 용량 프로브
 

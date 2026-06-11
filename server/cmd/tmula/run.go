@@ -42,6 +42,7 @@ func runScenario(args []string) error {
 		asJSON         = fs.Bool("json", false, "print the raw report JSON instead of a summary")
 		failOnFindings = fs.Bool("fail-on-findings", false, "exit non-zero if any finding is detected (CI gate)")
 		failOnSeverity = fs.String("fail-on-severity", "", "gate only on findings at/above this severity: warning | critical")
+		summary        = fs.String("summary", "", "append a markdown run summary to this file (default: $GITHUB_STEP_SUMMARY when set)")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
 	fs.Usage = func() {
@@ -167,6 +168,21 @@ func runScenario(args []string) error {
 		}
 	} else {
 		printReport(report)
+	}
+	// The markdown summary is written before the failed/killed and gate checks
+	// below: a broken run is exactly when the summary is needed (it is what a CI
+	// job shows after the gate makes it exit non-zero). It is best-effort — a
+	// summary-file problem must never mask the run's real outcome or downgrade
+	// the gate's exit code, so a write failure is reported but not returned.
+	if path := summaryPath(*summary); path != "" {
+		if err := writeSummary(path, markdownReport(report)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		} else {
+			// A breadcrumb, also for the local user who happens to have
+			// GITHUB_STEP_SUMMARY exported and would otherwise be appending to it
+			// silently.
+			fmt.Fprintf(os.Stderr, "markdown summary appended to %s\n", path)
+		}
 	}
 
 	// A run that did not complete cleanly (failed or killed — e.g. a timeout or
