@@ -84,8 +84,20 @@ export function buildPreviewGeometry(graph: EditableGraph, start: string): Previ
       Boolean(item.from && item.to),
     )
 
-  const outgoing = groupEdgeIndexes(validEdges, 'from')
-  const incoming = groupEdgeIndexes(validEdges, 'to')
+  // Only edges that actually use a node's side ports take part in port
+  // assignment; back and exit edges route around the row, and counting them
+  // would leave phantom empty slots that push real arrows onto the nodes'
+  // rounded corners. Right-side (outgoing) ports serve forward departures;
+  // left-side (incoming) ports also serve vertical-neighbor arcs, which arrive
+  // at the target's left edge alongside the forward arrows.
+  const outgoing = groupEdgeIndexes(
+    validEdges.filter(({ edge, from, to }) => to.x > from.x && !isExitNode(edge.to)),
+    'from',
+  )
+  const incoming = groupEdgeIndexes(
+    validEdges.filter(({ edge, from, to }) => to.x >= from.x && !isExitNode(edge.to)),
+    'to',
+  )
   const outgoingMax = maxOutgoingWeights(validEdges)
   const terminalIDs = new Set(graph.nodes.filter((node) => !node.apiTemplateId).map((node) => node.id))
   const mainPoints = graph.nodes
@@ -284,9 +296,14 @@ function routeRank(kind: PreviewEdgeKind): number {
   }
 }
 
+// portOffset spreads a node's ports along its side, compressing the spacing when
+// needed so the outermost port stays on the flat edge, clear of the rounded
+// corners (8px radius) where a line visually detaches from the node.
 function portOffset(order: number, total: number): number {
   const safeOrder = Math.max(0, order)
-  return (safeOrder - (total - 1) / 2) * PREVIEW_PORT_SPACING
+  const spacing =
+    total <= 1 ? 0 : Math.min(PREVIEW_PORT_SPACING, (PREVIEW_NODE_HALF_H * 2 - 16) / (total - 1))
+  return (safeOrder - (total - 1) / 2) * spacing
 }
 
 function forwardRoute(

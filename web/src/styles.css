@@ -1386,10 +1386,12 @@ a:hover {
   opacity: 0.88;
 }
 
-/* A thin surface-colored outline keeps an arrowhead legible even when it lands
-   on top of another dark edge. */
+/* The arrowhead inherits its own edge's stroke color (context-stroke, with a
+   static fallback for older engines) so head and line always match, and a thin
+   surface-colored outline keeps it legible when it lands on another dark edge. */
 .editor-preview__arrow {
   fill: #667085;
+  fill: context-stroke;
   stroke: var(--surface);
   stroke-width: 1.1;
   paint-order: stroke;
@@ -1397,6 +1399,7 @@ a:hover {
 
 .editor-preview__arrow--dep {
   fill: var(--accent);
+  fill: context-stroke;
 }
 
 .editor-preview__label rect {
