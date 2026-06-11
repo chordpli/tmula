@@ -302,6 +302,28 @@ const en: Record<string, string> = {
   'findings.title': 'Findings',
   'findings.empty': 'No issues detected.',
 
+  // Finding evidence panel (ReportView). Session ids, personas, error classes and
+  // bucket labels are backend data and shown verbatim — only the chrome below is
+  // translated.
+  'evidence.summary': 'Evidence',
+  'evidence.summaryOne': 'Evidence · {count} representative session',
+  'evidence.summaryMany': 'Evidence · {count} representative sessions',
+  'evidence.sessionsTitle': 'Representative sessions',
+  'evidence.grepHint':
+    "Each session sent its ID as the X-Tmula-Session-ID header on every request — grep the target server's logs for an ID below to see exactly what that session did. Seed and user # are the coordinates to reproduce it.",
+  'evidence.col.session': 'Session',
+  'evidence.col.persona': 'Persona',
+  'evidence.col.seed': 'Seed',
+  'evidence.col.user': 'User #',
+  'evidence.col.path': 'Path to failure',
+  'evidence.col.status': 'Status',
+  'evidence.col.latency': 'Latency',
+  'evidence.col.error': 'Error',
+  'evidence.col.time': 'At',
+  'evidence.statusTitle': 'Status codes (all occurrences)',
+  'evidence.timingTitle': 'When in the run',
+  'evidence.rootCause': 'Root cause class:',
+
   // LiveGraph captions
   'graph.events.title': 'Live traffic',
   'graph.events.sub': '— each dot is one request',
@@ -573,6 +595,27 @@ const ko: Record<string, string> = {
   'metrics.fetchError': '일부 시계열을 가져오지 못했습니다:',
   'findings.title': '발견 항목',
   'findings.empty': '발견된 문제가 없습니다.',
+
+  // 발견 항목의 증거 패널 (ReportView). 세션 ID·페르소나·오류 분류·구간 라벨은
+  // 백엔드 데이터라 그대로 보여 주고, 주변 UI 문구만 번역합니다.
+  'evidence.summary': '증거',
+  'evidence.summaryOne': '증거 · 대표 세션 {count}건',
+  'evidence.summaryMany': '증거 · 대표 세션 {count}건',
+  'evidence.sessionsTitle': '대표 세션',
+  'evidence.grepHint':
+    '각 세션은 모든 요청에 자기 ID를 X-Tmula-Session-ID 헤더로 보냈습니다. 대상 서버 로그에서 아래 ID로 grep 하면 그 세션이 한 일을 정확히 볼 수 있습니다. 시드와 사용자 번호는 세션을 재현하는 좌표입니다.',
+  'evidence.col.session': '세션',
+  'evidence.col.persona': '페르소나',
+  'evidence.col.seed': '시드',
+  'evidence.col.user': '사용자 #',
+  'evidence.col.path': '실패까지의 경로',
+  'evidence.col.status': '상태',
+  'evidence.col.latency': '지연',
+  'evidence.col.error': '오류',
+  'evidence.col.time': '시각',
+  'evidence.statusTitle': '상태 코드 분포 (전체 발생 기준)',
+  'evidence.timingTitle': '실행 중 발생 시점',
+  'evidence.rootCause': '근본 원인 분류:',
 
   // LiveGraph captions
   'graph.events.title': '실시간 트래픽',

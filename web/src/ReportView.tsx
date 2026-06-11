@@ -1,4 +1,5 @@
-import type { MetricSeries, OutcomeSummary, Report, Stats } from './api'
+import type { Finding, FindingEvidence, MetricSeries, OutcomeSummary, Report, Stats } from './api'
+import HelpTip from './HelpTip'
 import { useI18n } from './i18n'
 
 // errorRateKind picks a stat color by how alarming the error rate is, so a glance
@@ -7,6 +8,49 @@ function errorRateKind(rate: number): '' | 'warn' | 'danger' {
   if (rate >= 0.05) return 'danger'
   if (rate > 0) return 'warn'
   return ''
+}
+
+// --- Finding evidence (pure model helpers, unit-tested) --------------------------
+// The diagnostic bundle behind a finding renders as a collapsible panel under its
+// description. These helpers shape the wire data for that panel without React, in
+// the same "pure helpers next to the component" convention as sparklinePath.
+
+// hasEvidence reports whether a finding carries a renderable evidence bundle —
+// i.e. at least one populated section. Legacy persisted findings (no evidence
+// field) and empty bundles get no panel, so pre-evidence reports look unchanged.
+export function hasEvidence(f: Finding): boolean {
+  const e = f.evidence
+  if (!e) return false
+  return (
+    (e.vus?.length ?? 0) > 0 ||
+    (e.timeBuckets?.length ?? 0) > 0 ||
+    Object.keys(e.statusCounts ?? {}).length > 0 ||
+    Boolean(e.rootCauseClass)
+  )
+}
+
+// statusCountRows turns the wire status-code map (Go marshals map[int]int with
+// string keys) into rows sorted numerically by code, so the distribution renders
+// in a deterministic order whatever order JSON.parse yielded.
+export function statusCountRows(counts?: Record<string, number>): { code: string; count: number }[] {
+  return Object.entries(counts ?? {})
+    .map(([code, count]) => ({ code, count }))
+    .sort((a, b) => Number(a.code) - Number(b.code))
+}
+
+// formatPath renders the node chain a session walked up to its failing request.
+// A dash stands in when the producing path carried no journeys (the distributed
+// stream ships no per-request path).
+export function formatPath(path?: string[]): string {
+  return path && path.length > 0 ? path.join(' → ') : '—'
+}
+
+// bucketWidthPct maps a time bucket's count onto a 0–100 bar width against the
+// densest bucket. A nonzero count keeps a minimum sliver so a rare-but-real
+// occurrence stays visible next to a spike; truly empty buckets draw nothing.
+export function bucketWidthPct(count: number, maxCount: number): number {
+  if (count <= 0 || maxCount <= 0) return 0
+  return Math.max(4, Math.round((count / maxCount) * 100))
 }
 
 // StatsView renders the headline metrics as a compact card grid: requests, error
@@ -163,15 +207,129 @@ export default function ReportView({
             return (
               <div className="finding" key={i}>
                 <span className={`finding__sev finding__sev--${sevClass}`}>{sev}</span>
-                <span>
+                {/* A div, not a span: the evidence panel nests block content
+                    (<details>, a table) that may not live inside inline markup. */}
+                <div className="finding__main">
                   <span className="finding__cat">[{f.category}]</span> <span className="finding__desc">{f.description}</span>
-                </span>
+                  {hasEvidence(f) && <EvidencePanel evidence={f.evidence!} />}
+                </div>
               </div>
             )
           })}
         </div>
       )}
     </div>
+  )
+}
+
+// EvidencePanel renders a finding's diagnostic bundle as a collapsed-by-default
+// <details> under the description, mirroring the server-rendered HTML report's
+// evidence section so the console, the standalone report, and the shared-link
+// viewer all tell the same story. Session/persona/error values are backend data
+// and shown verbatim; only the surrounding chrome is translated.
+function EvidencePanel({ evidence }: { evidence: FindingEvidence }) {
+  const { t } = useI18n()
+  const sessions = evidence.vus ?? []
+  const statusRows = statusCountRows(evidence.statusCounts)
+  const buckets = evidence.timeBuckets ?? []
+  const maxBucket = buckets.reduce((m, b) => Math.max(m, b.count), 0)
+  const summary =
+    sessions.length === 1
+      ? t('evidence.summaryOne', { count: sessions.length })
+      : sessions.length > 1
+        ? t('evidence.summaryMany', { count: sessions.length })
+        : t('evidence.summary')
+  return (
+    <details className="evidence">
+      <summary className="evidence__summary">{summary}</summary>
+      <div className="evidence__body">
+        {evidence.rootCauseClass && (
+          <p className="evidence__root">
+            {t('evidence.rootCause')} <code>{evidence.rootCauseClass}</code>
+          </p>
+        )}
+
+        {sessions.length > 0 && (
+          <>
+            <div className="evidence__sect">
+              {t('evidence.sessionsTitle')}
+              {/* The grep guidance lives in the established HelpTip tooltip so the
+                  table itself stays compact. */}
+              <HelpTip label={t('evidence.sessionsTitle')} text={t('evidence.grepHint')} />
+            </div>
+            <div className="evidence__scroll">
+              <table className="evidence__table">
+                <thead>
+                  <tr>
+                    <th>{t('evidence.col.session')}</th>
+                    <th>{t('evidence.col.persona')}</th>
+                    <th className="num">{t('evidence.col.seed')}</th>
+                    <th className="num">{t('evidence.col.user')}</th>
+                    <th>{t('evidence.col.path')}</th>
+                    <th className="num">{t('evidence.col.status')}</th>
+                    <th className="num">{t('evidence.col.latency')}</th>
+                    <th>{t('evidence.col.error')}</th>
+                    <th>{t('evidence.col.time')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sessions.map((s, i) => (
+                    <tr key={i}>
+                      <td>
+                        <code>{s.vu}</code>
+                      </td>
+                      <td>{s.persona || '—'}</td>
+                      <td className="num">{s.seed}</td>
+                      <td className="num">{s.userIndex}</td>
+                      <td className="evidence__path">{formatPath(s.path)}</td>
+                      {/* Status 0/absent is a transport-level failure; the error
+                          class column carries the reason instead. */}
+                      <td className="num">{s.statusCode ? s.statusCode : '—'}</td>
+                      <td className="num">{Math.round(s.latencyMs).toLocaleString()} ms</td>
+                      <td>{s.errorClass || '—'}</td>
+                      <td>{new Date(s.ts).toLocaleTimeString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
+        {statusRows.length > 0 && (
+          <>
+            <div className="evidence__sect">{t('evidence.statusTitle')}</div>
+            <div className="evidence__chips">
+              {statusRows.map((r) => (
+                <span className="evidence__chip" key={r.code}>
+                  <code>{r.code}</code> × {r.count.toLocaleString()}
+                </span>
+              ))}
+            </div>
+          </>
+        )}
+
+        {buckets.length > 0 && (
+          <>
+            <div className="evidence__sect">{t('evidence.timingTitle')}</div>
+            <div className="evidence__buckets">
+              {buckets.map((b, i) => (
+                <div className="evidence__bucket" key={i}>
+                  <span className="evidence__bucketLabel">{b.label}</span>
+                  <span className="evidence__bar" aria-hidden="true">
+                    <span
+                      className="evidence__barFill"
+                      style={{ width: `${bucketWidthPct(b.count, maxBucket)}%` }}
+                    />
+                  </span>
+                  <span className="evidence__bucketCount">{b.count.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </details>
   )
 }
 

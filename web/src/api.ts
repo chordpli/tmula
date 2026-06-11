@@ -151,12 +151,55 @@ export interface Stats {
   max: number
 }
 
+// EvidenceSession is one representative session behind a finding, exactly as the
+// server marshals domain.EvidenceSession. The wire names are part of the masking
+// contract: the shared-report PII masker redacts any field whose NAME contains a
+// sensitive substring (including "session"), so the synthetic session id rides
+// under "vu" (and the list under "vus") to survive masking intact.
+export interface EvidenceSession {
+  vu: string // the X-Tmula-Session-ID header value the session sent on every request
+  seed: number // the session's walk seed (run seed + userIndex)
+  userIndex: number // the offset that derives the seed — the reproduce coordinate
+  persona?: string // segment label; absent when the run had no persona mix
+  path?: string[] // node chain up to and including the failing request; absent when the producing path carries no journeys
+  statusCode?: number // absent/0 for transport-level failures (see errorClass)
+  latencyMs: number
+  errorClass?: string
+  ts: string // RFC 3339 completion time of the failing request
+}
+
+// EvidenceBucket is one fixed quarter of the run window and how many of the
+// finding's occurrences fell into it.
+export interface EvidenceBucket {
+  label: string
+  count: number
+}
+
+// FindingEvidence is the optional diagnostic bundle behind a finding (mirrors
+// domain.FindingEvidence): representative sessions with reproduce coordinates,
+// the status-code distribution and the failure timing across the run window.
+export interface FindingEvidence {
+  vus?: EvidenceSession[]
+  timeBuckets?: EvidenceBucket[]
+  // Go marshals map[int]int with string keys, so "503": 12 — not numeric keys.
+  statusCounts?: Record<string, number>
+  // Recorded by the reproduce flow once it has replayed the failure and
+  // classified its root cause; absent until then.
+  rootCauseClass?: string
+}
+
 export interface Finding {
   runId: string
   category: string
   severity: string
   evidenceRef?: string
   description: string
+  // Occurrences behind the finding (errors surfaced, violation count, streak
+  // length); absent when the category carries rates instead (omitempty).
+  count?: number
+  // Diagnostic bundle; absent on legacy persisted findings and on the coarse
+  // summary-derived ones, which retain no per-request data.
+  evidence?: FindingEvidence
 }
 
 // MetricSeries is one server-side Prometheus series fetched over the run's
