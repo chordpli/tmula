@@ -153,6 +153,64 @@ bleed into another user's journey.
 
 ---
 
+## Findings that carry their evidence
+
+A finding is no longer just a sentence. Each per-endpoint finding ships an **evidence bundle**:
+up to 5 representative failing sessions (the earliest occurrences plus the slowest of the rest),
+each with its session ID (the `X-Tmula-Session-ID` header value to grep your server logs for),
+its **seed coordinates** (run seed + user index = session seed), its persona, and the graph path
+it walked into the failure - plus the finding's status-code distribution and where in the run
+window the occurrences clustered. The web console and the HTML report render it as a collapsible
+panel per finding.
+
+**Reproduce - real bug, or load artifact?** Those seed coordinates make a finding *replayable*:
+`tmula reproduce` re-runs one evidence session alone (no concurrent load) and classifies the
+root cause from how often the failure recurs:
+
+```bash
+tmula reproduce --engine http://localhost:8080 --run run-12 --finding contract/checkout
+```
+
+```
+Reproduce contract/checkout — run run-12
+  session u17  seed=18 (run seed 1 + user index 17)
+  original failure path: browse → search → product → cart → checkout
+
+Attempts (3, single session, no concurrent load):
+  #1  not reproduced  browse:200(3ms) search:200(5ms) product:200(4ms) cart:200(6ms) checkout:200(9ms)
+  #2  not reproduced  browse:200(3ms) search:200(4ms) product:200(4ms) cart:200(5ms) checkout:200(8ms)
+  #3  not reproduced  browse:200(2ms) search:200(5ms) product:200(4ms) cart:200(6ms) checkout:200(8ms)
+
+Verdict: load-dependent — reproduced 0/3 attempts under no load → likely load-dependent (concurrency or saturation)
+```
+
+- **functional** - the failure reproduced on *every* isolated attempt: it does not need load, so
+  it is likely a plain functional bug. Fix the code path.
+- **load-dependent** - it reproduced on *no* attempt: it likely needs the original concurrency or
+  saturation. Look at pools, locks, capacity.
+- **flaky** - it reproduced on some attempts only.
+
+The verdict is stamped onto the stored finding (`rootCauseClass`) and shows in later reports. It
+is a *signal, not a proof*: the replay recreates the session's traffic composition (same seed,
+same walk), never the original timing or target state.
+
+**Baseline gate - fail CI only on what *this* change broke.** `tmula run --baseline-file
+main-report.json` (or `--baseline <run-id> --engine <url>`) diffs the findings against a previous
+run by their stable identity and exits `3` only when **new** findings appear - known, persisting
+problems do not block every PR. A `--known-issues issues.yaml` file suppresses accepted findings,
+each entry with a mandatory `reason` and `expires` date so nothing is silenced forever. The
+verdict (new / resolved / persisting / suppressed) lands in the terminal output and the GitHub
+Actions step summary. Full reference: [the user manual](docs/guide.en.md#the-cli).
+
+> finding은 이제 증거를 동봉합니다. finding마다 대표 실패 세션(세션 ID·시드 재현 좌표·페르소나·
+> 실패까지의 그래프 경로)과 상태 코드·발생 시간 분포가 붙고, `tmula reproduce`는 그 시드 좌표로
+> 세션 하나를 부하 없이 재실행해 **functional**(부하 무관 기능 버그) / **load-dependent**(동시성·
+> 포화 의존) / **flaky**를 판별합니다 - 트래픽 구성의 재현이지 타이밍의 재현이 아니므로 증명이
+> 아닌 신호입니다. `--baseline`(+`--known-issues`) 회귀 게이트는 베이스라인 대비 **새로운**
+> finding이 있을 때만 exit 3으로 CI를 실패시킵니다.
+
+---
+
 ## Commands
 
 The `tmula` CLI - one binary, no curl/jq, no separately running server:
@@ -160,8 +218,9 @@ The `tmula` CLI - one binary, no curl/jq, no separately running server:
 | Command | What it does |
 |---------|--------------|
 | `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
-| `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues), `--summary` (markdown report; auto-lands on the GitHub Actions step summary) |
+| `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues), `--baseline <run-id>`/`--baseline-file <report.json>` + `--known-issues <yaml>` (regression gate, exit 3 only on findings *new* vs a baseline run), `--summary` (markdown report; auto-lands on the GitHub Actions step summary) |
 | `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
+| `tmula reproduce --engine <url> --run <id> --finding <category/ref>` | Replay one finding's evidence session alone (no load) and classify it `functional` / `load-dependent` / `flaky` |
 | `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time) |
 
 Gate merges on it with the bundled **GitHub Action** (`uses: chordpli/tmula@main` - installs the binary, runs the scenario, posts the findings summary on the workflow page and optionally the PR). See [Running in CI](docs/guide.en.md#running-in-ci).
@@ -187,7 +246,9 @@ personas / deviation rate), hit **Run**, and watch it live:
 
 - a **Traffic flow** map of requests moving across your scenario, with completion / drop-off,
 - a **latency heatmap** (time × latency band),
-- findings, a standalone **HTML report**, **compare with previous run**, and read-only **share** links,
+- findings, each with a collapsible **evidence panel** (representative sessions with seed
+  coordinates, status-code and timing distributions), a standalone **HTML report**, **compare
+  with previous run**, and read-only **share** links,
 - opt-in **server metrics**: Prometheus series fetched over the run's window, shown beside the client-side stats,
 - a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic) and scenario **presets**, in a bilingual UI (English / 한국어).
 

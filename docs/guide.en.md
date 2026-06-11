@@ -83,7 +83,7 @@ tmula surfaces issues in three overlapping ways:
 
 ### What "findings" are
 
-A **finding** is a classified problem tmula detected from the *client side* (status codes, latency, error patterns), with no server instrumentation required. There are four categories: `contract`, `availability`, `threshold`, and `mutation`, each with a severity. A run's output is "here is what real traffic would have broken." See [Findings explained](#findings-explained) for how each is computed.
+A **finding** is a classified problem tmula detected from the *client side* (status codes, latency, error patterns), with no server instrumentation required. There are four categories: `contract`, `availability`, `threshold`, and `mutation`, each with a severity. A run's output is "here is what real traffic would have broken." Findings also carry an **evidence bundle** - representative failing sessions with replay coordinates, plus status-code and timing distributions - and `tmula reproduce` can replay one of those sessions in isolation to tell a functional bug from a load-dependent one. See [Findings explained](#findings-explained) for how each is computed.
 
 ### Why this differs from a plain load tool
 
@@ -585,6 +585,9 @@ Builds a RunSpec from a scenario file (or single-endpoint flags), executes it (i
 | `--json` | false | Print the raw report JSON instead of a summary. |
 | `--fail-on-findings` | false | Exit non-zero if any finding is detected (CI gate). |
 | `--fail-on-severity <s>` | - | Gate only on findings at/above `warning` or `critical`. |
+| `--baseline <run-id>` | - | Regression gate: diff this run's findings against a baseline run fetched from `--engine` (required with this form). Exit `3` only on findings **new** vs the baseline. See [the baseline gate](#the-baseline-gate--fail-only-on-regressions). |
+| `--baseline-file <file>` | - | Regression gate against a saved report JSON (a previous `tmula run --json` output, e.g. a CI artifact). Use only one of `--baseline` / `--baseline-file`. |
+| `--known-issues <file>` | - | Known-issues YAML: matching **new** findings are suppressed in the baseline gate until their `expires` date (`YYYY-MM-DD`). Requires `--baseline` or `--baseline-file`. |
 | `--summary <file>` | `$GITHUB_STEP_SUMMARY` | Append a markdown run summary (stats + findings table) to this file. Defaults to GitHub Actions' step summary when that env var is set, so CI gets it with zero configuration. |
 | `--timeout <dur>` | 2m | Max time to wait for the run to finish. |
 
@@ -608,11 +611,59 @@ tmula run examples/shop/scenario.yaml --users 50 --fail-on-findings
 
 # CI gate, criticals only
 tmula run examples/shop/scenario.yaml --users 50 --fail-on-severity critical
+
+# Regression gate: exit 3 only on findings new vs main's saved report
+tmula run examples/shop/scenario.yaml --users 50 \
+  --baseline-file main-report.json --known-issues known-issues.yaml
 ```
 
-**Exit codes:** `0` ok · `1` error (or a failed/killed run) · `2` findings detected under a gate. The gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals. A run that did not complete cleanly (failed or killed, e.g. a timeout or a kill-switch trip) exits non-zero **regardless** of findings, so it never silently passes CI.
+**Exit codes** (precedence order - a later gate is consulted only when every earlier one passed):
+
+| Code | Meaning | Trigger |
+|------|---------|---------|
+| `0` | Clean | The run completed and no enabled gate tripped. With a baseline, *persisting* findings still exit `0` - they are not what this change broke. |
+| `1` | Error, or a failed/killed run | Always non-zero regardless of findings (e.g. a timeout or a kill-switch trip), so a broken run never silently passes CI. |
+| `2` | Findings detected | `--fail-on-findings` / `--fail-on-severity`: the absolute gate. It counts every (matching) finding, baseline or not, so it keeps its meaning even when a baseline is also passed. |
+| `3` | New findings vs the baseline | `--baseline` / `--baseline-file`: the regression gate, after known-issue suppression. |
+
+The absolute gate counts every finding for `--fail-on-findings` or `--fail-on-severity warning`; `--fail-on-severity critical` counts only criticals.
 
 The flag parser collects positionals in a loop, so `tmula run scenario.yaml --users 50` and `tmula run --users 50 scenario.yaml` both work.
+
+### The baseline gate - fail only on regressions
+
+`--fail-on-findings` is absolute: any finding fails the job, even one that has been failing for
+weeks. The **baseline gate** compares instead. Findings are keyed by their stable identity
+`(category, evidenceRef)` - no run-specific numbers - and diffed against a baseline run, so CI
+goes red only for what *this* change broke. Two ways to name the baseline:
+
+- `--baseline-file report.json` - a saved `tmula run --json` output. The natural CI shape: the
+  main-branch job uploads its report as an artifact, the PR job downloads it and gates against it.
+- `--baseline <run-id> --engine <url>` - fetch the baseline from a long-running engine's run
+  history (`GET /api/runs/{id}/report`). An in-process run starts with empty history, which is
+  why this form requires `--engine`.
+
+The verdict has four buckets: **new** (the only one that fails the gate, exit `3`), **resolved**,
+**persisting** (already broken in the baseline - reported, never failing), and **suppressed**. It
+prints after the report, and is appended to the markdown `--summary` as a **"Baseline gate"**
+section (one table, new findings first, suppressed rows annotated with their reason and expiry).
+
+**Known issues.** `--known-issues <file>` suppresses accepted *new* findings. The file is a YAML
+list; **every field is required**, so no suppression is anonymous or eternal:
+
+```yaml
+- category: contract
+  evidenceRef: checkout            # the finding's identity, exactly as reports print it
+  reason: known cart-service hiccup, tracked in SHOP-123
+  expires: 2026-07-31              # YYYY-MM-DD - the last (UTC) day this suppression holds
+```
+
+Matching is exact on `(category, evidenceRef)` - no globbing - and unknown YAML fields are
+rejected, so a typo cannot silently disable a suppression. `expires` forces a re-triage date: the
+expiry day itself still suppresses, and from the next (UTC) day the entry stops working - the
+finding turns **new** again (and fails the gate), and the expired entry is called out on stderr
+(it survives `--json` mode there) and in the summary, so it gets re-triaged or deleted rather
+than rotting in the file.
 
 ### Running in CI
 
@@ -643,7 +694,57 @@ jobs:
 Without the action, plain `tmula run` already cooperates with GitHub Actions:
 when `GITHUB_STEP_SUMMARY` is set the markdown summary is appended there
 automatically, and the summary is written even when the run failed or the gate
-trips - a red job links straight to *what broke*, not just an exit code.
+trips - a red job links straight to *what broke*, not just an exit code. To
+gate on regressions only, add `--baseline-file` (exit `3` on new findings - see
+[the baseline gate](#the-baseline-gate--fail-only-on-regressions)); its verdict
+table is appended to the same step summary.
+
+### `tmula reproduce` - real bug, or load artifact?
+
+Every per-endpoint finding's [evidence bundle](#the-evidence-bundle) names sessions with their
+**seed coordinates** (run seed + user index = session seed). `tmula reproduce` replays the
+finding's first evidence session **in isolation** - one session, no concurrent load, the same
+deterministic walk - several times, and classifies the root cause from how often the failure
+recurs:
+
+| Verdict (`rootCauseClass`) | Meaning |
+|----------------------------|---------|
+| `functional` | Reproduced on **every** attempt: it does not need load - likely a plain functional bug. |
+| `load-dependent` | Reproduced on **no** attempt: it likely needs the original concurrency or saturation. |
+| `flaky` | Reproduced on some attempts only - rerun with more `--attempts`, or inspect the target. |
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--engine <url>` | - | **Required.** The engine that ran (and still holds) the run. |
+| `--run <run-id>` | - | **Required.** The run whose finding to replay. |
+| `--finding <sel>` | - | **Required.** `category/evidenceRef` (e.g. `contract/checkout` - the same key reports print) or the finding's 1-based index in the run's findings list. |
+| `--attempts <n>` | 3 | How many isolated replays to run (1-20). |
+| `--json` | false | Print the raw reproduce JSON instead of the table. |
+| `--timeout <dur>` | 2m | Max time to wait for the replays. |
+
+```bash
+tmula reproduce --engine http://localhost:8080 --run run-12 --finding contract/checkout
+tmula reproduce --engine http://localhost:8080 --run run-12 --finding 1 --attempts 5
+```
+
+The output shows the session and its seed arithmetic, the original failure path, every attempt's
+per-step status codes (the step carrying the finding's signal marked with `!`), and the verdict.
+The verdict is also stamped onto the stored finding as `rootCauseClass` - live cache and Store
+both - so a refetched report shows the triage already done (`(root cause: load-dependent)`).
+
+The replay honors the original run's constraints: the safety guard is rebuilt and enforced
+(allowlist, rate cap, a `prod-locked` target is refused), a persona session replays with its
+segment's entry-node and max-steps overrides, and a credential-pool run re-acquires the same
+credential by index.
+
+**Limits.** The replay happens on the engine (`POST /api/runs/{id}/reproduce`), because the seed
+coordinates only mean something next to the run's spec - which lives in engine memory only. A
+restarted engine or an evicted run answers `410`; run against a long-running engine when you
+intend to reproduce later. Summary-derived (run-wide) findings carry no session coordinates, and
+`mutation` findings need inputs the replay does not generate - both are refused (`422`). And the
+verdict is **a signal, not a proof**: the replay recreates the session's *traffic composition*
+(same seed, same walk), never the original timing, concurrency, or target state - the engine
+repeats this note with every result.
 
 ### `tmula bench` - capacity probe
 
@@ -707,7 +808,7 @@ Health check: `GET /healthz` returns `{"status":"ok","role":...,"version":...}`.
 
 ## Findings explained
 
-A finding is `{ runId, category, severity, evidenceRef, firstSeen, description }`. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`server/internal/obs/finding.go`). First, two predicates used throughout:
+A finding is `{ runId, category, severity, evidenceRef, firstSeen, description, count }` (`count` is the number of occurrences behind it; omitted for threshold findings, which carry rates in the description). It optionally carries an `evidence` bundle ([below](#the-evidence-bundle)) and - after a `tmula reproduce` pass - a `rootCauseClass`. `evidenceRef` is the finding's *stable identity* with no run-specific numbers in it - the API (node) id for per-endpoint findings, `error-rate` / `p95-latency` for the run-wide threshold findings, `run-wide` for summary-derived aggregates - so the same issue keys identically across runs; it is what the baseline gate diffs on and what a known-issues entry names. There are four categories and three severities (`critical`, `warning`, `info`). The single-node path classifies per API per category, so *one* bad endpoint yields *one* finding, not hundreds, in the order mutation → contract → availability → threshold. Here is how each is computed (`server/internal/obs/finding.go`). First, two predicates used throughout:
 
 - A request **failed** when `statusCode >= 400` **or** it carries an `errorClass` (e.g. `"timeout"`, `"transport"`, `"assertion"`).
 - A request is **unavailable** when `statusCode >= 500` **or** `errorClass == "timeout"` **or** `errorClass == "transport"`.
@@ -740,6 +841,35 @@ Every field is optional, and a `0` (or omitted) field falls back to its default 
 
 > **The distributed/aggregated path.** When workers aggregate their shards (`aggregateWorkers`), findings come from a merged `Summary` (`FindingsFromSummary`), which keeps only per-category tallies: no per-API breakdown and no ordering. It produces at most *one* finding per tripped category for the whole run, deliberately coarser than the per-endpoint single-node findings. That is the fidelity-for-scale trade you opt into. (A detail: the Summary's threshold error-rate/p95 count *all* observations including mutated ones, whereas the single-node classifier excludes mutated requests. This is latent today because the distributed path never carries mutated observations.)
 
+### The evidence bundle
+
+A finding answers *what* broke; the **evidence bundle** attached to it answers *who hit it, when,
+and how to see it again*. It is condensed once, at classification time, from the same
+observations the classifier counted - so the evidence can never disagree with the finding it
+backs - and it is bounded by design: a finding stays small no matter how many requests failed
+behind it. On the wire (the report JSON and the Store) it is the finding's optional `evidence`
+field:
+
+| Field | What it is |
+|-------|------------|
+| `vus` | Up to **5 representative sessions**: the earliest occurrences (where the issue first surfaced) plus the slowest of the rest (the worst case). For the p95 threshold finding the candidates are the requests *over the gate* - slowness, not failure, is that signal. |
+| `vus[].vu` | The session ID - the exact `X-Tmula-Session-ID` header value the session sent on every request, so you can grep the target's logs for that one journey. |
+| `vus[].seed`, `vus[].userIndex` | The replay coordinates: run seed + `userIndex` = the session's walk seed (`seed`). The index is the pool index for the closed model, the arrival number for the open model, the global user index for a distributed shard. This is what `tmula reproduce` replays from. |
+| `vus[].persona` | The segment the session was drawn from (omitted when the run had no persona mix). |
+| `vus[].path` | The node sequence the session walked, up to and including the failing request. (The distributed stream carries no per-request path, so it is empty there.) |
+| `vus[].statusCode` / `latencyMs` / `errorClass` / `ts` | The request that surfaced the issue. Status `0` means a transport-level failure - the `errorClass` is the signal then. |
+| `timeBuckets` | The finding's occurrences over four fixed quarters of the observed run window (`0-25%` … `75-100%`) - enough to tell "early in ramp-up" from "late in soak". |
+| `statusCounts` | The status-code tally of *every* occurrence, not just the representative sessions. |
+
+The web console renders the bundle as a collapsible panel per finding, and the standalone HTML
+report has the same section. Both survive shared (masked) reports: the wire names `vus`/`vu` are
+deliberately chosen so the PII masker - which redacts any field whose *name* looks sensitive,
+including "session" - carries these synthetic identifiers through intact.
+
+Two producers attach no evidence: summary-derived findings (`aggregateWorkers` folds per-request
+data away by design - see the note above) and findings persisted before the bundle existed. A
+finding without evidence renders exactly as before, and `tmula reproduce` refuses it.
+
 ---
 
 ## Reading the results
@@ -752,7 +882,7 @@ When **Show live traffic** is on, the console streams a live view; afterward you
 
 **Live metrics.** Running counters: requests, error rate, p50 / p95 / p99 / max latency, timeouts, and a status-code tally (e.g. `200:313 500:8`).
 
-**HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions.
+**HTML report & compare.** Every run has a standalone server-rendered **HTML report** (`View full HTML report`) and a run-to-run **compare** view (`Compare with previous run`) for spotting regressions. In both the web report and the HTML report, each finding expands into its [evidence panel](#the-evidence-bundle): the representative sessions (with the `X-Tmula-Session-ID` value to grep server logs for and the seed coordinates `tmula reproduce` replays from), the status-code distribution, the timing distribution, and the `rootCauseClass` verdict when a reproduce pass recorded one.
 
 ### Server metrics side-by-side (Prometheus)
 
@@ -954,7 +1084,7 @@ No, that's the signature of **overload / saturation**, usually because you are *
 That is usually a *real* bug in the system under test, and in the example domains, a deliberately planted one. The ticketing `POST /hold` 409s (seat contention) and `POST /pay` 503s (payment under rush), or the shop `POST /cart` 500s and `POST /checkout` degradation, are the kind of endpoint-concentrated failure tmula is built to surface. Endpoint-concentrated errors → look at that endpoint; run-wide errors with saturation symptoms → look at your harness (previous question).
 
 **Q: A CI run exited 2 even though I expected a pass.**
-`--fail-on-findings` (or `--fail-on-severity`) intentionally exits `2` when findings are detected. That's the gate working. A `1` instead means an actual error or a failed/killed run (e.g. a timeout or kill-switch trip), which always exits non-zero regardless of findings. `0` means clean.
+`--fail-on-findings` (or `--fail-on-severity`) intentionally exits `2` when findings are detected. That's the gate working. A `3` means the [baseline gate](#the-baseline-gate--fail-only-on-regressions) found findings *new* vs the baseline (after known-issue suppression). A `1` instead means an actual error or a failed/killed run (e.g. a timeout or kill-switch trip), which always exits non-zero regardless of findings. `0` means clean - which, with a baseline, includes "only persisting findings."
 
 **Q: My authenticated run "works" against a remote `--engine` but carries no token.**
 It can't, and the run path refuses it: a credential pool against a remote `--engine` is rejected because the secret cannot cross the wire (`json:"-"`). Run in-process (`tmula run` with an `auth:` block, no `--engine`) to authenticate.
