@@ -251,7 +251,7 @@ examples/                scenario files, imports, one-command demo, USAGE guide
 
 ## License
 
-TBD.
+Apache-2.0 — see [LICENSE](LICENSE).
 
 ---
 

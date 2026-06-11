@@ -33,7 +33,7 @@ inputs:
     required: false
     default: findings
   version:
-    description: tmula release tag to install (default latest).
+    description: tmula release tag to install (default latest). Pin this for reproducible runs.
     required: false
     default: ''
   comment:
@@ -53,7 +53,11 @@ runs:
       env:
         TMULA_VERSION: ${{ inputs.version }}
       run: |
-        curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
+        # Run the installer bundled with this action instead of piping it from
+        # the mutable main branch: GitHub checks the action repo out at the ref
+        # the workflow pinned in `uses:`, so the script is pinned along with it.
+        # The binary itself is selected by the `version` input (TMULA_VERSION).
+        sh "$GITHUB_ACTION_PATH/install.sh"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Run scenario
