@@ -39,6 +39,14 @@ type Server struct {
 	store   store.Store
 	adapter load.Adapter
 	masker  *mask.Masker
+	// annotateMu serializes the store read-modify-write in annotateRootCause.
+	// Without it, two concurrent reproduce calls for different findings of the
+	// same run could both read the finding list, each stamp only its own finding,
+	// and the later SaveFindings would overwrite the first call's update — a
+	// lost-update that silently drops one RootCauseClass from the system of
+	// record. This lock is intentionally separate from mu and rs.mu so it does
+	// not block unrelated store or run-state operations.
+	annotateMu sync.Mutex
 	// shareReg owns the share-token bookkeeping behind its own mutex, decoupled
 	// from s.mu (which guards run state). Share access was already localized and
 	// never shared a critical section with run state, so this is behavior-preserving.

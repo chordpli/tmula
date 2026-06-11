@@ -179,6 +179,14 @@ func (r RunSpec) Validate() error {
 // bootstrap-signup request fails loudly rather than silently running
 // unauthenticated, and a credential pool combined with distributed workers is
 // refused because the worker fan-out synthesizes its own (unauthenticated) users.
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: the rejection of (CredentialPool ≠ nil)
+// combined with (Workers > 0 || AggregateWorkers) is what guarantees that any
+// distributed run is always unauthenticated. CredentialProvider therefore returns
+// (nil, nil) for every distributed spec, which is the assumption reproduce.go's
+// sessionUser relies on to stay user-consistent: if a distributed run could carry
+// a credential pool, sessionUser would silently replay it under the wrong user.
+// See also: CredentialProvider and the sessionUser function in reproduce.go.
 func (r RunSpec) validateCredentialPool() error {
 	if r.CredentialPool == nil {
 		return nil
@@ -192,6 +200,8 @@ func (r RunSpec) validateCredentialPool() error {
 		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
 	}
 	if len(r.Workers) > 0 || r.AggregateWorkers {
+		// This rejection is load-bearing for reproduce fidelity — see the doc
+		// comment above before relaxing it.
 		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
 	}
 	return nil
@@ -200,6 +210,13 @@ func (r RunSpec) validateCredentialPool() error {
 // CredentialProvider builds the auth provider for a run from its credential pool,
 // or returns (nil, nil) when the run is unauthenticated. Validate has already
 // confirmed the pool is a usable "pool" strategy, so no signup function is needed.
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: a distributed run always returns (nil,
+// nil) here because validateCredentialPool rejects any spec that combines a
+// credential pool with distributed workers. The reproduce path (sessionUser in
+// reproduce.go) relies on this: a nil provider means the replayed session runs
+// as the same user the evidence session ran as, keeping the reproduce verdict
+// user-consistent. See validateCredentialPool for the full invariant.
 func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil

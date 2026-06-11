@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -312,6 +313,87 @@ func TestReproduceErrorCases(t *testing.T) {
 	rs.mu.Unlock()
 	if _, err := srv.ReproduceFinding(ctx, rep.Run.ID, ReproduceRequest{Category: cat, EvidenceRef: ref}); !errors.Is(err, errSpecUnavailable) {
 		t.Errorf("missing spec err = %v, want errSpecUnavailable", err)
+	}
+}
+
+// TestAnnotateRootCauseConcurrent guards the read-modify-write atomicity of
+// annotateRootCause: two goroutines annotate different findings of the same
+// run concurrently. Without s.annotateMu the second SaveFindings would be
+// built from a stale read that does not yet contain the first finding's class,
+// silently overwriting it. The test checks that both RootCauseClass values
+// survive in the store (the system of record) when the race detector is on.
+func TestAnnotateRootCauseConcurrent(t *testing.T) {
+	// SUT that fails /b and /c unconditionally, producing two distinct contract
+	// findings. The three-node graph a->b and a->c gives each finding a unique
+	// EvidenceRef the annotation path keyed on.
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/b"),
+			strings.HasSuffix(r.URL.Path, "/c"):
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer sut.Close()
+
+	srv, cp, closeCP := newCPServer(t)
+	defer closeCP()
+
+	spec := specFor(sut.URL, 8)
+	spec.Graph = domain.ScenarioGraph{
+		ID: "g",
+		Nodes: []domain.Node{
+			{ID: "a", APITemplateID: "ta"},
+			{ID: "b", APITemplateID: "tb"},
+			{ID: "c", APITemplateID: "tc"},
+		},
+		Edges: []domain.Edge{
+			{From: "a", To: "b", Weight: 1},
+			{From: "a", To: "c", Weight: 1},
+		},
+	}
+	spec.Templates["tc"] = domain.APITemplate{Method: "GET", Path: "/c"}
+
+	rep := runToReport(t, cp.URL, spec)
+
+	// We need a finding for both "b" and "c" with evidence sessions to replay.
+	fb := findingWithRef(rep, domain.FindingContract, "b")
+	fc := findingWithRef(rep, domain.FindingContract, "c")
+	if fb == nil || fb.Evidence == nil || len(fb.Evidence.Sessions) == 0 {
+		t.Skip("no contract finding with evidence for b (probabilistic graph: re-run)")
+	}
+	if fc == nil || fc.Evidence == nil || len(fc.Evidence.Sessions) == 0 {
+		t.Skip("no contract finding with evidence for c (probabilistic graph: re-run)")
+	}
+
+	// Annotate both findings concurrently. The two goroutines call annotateRootCause
+	// simultaneously so the race detector can observe any unsynchronized access, and
+	// the store read-modify-write for "b" and "c" must not produce a lost update.
+	classB := domain.RootCauseFunctional
+	classC := domain.RootCauseFunctional
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		srv.annotateRootCause(rep.Run.ID, domain.FindingContract, "b", classB)
+	}()
+	go func() {
+		defer wg.Done()
+		srv.annotateRootCause(rep.Run.ID, domain.FindingContract, "c", classC)
+	}()
+	wg.Wait()
+
+	stored, err := srv.store.Findings(rep.Run.ID)
+	if err != nil {
+		t.Fatalf("store findings: %v", err)
+	}
+	if f := findingIn(stored, domain.FindingContract, "b"); f == nil || f.RootCauseClass != classB {
+		t.Errorf("stored finding for b: got %+v, want RootCauseClass=%q", f, classB)
+	}
+	if f := findingIn(stored, domain.FindingContract, "c"); f == nil || f.RootCauseClass != classC {
+		t.Errorf("stored finding for c: got %+v, want RootCauseClass=%q", f, classC)
 	}
 }
 

@@ -241,6 +241,15 @@ func sessionJourney(spec RunSpec, sess domain.EvidenceSession) (domain.ID, int, 
 // and, when the spec authenticates, the credential the session's index
 // selected — the same pure Acquire keying both run paths use. Closed sessions
 // additionally reuse their pool user's template vars.
+//
+// LOAD-BEARING INVARIANT: for distributed runs, spec.CredentialProvider()
+// always returns (nil, nil) — guaranteed by runspec.validateCredentialPool,
+// which rejects any spec combining a credential pool with workers. This means
+// the replay runs as the same (unauthenticated) user the distributed session
+// ran as, keeping the reproduce verdict user-consistent. If that validation
+// invariant is ever relaxed, this function must be updated to re-derive the
+// per-shard user assignment. See runspec.validateCredentialPool and
+// runspec.CredentialProvider for the full invariant.
 func sessionUser(ctx context.Context, spec RunSpec, sess domain.EvidenceSession) (load.VirtualUser, error) {
 	user := load.VirtualUser{ID: sess.SessionID}
 	if spec.IsOpen() {
@@ -345,7 +354,17 @@ func rootCauseClass(reproduced, attempts int) string {
 // run is still cached, so both views agree. The store write is best-effort,
 // like persistRun: a backend hiccup must not fail the result the operator
 // already has — it is logged instead.
+//
+// The store path is a read-modify-write: Findings → mutate → SaveFindings.
+// Two concurrent reproduce calls for different findings of the same run would
+// each read the full list, stamp only their own finding, and the later
+// SaveFindings would overwrite the earlier one — silently losing the first
+// RootCauseClass in the system of record. s.annotateMu serializes this
+// critical section so both updates are visible regardless of ordering.
 func (s *Server) annotateRootCause(runID domain.ID, cat domain.FindingCategory, ref, class string) {
+	// Update the live in-memory copy first (outside the annotation lock — it is
+	// guarded by rs.mu, an independent per-run lock, so it does not need to be
+	// inside the store critical section).
 	s.mu.Lock()
 	rs := s.runs[runID]
 	s.mu.Unlock()
@@ -361,6 +380,11 @@ func (s *Server) annotateRootCause(runID domain.ID, cat domain.FindingCategory, 
 	if s.store == nil {
 		return
 	}
+	// Serialize the store read-modify-write so concurrent reproduce calls for
+	// different findings of the same run cannot produce a lost update (see doc
+	// comment above).
+	s.annotateMu.Lock()
+	defer s.annotateMu.Unlock()
 	findings, err := s.store.Findings(runID)
 	if err != nil {
 		slog.Warn("annotate root cause: load findings failed", "run", runID, "err", err)
