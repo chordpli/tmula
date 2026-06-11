@@ -506,6 +506,36 @@ auth:
 
 How `Expand` defaults things: it derives the graph and templates from `flow` (each request-bearing step becomes a template `t_<id>`), links consecutive steps with weighted edges, sets a `rateCap` of `{ maxRps: 10000, maxConcurrency: 1000 }`, `envClass: dev`, and `start` to the first step. The compact graph is validated with the stricter scenario rules (transition weights in `[0,1]`, per-node outgoing sum ≤ 1, dependency edges form a DAG).
 
+### Graph-first scenario files
+
+When the journey branches, a linear `flow` cannot carry it. A scenario file may
+hold the **graph itself** instead of a flow (the two are mutually exclusive).
+This is the form [access-log learning](#learning-a-graph-from-an-access-log)
+emits, and you can author it by hand too:
+
+```yaml
+target: http://localhost:9000
+start: browse                      # required: the node every session begins at
+maxSteps: 12                       # default: the node count
+graph:                             # a scenario graph (same shape as the JSON reference)
+  id: shop
+  nodes:
+    - { id: browse,   apiTemplateId: t_browse }
+    - { id: checkout, apiTemplateId: t_checkout }
+    - { id: exit }
+  edges:
+    - { from: browse, to: checkout, weight: 0.6, dependency: true }
+    - { from: browse, to: exit,     weight: 0.4 }
+templates:                         # the API template map (key = id, protocol defaults to rest)
+  t_browse:   { method: GET,  path: /browse }
+  t_checkout: { method: POST, path: /checkout, payloadTemplate: '{"total":42}' }
+```
+
+With `graph`, `start` is required (and must name a graph node), every node's
+template must exist in `templates`, and the remaining blocks - `open`,
+`segments`, `auth`, `users` - behave exactly as in the flow form. The same
+strict scenario validation applies.
+
 ---
 
 ## The CLI
@@ -576,21 +606,24 @@ tmula bench examples/shop/scenario.yaml --users 100
 tmula bench --target http://localhost:9000 --get /health --users 50
 ```
 
-### `tmula init` - scaffold a scenario from a spec
+### `tmula init` - scaffold a scenario from a spec or traffic
 
-Turns an existing API description (OpenAPI or HAR) into a compact scenario file, so you start from your real endpoints, not a blank page.
+Turns an existing API description (OpenAPI or HAR) or an **access log** into a scenario file, so you start from your real endpoints - or your real traffic - not a blank page.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--from <file>` | - | **Required.** OpenAPI or HAR file. |
-| `--format <f>` | auto | `auto` \| `openapi` \| `har`. |
+| `--from <file>` | - | **Required.** OpenAPI, HAR, or access-log file. |
+| `--format <f>` | auto | `auto` \| `openapi` \| `har` \| `accesslog`. |
 | `--out <file>` | stdout | Where to write the scenario. |
-| `--target <url>` | - | Override the target base URL. |
+| `--target <url>` | - | Override the target base URL (required for logs, which carry no host). |
 
 ```bash
 tmula init --from examples/imports/shop.openapi.yaml --out scenario.yaml
+tmula init --from access.log --target http://staging:9000 --out scenario.yaml
 tmula run scenario.yaml --users 50
 ```
+
+OpenAPI/HAR scaffold a linear flow; an access log goes further - tmula [*learns* the graph from the traffic](#learning-a-graph-from-an-access-log) and emits a graph-first scenario with the observed branch weights filled in.
 
 ### `serve` (default) and roles
 
@@ -661,16 +694,47 @@ When **Show live traffic** is on, the console streams a live view; afterward you
 
 ## Importing OpenAPI / HAR
 
-You rarely need to hand-author the graph + templates. The importer turns an **OpenAPI** spec or a **HAR** recording into a ready-to-edit scenario (graph + templates + start + maxSteps).
+You rarely need to hand-author the graph + templates. The importer turns an **OpenAPI** spec, a **HAR** recording, or an **access log** into a ready-to-edit scenario (graph + templates + start + maxSteps).
 
-- **Web console:** Scenario card → **Import from OpenAPI / HAR** → upload a file or paste the text → **Import**. The graph and templates fields fill in; review and Run. (The endpoint is `POST /api/import?format=auto|openapi|har`.)
-- **CLI:** `tmula init --from <openapi.yaml|session.har> --out scenario.yaml`.
+- **Web console:** Scenario card → **Import from OpenAPI / HAR** → upload a file or paste the text → **Import**. The graph and templates fields fill in; review and Run. (The endpoint is `POST /api/import?format=auto|openapi|har|accesslog`.)
+- **CLI:** `tmula init --from <openapi.yaml|session.har|access.log> --out scenario.yaml`.
 
-**Format detection** is structural, not just by extension (`detectFormat`): a `.har` name forces HAR; otherwise the document is parsed and its keys inspected. OpenAPI markers (`openapi` / `swagger` / `paths`) are checked first, then a HAR's `log.entries`. This makes a real browser HAR import correctly even without its `.har` name.
+**Format detection** is structural, not just by extension (`detectFormat`): a `.har` name forces HAR and a `.log` / `.jsonl` name forces access log; otherwise the document is parsed and its keys inspected. OpenAPI markers (`openapi` / `swagger` / `paths`) are checked first, then a HAR's `log.entries`, and finally a first line that parses as a log record means an access log. This makes a real browser HAR import correctly even without its `.har` name, and a log without its `.log` name.
 
 **Journey-ordering heuristic.** The OpenAPI importer orders the imported steps into a plausible user journey (e.g. list before detail, reads before writes) rather than spec order, so the resulting flow reads like a real path through the API. Review the generated steps, fill in path parameters and request bodies, then run.
 
-Ready-made examples live in [`examples/imports/`](../examples/imports): `shop.openapi.yaml`, `shop.openapi`'s HAR sibling `shop-session.har`, and `ticketing.openapi.yaml`. They target `http://localhost:9000`, lining up with the bundled `server/examples/sample-api`.
+Ready-made examples live in [`examples/imports/`](../examples/imports): `shop.openapi.yaml`, `shop.openapi`'s HAR sibling `shop-session.har`, the traffic sample `shop-access.log`, and `ticketing.openapi.yaml`. They target `http://localhost:9000`, lining up with the bundled `server/examples/sample-api`.
+
+### Learning a graph from an access log
+
+An OpenAPI spec only knows *which* endpoints exist, and a HAR knows *one* path
+through them. An **access log** records how all your real users actually moved,
+so tmula **learns** the behavior graph itself from it. The result is a
+miniature of the observed traffic: replay it against staging and you see where
+the real traffic pattern breaks things, before a deploy.
+
+- **Input.** Apache/nginx **combined format** or **JSON lines** (one object per
+  line; common key spellings - `time`/`ts`/`timestamp`, `method`+`path` or
+  `request`, `remote_addr`, `user_agent` - are auto-detected).
+- **Sessionization.** Requests group per client (IP + user agent) and split
+  into visits on a 30-minute idle gap.
+- **Endpoint collapsing.** Queries are stripped and volatile segments (numbers,
+  UUIDs, long hex ids) fold into `{id}`, so `/product/123` and `/product/456`
+  become one node. Only the 30 hottest endpoints stay; transitions across a
+  folded endpoint bridge over it (and the import reports how many were folded -
+  nothing is silently dropped).
+- **What is learned.** Transition frequencies → edge weights, session ends →
+  `exit` edges, the most common first request → the start node, inter-request
+  gap quartiles → think time, the session arrival rate → an `open` suggestion,
+  the p95 session length → maxSteps.
+- **Runnable first.** Logs carry no bodies, so each template's path is the
+  *most observed concrete path* for that endpoint (e.g. `/product?id=1023`).
+  The generated scenario runs as-is; fill in bodies/headers later.
+
+The learner emits a [graph-first scenario file](#graph-first-scenario-files)
+rather than a linear flow - the branching *is* the learned information. Paste a
+log into the web console's Import and the graph + template editors fill in
+directly.
 
 ---
 

@@ -152,7 +152,7 @@ The `tmula` CLI - one binary, no curl/jq, no separately running server:
 | `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
 | `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues) |
 | `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
-| `tmula init --from <openapi.yaml\|session.har>` | Scaffold a scenario from an API spec or HAR recording |
+| `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time) |
 
 Build & run from source:
 
@@ -176,7 +176,7 @@ personas), hit **Run**, and watch it live:
 - a **Traffic flow** map of requests moving across your scenario, with completion / drop-off,
 - a **latency heatmap** (time × latency band),
 - findings, a standalone **HTML report**, **compare with previous run**, and read-only **share** links,
-- a one-click **OpenAPI / HAR import** and scenario **presets**, in a bilingual UI (English / 한국어).
+- a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic) and scenario **presets**, in a bilingual UI (English / 한국어).
 
 <p align="center">
   <img src="docs/images/02-config-load-model.png" width="480"

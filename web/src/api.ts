@@ -677,16 +677,17 @@ export interface ImportResult {
   maxSteps: number
 }
 
-// importScenario converts a raw OpenAPI or HAR document into a scenario via the
-// backend. `format` is 'auto' (let the server sniff it), 'openapi', or 'har'. The
-// body is the raw spec text (JSON/YAML/HAR), posted as-is. On a non-2xx it throws
-// the server's own error text so the UI can show a meaningful message (the backend
-// returns 400 {error} on a bad spec and 501 when the importer is unavailable);
-// otherwise it returns the parsed scenario. It deliberately throws rather than
-// returning a sentinel so the caller's catch surfaces the message inline.
+// importScenario converts a raw OpenAPI / HAR / access-log document into a
+// scenario via the backend. `format` is 'auto' (let the server sniff it),
+// 'openapi', 'har', or 'accesslog'. The body is the raw text, posted as-is. On a
+// non-2xx it throws the server's own error text so the UI can show a meaningful
+// message (the backend returns 400 {error} on a bad spec and 501 when the
+// importer is unavailable); otherwise it returns the parsed scenario. It
+// deliberately throws rather than returning a sentinel so the caller's catch
+// surfaces the message inline.
 export async function importScenario(
   spec: string,
-  format: 'auto' | 'openapi' | 'har',
+  format: 'auto' | 'openapi' | 'har' | 'accesslog',
 ): Promise<ImportResult> {
   const res = await fetch(`${API}/import?format=${format}`, { method: 'POST', body: spec })
   if (!res.ok) {

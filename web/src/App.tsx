@@ -730,7 +730,7 @@ function ImportPanel({
   const { t } = useI18n()
   const [text, setText] = useState('')
   const [fileName, setFileName] = useState('')
-  const [format, setFormat] = useState<'auto' | 'openapi' | 'har'>('auto')
+  const [format, setFormat] = useState<'auto' | 'openapi' | 'har' | 'accesslog'>('auto')
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState('')
   const [err, setErr] = useState('')
@@ -746,6 +746,7 @@ function ImportPanel({
     // .json stays on 'auto' since it can be either.
     const lower = file.name.toLowerCase()
     if (lower.endsWith('.har')) setFormat('har')
+    else if (lower.endsWith('.log') || lower.endsWith('.jsonl')) setFormat('accesslog')
     else if (lower.endsWith('.yaml') || lower.endsWith('.yml')) setFormat('openapi')
     try {
       // Read the file client-side so the textarea reflects exactly what will be
@@ -792,7 +793,7 @@ function ImportPanel({
           <input
             className="filepick"
             type="file"
-            accept=".json,.yaml,.yml,.har"
+            accept=".json,.yaml,.yml,.har,.log,.jsonl"
             onChange={onFile}
           />
           <span className="field__help">{fileName || t('import.fileHint')}</span>
@@ -802,11 +803,12 @@ function ImportPanel({
           <select
             className="select"
             value={format}
-            onChange={(e) => setFormat(e.target.value as 'auto' | 'openapi' | 'har')}
+            onChange={(e) => setFormat(e.target.value as 'auto' | 'openapi' | 'har' | 'accesslog')}
           >
             <option value="auto">{t('import.format.auto')}</option>
             <option value="openapi">{t('import.format.openapi')}</option>
             <option value="har">{t('import.format.har')}</option>
+            <option value="accesslog">{t('import.format.accesslog')}</option>
           </select>
         </Field>
       </div>
