@@ -13,7 +13,7 @@ import {
   updateTemplateInJSON,
   type EditableGraph,
 } from './graphEditorModel'
-import { buildPreviewGeometry, previewGeometryForMode, type PreviewEdgeMode } from './graphPreviewModel'
+import { buildPreviewGeometry, previewGeometryForMode, type PreviewEdgeMode, type PreviewRoute } from './graphPreviewModel'
 import { useI18n } from './i18n'
 
 // Selection is what the operator last clicked in the preview: one node or one
@@ -460,6 +460,29 @@ function edgeStrokeWidth(weight: number): number {
   return 1.1 + clamped * 1.9
 }
 
+// routeStrokeWidth is the stroke each route actually renders with: exit stubs
+// keep their CSS width (no head), completion edges are fixed (weight 1 is not
+// a branch probability), everything else encodes its weight.
+function routeStrokeWidth(route: PreviewRoute): number | undefined {
+  if (route.kind === 'exit') return undefined
+  if (route.kind === 'completion') return 1.8
+  return edgeStrokeWidth(route.edge.weight)
+}
+
+// headSizeFor scales the arrowhead with its line: a thin 1.1px stroke gets a
+// ~8.5px head, the thickest 3px stroke a ~11.5px one — so head and line stay
+// in proportion ("in sync") across every weight instead of one fixed size
+// looking stubby on thick lines and bloated on thin ones. Sizes are rounded
+// to 0.5px so routes share a small set of marker definitions.
+function headSizeFor(strokeWidth: number): number {
+  return Math.round((6.5 + strokeWidth * 1.6) * 2) / 2
+}
+
+// markerIDFor names the shared marker definition for a given head size.
+function markerIDFor(size: number, dep: boolean): string {
+  return `editor-arrow-${String(size).replace('.', '_')}${dep ? '-dep' : ''}`
+}
+
 function GraphPreview({
   graph,
   start,
@@ -512,6 +535,13 @@ function GraphPreview({
   const dimming = hover !== null && (hotEdgeIndexes.size > 0 || hotNodeIDs.size > 0)
   const coldEdge = (index: number) => (dimming && !hotEdgeIndexes.has(index) ? ' editor-preview__cold' : '')
   const coldNode = (id: string) => (dimming && !hotNodeIDs.has(id) ? ' editor-preview__cold' : '')
+  const headSizes = Array.from(
+    new Set(
+      drawableRoutes
+        .filter((route) => route.kind !== 'exit')
+        .map((route) => headSizeFor(routeStrokeWidth(route) ?? 1.8)),
+    ),
+  ).sort((a, b) => a - b)
   const visibleNodeIDs = new Set<string>([start])
   const hiddenExitNodeIDs = new Set(routes.filter((route) => route.kind === 'exit').map((route) => route.edge.to))
   if (mode === 'all') {
@@ -536,35 +566,39 @@ function GraphPreview({
       }}
     >
       <defs>
-        {/* markerUnits=userSpaceOnUse keeps the arrowhead a fixed size instead
-            of inflating with the weight-scaled stroke. refX=9 tucks the head's
-            body over the line's last 9px, so the triangle reads as the line's
-            own tip — and on dashed strokes it covers a trailing dash gap that
-            would otherwise leave the head floating apart from the dashes. */}
-        <marker
-          id="editor-arrow"
-          viewBox="0 0 10 10"
-          refX="9"
-          refY="5"
-          markerWidth="10"
-          markerHeight="10"
-          markerUnits="userSpaceOnUse"
-          orient="auto-start-reverse"
-        >
-          <path className="editor-preview__arrow" d="M 0 1 L 10 5 L 0 9 z" />
-        </marker>
-        <marker
-          id="editor-arrow-dep"
-          viewBox="0 0 10 10"
-          refX="9"
-          refY="5"
-          markerWidth="10"
-          markerHeight="10"
-          markerUnits="userSpaceOnUse"
-          orient="auto-start-reverse"
-        >
-          <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1 L 10 5 L 0 9 z" />
-        </marker>
+        {/* One marker definition per head size in use. Heads scale with their
+            line's stroke width (headSizeFor) so head and line stay in
+            proportion at every weight. refX=9 (in viewBox units) tucks the
+            head's body over the line's last stretch, capping the stroke
+            directly and covering any trailing dash gap on dashed edges. */}
+        {headSizes.flatMap((size) => [
+          <marker
+            key={markerIDFor(size, false)}
+            id={markerIDFor(size, false)}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth={size}
+            markerHeight={size}
+            markerUnits="userSpaceOnUse"
+            orient="auto-start-reverse"
+          >
+            <path className="editor-preview__arrow" d="M 0 1 L 10 5 L 0 9 z" />
+          </marker>,
+          <marker
+            key={markerIDFor(size, true)}
+            id={markerIDFor(size, true)}
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth={size}
+            markerHeight={size}
+            markerUnits="userSpaceOnUse"
+            orient="auto-start-reverse"
+          >
+            <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1 L 10 5 L 0 9 z" />
+          </marker>,
+        ])}
       </defs>
       {drawableRoutes.map((route) => (
         <path
@@ -585,20 +619,17 @@ function GraphPreview({
           ].join(' ')}
           style={
             // Weight-to-thickness only applies where weight is a branch
-            // probability; a completion edge always carries weight 1 and would
-            // otherwise render as the fattest line in the graph, dwarfing the
-            // fixed-size arrowhead.
+            // probability; completion edges keep their fixed CSS stroke and
+            // exit stubs have no head at all.
             route.kind === 'exit' || route.kind === 'completion'
               ? undefined
-              : { strokeWidth: edgeStrokeWidth(route.edge.weight) }
+              : { strokeWidth: routeStrokeWidth(route) }
           }
           d={route.d}
           markerEnd={
             route.kind === 'exit'
               ? undefined
-              : route.edge.dependency
-                ? 'url(#editor-arrow-dep)'
-                : 'url(#editor-arrow)'
+              : `url(#${markerIDFor(headSizeFor(routeStrokeWidth(route) ?? 1.8), Boolean(route.edge.dependency))})`
           }
         >
           <title>{`${route.edge.from} -> ${route.edge.to}: ${route.edge.weight}`}</title>
@@ -650,7 +681,7 @@ function GraphPreview({
           ].join(' ')}
           transform={`translate(${route.label.x}, ${route.label.y})`}
         >
-          <rect x={-route.label.width / 2} y="-11" width={route.label.width} height="22" rx="7" />
+          <rect x={-route.label.width / 2} y="-10" width={route.label.width} height="20" rx="7" />
           <text y="0">{route.label.value}</text>
         </g>
       ))}

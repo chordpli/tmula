@@ -471,7 +471,7 @@ function noteRoute(
   const label = noteLabel(value, x, y)
   // A short connector stub from the chip's near edge to the node boundary, so the
   // floating note label reads as attached to its source node instead of orphaned.
-  const chipEdgeY = y - direction * 11
+  const chipEdgeY = y - direction * 10
   const nodeEdgeY = from.y + direction * PREVIEW_NODE_HALF_H
   const points = [
     { x, y: chipEdgeY },
@@ -510,7 +510,7 @@ function separateLabels(
 
 function edgeLabel(weight: number, x: number, y: number): PreviewRoute['label'] {
   const value = String(weight)
-  return { value, x, y, width: Math.max(34, value.length * 8 + 16) }
+  return { value, x, y, width: Math.max(30, value.length * 7 + 12) }
 }
 
 function noteLabel(value: string, x: number, y: number): PreviewRoute['label'] {
@@ -532,13 +532,13 @@ function withLabel(route: PreviewRoute, label: PreviewRoute['label']): PreviewRo
 }
 
 function labelRect(label: PreviewRoute['label']): { minX: number; maxX: number; minY: number; maxY: number } {
-  const xPad = 6
-  const yPad = 5
+  const xPad = 5
+  const yPad = 4
   return {
     minX: label.x - label.width / 2 - xPad,
     maxX: label.x + label.width / 2 + xPad,
-    minY: label.y - 12 - yPad,
-    maxY: label.y + 8 + yPad,
+    minY: label.y - 10 - yPad,
+    maxY: label.y + 10 + yPad,
   }
 }
 
