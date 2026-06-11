@@ -1387,14 +1387,10 @@ a:hover {
 }
 
 /* The arrowhead inherits its own edge's stroke color (context-stroke, with a
-   static fallback for older engines) so head and line always match, and a thin
-   surface-colored outline keeps it legible when it lands on another dark edge. */
+   static fallback for older engines) so head and line always read as one piece. */
 .editor-preview__arrow {
   fill: #667085;
   fill: context-stroke;
-  stroke: var(--surface);
-  stroke-width: 1.1;
-  paint-order: stroke;
 }
 
 .editor-preview__arrow--dep {

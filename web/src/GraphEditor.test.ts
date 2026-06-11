@@ -33,8 +33,9 @@ describe('buildPreviewGeometry', () => {
         // Exit edges stay a chip with a short connector stub to the node.
         expect(route.d).toContain(' L ')
       } else {
-        // Everything else — including back/lateral edges — is a real curved arrow.
-        expect(route.d).toContain(' C ')
+        // Everything else is a real arrow: curved (C) for forward/vertical
+        // edges, orthogonal with rounded corners (Q) for backward buses.
+        expect(route.d).toMatch(/ [CQ] /)
       }
       const expectedLabel = route.kind === 'exit' ? `exit ${route.edge.weight}` : String(route.edge.weight)
       expect(route.label.value).toBe(expectedLabel)
@@ -80,9 +81,9 @@ describe('buildPreviewGeometry', () => {
     expect(sameColumn.d).toContain(' C ')
     expect(sameColumn.label.value).toBe('0.15')
     expect(sameColumn.bounds.minX).toBeLessThan(preview.positions.search.x - 48)
-    // Backward edges arc around the row from source to target.
-    expect(back.d).toContain(' C ')
-    expect(back.d).not.toContain(' L ')
+    // Backward edges run an orthogonal bus around the row from source to target.
+    expect(back.d).toContain(' Q ')
+    expect(back.d).not.toContain(' C ')
     expect(back.label.value).toBe('0.15')
     expect(back.bounds.minX).toBeLessThanOrEqual(preview.positions.browse.x)
     // Exit edges remain a chip with a short connector stub.

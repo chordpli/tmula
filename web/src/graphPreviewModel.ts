@@ -366,31 +366,45 @@ function backArcRoute(
       label,
     )
   }
-  // Backward edge: a U-shaped arc around the row (mirrored above it when the
-  // source sits on the top row). The space under a node is split into corridors:
-  // the bottom center belongs to that node's exit chip, so back arcs depart and
-  // arrive just outside the bottom-left corner (clear of the widest chip) and
-  // run their horizontal stretch below the chip band. The globally laned depth
-  // nests concurrent arcs instead of letting them cross.
+  // Backward edge: orthogonal "bus" routing (mirrored above the row when the
+  // source sits on the top row) — straight down from the source's bottom-left,
+  // a straight horizontal run along the edge's own depth lane, then straight up
+  // into the target's bottom-left. Straight segments never bulge past the
+  // target the way a bezier U did, the label sits directly on the horizontal
+  // run so its edge is unambiguous, and the globally assigned lane depths keep
+  // concurrent buses parallel instead of crossing. The bottom-left corridor is
+  // free because exit chips hang right of center.
   const direction = routeTop ? -1 : 1
+  const corner = 10
   const edgeY = direction * PREVIEW_NODE_HALF_H
-  const startP = { x: from.x - 44, y: from.y + edgeY }
-  // Arrivals spread leftward per lane but stay clamped inside the node's
-  // bottom edge, so every arrowhead actually touches its target.
-  const endX = Math.max(to.x - 40 - lane * 6, to.x - PREVIEW_NODE_HALF_W + 2)
-  const endP = { x: endX, y: to.y + edgeY }
-  const depth = direction * (96 + lane * 20)
-  const c1 = { x: startP.x, y: from.y + depth }
-  const c2 = { x: endP.x, y: to.y + depth }
-  const mid = cubicPoint(startP, c1, c2, endP, 0.5)
-  const label = edgeLabel(edge.weight, mid.x, mid.y)
+  const startX = from.x - 36
+  // Arrivals spread rightward per lane but stop short of the exit chip zone.
+  const endX = Math.min(to.x - 36 + lane * 10, to.x - 26)
+  const startY = from.y + edgeY
+  const endY = to.y + edgeY
+  const rowY = direction === 1 ? Math.max(from.y, to.y) : Math.min(from.y, to.y)
+  const busY = rowY + direction * (96 + lane * 20)
+  const d = [
+    `M ${fmt(startX)} ${fmt(startY)}`,
+    `L ${fmt(startX)} ${fmt(busY - direction * corner)}`,
+    `Q ${fmt(startX)} ${fmt(busY)} ${fmt(startX - corner)} ${fmt(busY)}`,
+    `L ${fmt(endX + corner)} ${fmt(busY)}`,
+    `Q ${fmt(endX)} ${fmt(busY)} ${fmt(endX)} ${fmt(busY - direction * corner)}`,
+    `L ${fmt(endX)} ${fmt(endY)}`,
+  ].join(' ')
+  const label = edgeLabel(edge.weight, (startX + endX) / 2, busY)
   return route(
     edge,
     index,
     kind,
     showLabel,
-    `M ${fmt(startP.x)} ${fmt(startP.y)} C ${fmt(c1.x)} ${fmt(c1.y)}, ${fmt(c2.x)} ${fmt(c2.y)}, ${fmt(endP.x)} ${fmt(endP.y)}`,
-    [startP, c1, c2, endP],
+    d,
+    [
+      { x: startX, y: startY },
+      { x: startX - corner, y: busY },
+      { x: endX, y: busY },
+      { x: endX, y: endY },
+    ],
     label,
   )
 }
@@ -417,8 +431,10 @@ function noteRoute(
   showLabel: boolean,
   value: string,
 ): PreviewRoute {
+  // Chips hang slightly right of center so the bottom-left corridor stays free
+  // for back-edge buses arriving at the same node.
   const direction = routeTop ? -1 : 1
-  const x = from.x
+  const x = from.x + 18
   const y = from.y + direction * (PREVIEW_NODE_HALF_H + 28 + lane * 18)
   const label = noteLabel(value, x, y)
   // A short connector stub from the chip's near edge to the node boundary, so the
