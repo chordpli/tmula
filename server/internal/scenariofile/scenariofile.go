@@ -43,7 +43,19 @@ type Scenario struct {
 	// Flow is the ordered list of steps a virtual user walks. Consecutive steps
 	// are linked with a transition edge; a step's DependsOn marks that edge as a
 	// required (never-skipped) dependency.
-	Flow []Step `json:"flow"`
+	Flow []Step `json:"flow,omitempty"`
+	// Graph, when set, supplies a full branching behavior graph instead of the
+	// linear Flow (the two are mutually exclusive). Templates and Start must
+	// accompany it. This graph-first form is what `tmula init` emits for learned
+	// traffic, where the journey branches and a linear flow would lose it.
+	Graph *domain.ScenarioGraph `json:"graph,omitempty"`
+	// Templates maps template ids onto the request each graph node sends
+	// (graph-first form only). A value may omit its ID and Protocol; they
+	// default to the map key and "rest", matching the RunSpec template map.
+	Templates map[domain.ID]domain.APITemplate `json:"templates,omitempty"`
+	// Start is the node every session begins at. Required with Graph; with a
+	// linear Flow it defaults to the first step.
+	Start string `json:"start,omitempty"`
 	// Users is the closed-model virtual-user count (default 20). Ignored when
 	// Open is set, since the open model generates its own sessions.
 	Users int `json:"users,omitempty"`
@@ -147,23 +159,49 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 	if strings.TrimSpace(s.Target) == "" {
 		return runspec.RunSpec{}, fmt.Errorf("scenariofile: target is required")
 	}
-	if len(s.Flow) == 0 {
-		return runspec.RunSpec{}, fmt.Errorf("scenariofile: flow must have at least one step")
-	}
 
-	templates, err := buildTemplates(s.Flow)
-	if err != nil {
-		return runspec.RunSpec{}, err
+	var (
+		graph     domain.ScenarioGraph
+		templates map[domain.ID]domain.APITemplate
+		start     string
+		defSteps  int
+		err       error
+	)
+	switch {
+	case s.Graph != nil:
+		if len(s.Flow) > 0 {
+			return runspec.RunSpec{}, fmt.Errorf("scenariofile: graph and flow are mutually exclusive; author one journey form")
+		}
+		graph, templates, start, err = expandGraphFirst(s)
+		if err != nil {
+			return runspec.RunSpec{}, err
+		}
+		defSteps = len(graph.Nodes)
+	case len(s.Flow) > 0:
+		templates, err = buildTemplates(s.Flow)
+		if err != nil {
+			return runspec.RunSpec{}, err
+		}
+		graph, err = buildGraph(s.Flow)
+		if err != nil {
+			return runspec.RunSpec{}, err
+		}
+		start = s.Flow[0].ID
+		if s.Start != "" {
+			start = s.Start
+		}
+		defSteps = len(s.Flow)
+	default:
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: flow must have at least one step (or supply a graph)")
 	}
-	graph, err := buildGraph(s.Flow)
-	if err != nil {
-		return runspec.RunSpec{}, err
-	}
-	// Validate the generated graph with the stricter scenario rules (transition
-	// weights in [0,1], per-node outgoing sum <= 1, dependency edges form a DAG)
-	// so a malformed flow is rejected here rather than running a skewed walk.
+	// Validate the graph with the stricter scenario rules (transition weights in
+	// [0,1], per-node outgoing sum <= 1, dependency edges form a DAG) so a
+	// malformed document is rejected here rather than running a skewed walk.
 	if err := scenario.Validate(graph); err != nil {
 		return runspec.RunSpec{}, fmt.Errorf("scenariofile: %w", err)
+	}
+	if !nodeExists(graph, start) {
+		return runspec.RunSpec{}, fmt.Errorf("scenariofile: start node %q is not in the graph", start)
 	}
 
 	allow := s.Allow
@@ -181,7 +219,7 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 	}
 	maxSteps := s.MaxSteps
 	if maxSteps <= 0 {
-		maxSteps = len(s.Flow)
+		maxSteps = defSteps
 	}
 
 	spec := runspec.RunSpec{
@@ -194,7 +232,7 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 		},
 		Graph:     graph,
 		Templates: templates,
-		Start:     domain.ID(s.Flow[0].ID),
+		Start:     domain.ID(start),
 		MaxSteps:  maxSteps,
 		Seed:      seed,
 	}
@@ -230,6 +268,46 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 		spec.Experiment.Params.AuthStrategy = pool.Strategy
 	}
 	return spec, nil
+}
+
+// expandGraphFirst validates the graph-first form (an explicit graph + a
+// template map + a start node) and normalizes its template map: a value may
+// omit its ID and Protocol, which default to the map key and "rest" — the same
+// convention as the RunSpec template map, so a learned or hand-authored
+// document round-trips into the web console unchanged.
+func expandGraphFirst(s Scenario) (domain.ScenarioGraph, map[domain.ID]domain.APITemplate, string, error) {
+	if strings.TrimSpace(s.Start) == "" {
+		return domain.ScenarioGraph{}, nil, "", fmt.Errorf("scenariofile: start is required with a graph")
+	}
+	templates := make(map[domain.ID]domain.APITemplate, len(s.Templates))
+	for id, t := range s.Templates {
+		if t.ID == "" {
+			t.ID = id
+		}
+		if t.Protocol == "" {
+			t.Protocol = domain.ProtocolREST
+		}
+		templates[id] = t
+	}
+	for _, n := range s.Graph.Nodes {
+		if n.APITemplateID == "" {
+			continue // terminal node (done / exit)
+		}
+		if _, ok := templates[n.APITemplateID]; !ok {
+			return domain.ScenarioGraph{}, nil, "", fmt.Errorf("scenariofile: node %q references unknown template %q", n.ID, n.APITemplateID)
+		}
+	}
+	return *s.Graph, templates, s.Start, nil
+}
+
+// nodeExists reports whether the graph declares a node with the given id.
+func nodeExists(g domain.ScenarioGraph, id string) bool {
+	for _, n := range g.Nodes {
+		if n.ID == domain.ID(id) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildCredentialPool maps the compact Auth block onto a domain.CredentialPool.

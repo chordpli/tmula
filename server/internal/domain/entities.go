@@ -70,10 +70,12 @@ func (a APITemplate) Validate() error {
 
 // --- Scenario graph ---------------------------------------------------------
 
-// Node is a state in the behavior graph, bound to an API template.
+// Node is a state in the behavior graph, bound to an API template. A node
+// without a template is terminal (done / exit) and is serialized without the
+// field, matching the documented graph examples.
 type Node struct {
 	ID            ID `json:"id"`
-	APITemplateID ID `json:"apiTemplateId"`
+	APITemplateID ID `json:"apiTemplateId,omitempty"`
 }
 
 // Edge is a possible transition between nodes. When Dependency is true the
@@ -83,7 +85,7 @@ type Edge struct {
 	From       ID      `json:"from"`
 	To         ID      `json:"to"`
 	Weight     float64 `json:"weight"`
-	Dependency bool    `json:"dependency"`
+	Dependency bool    `json:"dependency,omitempty"`
 }
 
 // ScenarioGraph is the explicit behavior frame virtual users traverse.

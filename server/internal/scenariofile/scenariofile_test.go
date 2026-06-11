@@ -196,6 +196,159 @@ func TestExpandRejects(t *testing.T) {
 	}
 }
 
+const graphFirstYAML = `
+target: http://localhost:9000
+start: browse
+maxSteps: 12
+graph:
+  id: learned
+  nodes:
+    - { id: browse,   apiTemplateId: t_browse }
+    - { id: search,   apiTemplateId: t_search }
+    - { id: checkout, apiTemplateId: t_checkout }
+    - { id: exit }
+  edges:
+    - { from: browse, to: search,   weight: 0.7 }
+    - { from: browse, to: exit,     weight: 0.3 }
+    - { from: search, to: checkout, weight: 0.5, dependency: true }
+    - { from: search, to: exit,     weight: 0.5 }
+templates:
+  t_browse:   { method: GET,  path: /browse }
+  t_search:   { method: GET,  path: /search }
+  t_checkout: { method: POST, path: /checkout, payloadTemplate: '{"total":42}' }
+`
+
+func TestParseAndExpandGraphFirst(t *testing.T) {
+	s, err := Parse([]byte(graphFirstYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+
+	if spec.Start != "browse" {
+		t.Errorf("start = %q, want browse", spec.Start)
+	}
+	if spec.MaxSteps != 12 {
+		t.Errorf("maxSteps = %d, want 12", spec.MaxSteps)
+	}
+	if len(spec.Graph.Nodes) != 4 || len(spec.Graph.Edges) != 4 {
+		t.Fatalf("graph nodes=%d edges=%d, want 4 and 4", len(spec.Graph.Nodes), len(spec.Graph.Edges))
+	}
+	var dep bool
+	for _, e := range spec.Graph.Edges {
+		if e.From == "search" && e.To == "checkout" {
+			dep = e.Dependency
+		}
+	}
+	if !dep {
+		t.Error("search->checkout edge should keep its dependency flag")
+	}
+	// Map-form templates are normalized: the key becomes the id, protocol
+	// defaults to rest.
+	tmpl, ok := spec.Templates["t_checkout"]
+	if !ok {
+		t.Fatal("t_checkout template missing")
+	}
+	if tmpl.ID != "t_checkout" || tmpl.Protocol != domain.ProtocolREST {
+		t.Errorf("t_checkout = %+v, want id and rest protocol filled from the map key", tmpl)
+	}
+	if tmpl.Method != "POST" || tmpl.Path != "/checkout" || tmpl.PayloadTemplate != `{"total":42}` {
+		t.Errorf("t_checkout = %+v, want POST /checkout with body", tmpl)
+	}
+	if got := spec.TargetEnv.Allowlist; len(got) != 1 || got[0] != "localhost" {
+		t.Errorf("allowlist = %v, want [localhost]", got)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("expanded spec failed validation: %v", err)
+	}
+}
+
+func TestGraphFirstDefaultsMaxStepsToNodeCount(t *testing.T) {
+	s, err := Parse([]byte(graphFirstYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	s.MaxSteps = 0
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.MaxSteps != len(spec.Graph.Nodes) {
+		t.Errorf("maxSteps = %d, want node count %d", spec.MaxSteps, len(spec.Graph.Nodes))
+	}
+}
+
+func TestGraphFirstWithOpenWorkload(t *testing.T) {
+	s, err := Parse([]byte(graphFirstYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	s.Open = &Open{Rate: 100, ForSeconds: 30, ThinkMs: []int{200, 800}}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.Workload == nil || spec.Workload.Arrival.PeakRate != 100 {
+		t.Fatalf("workload = %+v, want constant open 100/s", spec.Workload)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("expanded spec failed validation: %v", err)
+	}
+}
+
+func TestGraphFirstRejects(t *testing.T) {
+	graph := func() *domain.ScenarioGraph {
+		return &domain.ScenarioGraph{
+			ID: "g",
+			Nodes: []domain.Node{
+				{ID: "a", APITemplateID: "t_a"},
+				{ID: "exit"},
+			},
+			Edges: []domain.Edge{{From: "a", To: "exit", Weight: 1}},
+		}
+	}
+	templates := func() map[domain.ID]domain.APITemplate {
+		return map[domain.ID]domain.APITemplate{
+			"t_a": {Method: "GET", Path: "/a"},
+		}
+	}
+
+	cases := map[string]Scenario{
+		"graph and flow are exclusive": {
+			Target: "http://h:1", Graph: graph(), Templates: templates(), Start: "a",
+			Flow: []Step{{ID: "x", Request: "GET /x"}},
+		},
+		"graph needs a start": {
+			Target: "http://h:1", Graph: graph(), Templates: templates(),
+		},
+		"start must be a graph node": {
+			Target: "http://h:1", Graph: graph(), Templates: templates(), Start: "ghost",
+		},
+		"node template must exist": {
+			Target: "http://h:1", Start: "a", Templates: map[domain.ID]domain.APITemplate{},
+			Graph: graph(),
+		},
+		"graph must pass scenario validation": {
+			Target: "http://h:1", Start: "a", Templates: templates(),
+			Graph: &domain.ScenarioGraph{
+				ID:    "g",
+				Nodes: []domain.Node{{ID: "a", APITemplateID: "t_a"}},
+				Edges: []domain.Edge{{From: "a", To: "a", Weight: 2}}, // weight > 1
+			},
+		},
+	}
+	for name, s := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Expand(s); err == nil {
+				t.Errorf("expected an error for %q", name)
+			}
+		})
+	}
+}
+
 func TestParseJSON(t *testing.T) {
 	// JSON is valid YAML, so the same parser handles it.
 	const j = `{"target":"http://h:1","flow":[{"id":"a","request":"GET /a"}],"users":5}`
