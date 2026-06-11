@@ -40,7 +40,8 @@ type metricDelta struct {
 }
 
 // findingPair is a finding seen in both runs, carrying both occurrences so the
-// template can show each side's first-seen time if it differs.
+// template can show each side's description (whose numbers may differ) and
+// first-seen time.
 type findingPair struct {
 	A domain.Finding
 	B domain.Finding
@@ -139,20 +140,22 @@ func direction(a, b float64) string {
 }
 
 // findingKey identifies a finding for diffing. Two findings are "the same"
-// issue when their category, evidence reference and description match; run id
-// and first-seen time are deliberately excluded so the same issue across two
-// runs collapses to one key.
+// issue when their category and evidence reference match. The description is
+// deliberately excluded: it embeds run-specific numbers (counts, rates), so
+// keying on it would split the same issue into a new/resolved pair whenever
+// two runs disagree on exact counts — which under probabilistic load is
+// always. Run id and first-seen time are excluded so the same issue across
+// two runs collapses to one key. The classifiers guarantee a stable,
+// non-empty EvidenceRef per issue (API id, metric identity, or "run-wide").
 type findingKey struct {
 	category    domain.FindingCategory
 	evidenceRef string
-	description string
 }
 
 func keyOf(f domain.Finding) findingKey {
 	return findingKey{
 		category:    f.Category,
 		evidenceRef: f.EvidenceRef,
-		description: f.Description,
 	}
 }
 

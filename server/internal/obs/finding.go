@@ -50,6 +50,83 @@ type ClassifyConfig struct {
 	AvailabilityRun    int     // this many consecutive failures on an API -> availability finding
 }
 
+// Default classification thresholds, applied whenever a run does not configure
+// its own (see FindingConfig). They are the values every run classified with
+// before the findings block existed, so changing one silently re-grades runs.
+const (
+	DefaultErrorRateThreshold = 0.2
+	DefaultP95LatencyMs       = 0 // p95 gate disabled unless configured
+	DefaultAvailabilityRun    = 5
+)
+
+// DefaultClassifyConfig returns the thresholds an unconfigured run classifies
+// with: the long-standing 0.2 error rate, a 5-long availability streak, and
+// the p95 gate disabled.
+func DefaultClassifyConfig() ClassifyConfig {
+	return ClassifyConfig{
+		ErrorRateThreshold: DefaultErrorRateThreshold,
+		P95LatencyMs:       DefaultP95LatencyMs,
+		AvailabilityRun:    DefaultAvailabilityRun,
+	}
+}
+
+// FindingConfig is the optional, operator-facing findings block of a run spec:
+// the thresholds that classify a run's observations into findings. Every field
+// is optional — a zero (or omitted) value falls back to the package default —
+// so a spec without the block classifies exactly as before. The json tags are
+// the wire contract shared by the RunSpec and the compact scenario file.
+type FindingConfig struct {
+	// ErrorRate is the overall error-rate threshold (0..1] above which a run
+	// gets a threshold finding. Zero falls back to DefaultErrorRateThreshold.
+	ErrorRate float64 `json:"errorRate,omitempty"`
+	// P95LatencyMs gates the run's overall p95 latency: above this many
+	// milliseconds a threshold finding is raised. Zero keeps the gate disabled
+	// (the default).
+	P95LatencyMs float64 `json:"p95LatencyMs,omitempty"`
+	// AvailabilityStreak is how many consecutive failures on one API flag an
+	// availability finding. Zero falls back to DefaultAvailabilityRun.
+	AvailabilityStreak int `json:"availabilityStreak,omitempty"`
+}
+
+// Validate rejects thresholds that cannot classify anything sensibly: an error
+// rate outside [0,1] or a negative latency/streak. Zero values are fine — they
+// mean "use the default". It is nil-safe, like ClassifyConfig.
+func (c *FindingConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	if c.ErrorRate < 0 || c.ErrorRate > 1 {
+		return fmt.Errorf("findings: errorRate %v out of range [0,1]", c.ErrorRate)
+	}
+	if c.P95LatencyMs < 0 {
+		return fmt.Errorf("findings: p95LatencyMs %v must not be negative", c.P95LatencyMs)
+	}
+	if c.AvailabilityStreak < 0 {
+		return fmt.Errorf("findings: availabilityStreak %d must not be negative", c.AvailabilityStreak)
+	}
+	return nil
+}
+
+// ClassifyConfig resolves the block into the thresholds the classifier runs
+// with, filling unset (zero) fields from the package defaults. It is nil-safe:
+// a spec that carries no findings block resolves to DefaultClassifyConfig.
+func (c *FindingConfig) ClassifyConfig() ClassifyConfig {
+	cfg := DefaultClassifyConfig()
+	if c == nil {
+		return cfg
+	}
+	if c.ErrorRate != 0 {
+		cfg.ErrorRateThreshold = c.ErrorRate
+	}
+	if c.P95LatencyMs != 0 {
+		cfg.P95LatencyMs = c.P95LatencyMs
+	}
+	if c.AvailabilityStreak != 0 {
+		cfg.AvailabilityRun = c.AvailabilityStreak
+	}
+	return cfg
+}
+
 // Aggregator collects observations and classifies findings across four
 // categories: threshold, contract, mutation and availability.
 type Aggregator struct {
@@ -188,16 +265,29 @@ func classifyThreshold(runID domain.ID, obs []RequestObservation, cfg ClassifyCo
 	return thresholdFindings(runID, rate, p95, cfg)
 }
 
+// Evidence refs for findings that have no single API to point at. The run
+// comparison keys findings by (category, evidenceRef), so each ref must be
+// stable across runs, non-empty and distinct per issue: the two threshold
+// findings carry their metric identity, and the Summary-derived coarse
+// findings (which aggregate a whole run) are marked run-wide.
+const (
+	evidenceErrorRate  = "error-rate"
+	evidenceP95Latency = "p95-latency"
+	evidenceRunWide    = "run-wide"
+)
+
 // thresholdFindings builds the 0-2 threshold findings shared by the obs-list and
 // Summary classifiers, so their messages and comparisons cannot drift.
 func thresholdFindings(runID domain.ID, errorRate, p95 float64, cfg ClassifyConfig) []domain.Finding {
 	var out []domain.Finding
 	if cfg.ErrorRateThreshold > 0 && errorRate > cfg.ErrorRateThreshold {
 		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: evidenceErrorRate,
 			Description: fmt.Sprintf("error rate %.2f exceeded threshold %.2f", errorRate, cfg.ErrorRateThreshold)})
 	}
 	if cfg.P95LatencyMs > 0 && p95 > cfg.P95LatencyMs {
 		out = append(out, domain.Finding{RunID: runID, Category: domain.FindingThreshold, Severity: domain.SeverityWarning,
+			EvidenceRef: evidenceP95Latency,
 			Description: fmt.Sprintf("p95 latency %.1fms exceeded threshold %.1fms", p95, cfg.P95LatencyMs)})
 	}
 	return out
@@ -225,6 +315,7 @@ func findingsFromCounts(runID domain.ID, cat domain.FindingCategory, sev domain.
 			EvidenceRef: string(api),
 			FirstSeen:   firstSeen[api],
 			Description: fmt.Sprintf(format, counts[api], api),
+			Count:       counts[api],
 		})
 	}
 	return out

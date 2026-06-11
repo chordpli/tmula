@@ -41,8 +41,9 @@ func HTML(d Data) ([]byte, error) {
 // CompareHTML renders a side-by-side comparison of two runs: per-metric deltas
 // (with direction and percent change) and a findings diff. A finding present
 // only in a is "resolved", only in b is "new", and in both is "persisting";
-// findings are keyed by (category, evidenceRef, description). Output is a
-// standalone HTML page with all dynamic values escaped.
+// findings are keyed by (category, evidenceRef) so run-specific numbers in
+// the description do not affect identity. Output is a standalone HTML page
+// with all dynamic values escaped.
 func CompareHTML(a, b Data) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := compareTmpl.Execute(&buf, newCompareView(a, b)); err != nil {

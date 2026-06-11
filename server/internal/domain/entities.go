@@ -269,12 +269,21 @@ type MetricSample struct {
 
 // Finding is a classified issue surfaced by a run.
 type Finding struct {
-	RunID       ID              `json:"runId"`
-	Category    FindingCategory `json:"category"`
-	Severity    Severity        `json:"severity"`
-	EvidenceRef string          `json:"evidenceRef,omitempty"`
-	FirstSeen   time.Time       `json:"firstSeen"`
-	Description string          `json:"description"`
+	RunID    ID              `json:"runId"`
+	Category FindingCategory `json:"category"`
+	Severity Severity        `json:"severity"`
+	// EvidenceRef is the stable identity of what the finding is about: the API
+	// id for per-endpoint findings, the metric name (e.g. "error-rate") for
+	// threshold findings, "run-wide" for summary-derived aggregates. It carries
+	// no run-specific numbers, so the same issue keys identically across runs.
+	EvidenceRef string    `json:"evidenceRef,omitempty"`
+	FirstSeen   time.Time `json:"firstSeen"`
+	Description string    `json:"description"`
+	// Count is the number of occurrences behind the finding (errors surfaced,
+	// contract violations, length of the failure streak). Zero when the
+	// category has no occurrence count (threshold findings carry rates, which
+	// stay in the description).
+	Count int `json:"count,omitempty"`
 }
 
 // MetricQuery names one PromQL expression to correlate with a run.

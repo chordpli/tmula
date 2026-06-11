@@ -173,6 +173,51 @@ func TestClassifyThreshold(t *testing.T) {
 	}
 }
 
+// TestThresholdFindingEvidenceRefs pins the diff identity of threshold
+// findings: each carries a stable, non-empty metric-identity evidence ref so
+// the error-rate and p95 findings never collide with each other (the run
+// comparison keys findings by category + evidence ref).
+func TestThresholdFindingEvidenceRefs(t *testing.T) {
+	a := NewAggregator()
+	for i := 0; i < 10; i++ {
+		a.Add(RequestObservation{APIID: "x", StatusCode: 200, LatencyMs: 100})
+	}
+	a.Add(RequestObservation{APIID: "x", StatusCode: 500, LatencyMs: 100})
+
+	fs := a.Classify("r", ClassifyConfig{ErrorRateThreshold: 0.05, P95LatencyMs: 50})
+	refs := map[string]bool{}
+	for _, f := range fs {
+		if f.Category != domain.FindingThreshold {
+			continue
+		}
+		if f.EvidenceRef == "" {
+			t.Fatalf("threshold finding has an empty evidence ref: %+v", f)
+		}
+		refs[f.EvidenceRef] = true
+	}
+	if !refs["error-rate"] || !refs["p95-latency"] {
+		t.Fatalf("want metric-identity refs %q and %q, got %v", "error-rate", "p95-latency", refs)
+	}
+}
+
+// TestFindingCountField: per-API findings expose the occurrence count as a
+// structured field matching the number formatted into the description.
+func TestFindingCountField(t *testing.T) {
+	a := NewAggregator()
+	for i := 0; i < 3; i++ {
+		a.Add(RequestObservation{APIID: "checkout", StatusCode: 500})
+	}
+	for _, f := range a.Classify("r", ClassifyConfig{}) {
+		if f.Category == domain.FindingContract {
+			if f.Count != 3 {
+				t.Fatalf("contract finding Count = %d, want 3", f.Count)
+			}
+			return
+		}
+	}
+	t.Fatal("no contract finding produced")
+}
+
 func TestNoFindingsOnCleanRun(t *testing.T) {
 	a := NewAggregator()
 	for i := 0; i < 50; i++ {

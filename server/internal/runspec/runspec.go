@@ -1,7 +1,7 @@
 // Package runspec holds RunSpec, the self-contained experiment definition the
 // control plane runs. It lives in its own leaf package (depending only on
-// domain, load and auth) so config producers like scenariofile can name the
-// type without importing the whole api control plane.
+// domain, load, auth and obs) so config producers like scenariofile can name
+// the type without importing the whole api control plane.
 package runspec
 
 import (
@@ -11,6 +11,7 @@ import (
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
+	"github.com/chordpli/tmula/server/internal/obs"
 )
 
 // RunSpec is a self-contained experiment definition: everything needed to run.
@@ -65,6 +66,14 @@ type RunSpec struct {
 	// never a run failure. The Prometheus host must be in the target allowlist,
 	// like every other host the engine reaches.
 	Metrics *domain.MetricsSource `json:"metrics,omitempty"`
+
+	// Findings, when set, tunes how the run's observations are classified into
+	// findings: the error-rate threshold, the (otherwise disabled) p95 latency
+	// gate, and the consecutive-failure streak that flags availability. A nil
+	// block — and any zero field within it — keeps the long-standing defaults
+	// (see obs.DefaultClassifyConfig), so existing specs classify exactly as
+	// before.
+	Findings *obs.FindingConfig `json:"findings,omitempty"`
 
 	// CredentialPool, when set, authenticates the run: each virtual user (closed)
 	// or session (open) is assigned a credential by index from the pool, so the
@@ -151,6 +160,9 @@ func (r RunSpec) Validate() error {
 	}
 	if err := r.validateCredentialPool(); err != nil {
 		return err
+	}
+	if err := r.Findings.Validate(); err != nil {
+		return fmt.Errorf("api: %w", err)
 	}
 	if r.Metrics != nil {
 		if err := r.Metrics.Validate(); err != nil {

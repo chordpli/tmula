@@ -221,7 +221,7 @@ const compareHTML = `<!doctype html>
     <h3><span class="tag tag-persist">persisting</span> present in both ({{len .Persisted}})</h3>
     {{if .Persisted}}
     <ul class="findings">
-      {{range .Persisted}}<li class="finding"><span class="cat">{{.A.Category}}</span>{{if .A.EvidenceRef}}<span class="ref">· {{.A.EvidenceRef}}</span>{{end}}<div>{{.A.Description}}</div></li>{{end}}
+      {{range .Persisted}}<li class="finding"><span class="cat">{{.A.Category}}</span>{{if .A.EvidenceRef}}<span class="ref">· {{.A.EvidenceRef}}</span>{{end}}<div>{{.A.Description}}{{if ne .A.Description .B.Description}} <span class="ref">→ B: {{.B.Description}}</span>{{end}}</div></li>{{end}}
     </ul>
     {{else}}<p class="empty">None.</p>{{end}}
   </div>
