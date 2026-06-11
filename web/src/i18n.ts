@@ -175,7 +175,7 @@ const en: Record<string, string> = {
   'editor.invalid': 'Fix the graph JSON before visual editing.',
   'editor.viewMode': 'Graph view mode',
   'editor.viewJourney': 'Journey',
-  'editor.viewAll': 'All edges',
+  'editor.viewAll': 'All edges ({count})',
   'editor.selNode': 'Selected node',
   'editor.selEdge': 'Selected edge',
   'editor.template': 'API template',
@@ -194,6 +194,10 @@ const en: Record<string, string> = {
   'editor.dependency': 'dependency',
   'editor.addEdge': 'Add edge',
   'advanced.json': 'Edit the raw JSON',
+  'legend.primary': 'Journey — thicker = higher weight',
+  'legend.back': 'Back / exit',
+  'legend.dep': 'Dependency',
+  'legend.terminal': 'Terminal node',
 
   // Presets (Feature A)
   'presets.label': 'Start from a template',
@@ -430,7 +434,7 @@ const ko: Record<string, string> = {
   'editor.invalid': '시각 편집을 하려면 먼저 그래프 JSON을 고쳐야 합니다.',
   'editor.viewMode': '그래프 보기 모드',
   'editor.viewJourney': '주요 여정',
-  'editor.viewAll': '전체 엣지',
+  'editor.viewAll': '전체 엣지 ({count})',
   'editor.selNode': '선택한 노드',
   'editor.selEdge': '선택한 엣지',
   'editor.template': 'API 템플릿',
@@ -449,6 +453,10 @@ const ko: Record<string, string> = {
   'editor.dependency': '의존',
   'editor.addEdge': '엣지 추가',
   'advanced.json': 'JSON으로 직접 편집',
+  'legend.primary': '여정 — 굵을수록 가중치 높음',
+  'legend.back': '되돌아가기 · 이탈',
+  'legend.dep': '의존',
+  'legend.terminal': '터미널 노드',
 
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',

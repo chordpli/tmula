@@ -138,7 +138,9 @@ export default function GraphEditor({
                 aria-pressed={previewMode === mode}
                 onClick={() => setPreviewMode(mode)}
               >
-                {mode === 'journey' ? t('editor.viewJourney') : t('editor.viewAll')}
+                {mode === 'journey'
+                  ? t('editor.viewJourney')
+                  : t('editor.viewAll', { count: graph.edges.length })}
               </button>
             ))}
           </div>
@@ -162,6 +164,8 @@ export default function GraphEditor({
           }}
         />
       </div>
+
+      <GraphLegend />
 
       {selection?.kind === 'node' && selectedNode && (
         <section className="editor-sel" aria-label={t('editor.selNode')}>
@@ -315,6 +319,33 @@ export default function GraphEditor({
   )
 }
 
+// GraphLegend decodes the preview's visual language in one quiet line: what the
+// solid/dashed/accent strokes mean, that thickness encodes weight, and how a
+// terminal node is drawn — so a first-time operator never has to guess.
+function GraphLegend() {
+  const { t } = useI18n()
+  return (
+    <div className="editor-legend">
+      <span className="editor-legend__item">
+        <span className="editor-legend__line editor-legend__line--primary" aria-hidden="true" />
+        {t('legend.primary')}
+      </span>
+      <span className="editor-legend__item">
+        <span className="editor-legend__line editor-legend__line--back" aria-hidden="true" />
+        {t('legend.back')}
+      </span>
+      <span className="editor-legend__item">
+        <span className="editor-legend__line editor-legend__line--dep" aria-hidden="true" />
+        {t('legend.dep')}
+      </span>
+      <span className="editor-legend__item">
+        <span className="editor-legend__box" aria-hidden="true" />
+        {t('legend.terminal')}
+      </span>
+    </div>
+  )
+}
+
 // TemplateMiniForm edits the method/path of one API template inline, so a node's
 // request can be adjusted without opening the raw templates JSON. All other
 // template fields are preserved by updateTemplateInJSON.
@@ -433,11 +464,36 @@ function GraphPreview({
   onSelectEdge: (index: number) => void
 }) {
   const { t } = useI18n()
+  // hover narrows the view to one node or edge and its neighborhood: everything
+  // unrelated dims so a path can be traced through a dense graph at a glance.
+  const [hover, setHover] = useState<{ kind: 'node'; id: string } | { kind: 'edge'; index: number } | null>(null)
   const rawPreview = buildPreviewGeometry(graph, start)
   const preview = rawPreview ? previewGeometryForMode(rawPreview, graph, mode, start) : null
   if (!preview) return null
   const { positions: pos, routes, viewBox } = preview
   const drawableRoutes = routes
+  const hotEdgeIndexes = new Set<number>()
+  const hotNodeIDs = new Set<string>()
+  if (hover?.kind === 'node') {
+    hotNodeIDs.add(hover.id)
+    for (const route of routes) {
+      if (route.edge.from === hover.id || route.edge.to === hover.id) {
+        hotEdgeIndexes.add(route.index)
+        hotNodeIDs.add(route.edge.from)
+        hotNodeIDs.add(route.edge.to)
+      }
+    }
+  } else if (hover?.kind === 'edge') {
+    const hot = routes.find((route) => route.index === hover.index)
+    if (hot) {
+      hotEdgeIndexes.add(hot.index)
+      hotNodeIDs.add(hot.edge.from)
+      hotNodeIDs.add(hot.edge.to)
+    }
+  }
+  const dimming = hover !== null && (hotEdgeIndexes.size > 0 || hotNodeIDs.size > 0)
+  const coldEdge = (index: number) => (dimming && !hotEdgeIndexes.has(index) ? ' editor-preview__cold' : '')
+  const coldNode = (id: string) => (dimming && !hotNodeIDs.has(id) ? ' editor-preview__cold' : '')
   const visibleNodeIDs = new Set<string>([start])
   const hiddenExitNodeIDs = new Set(routes.filter((route) => route.kind === 'exit').map((route) => route.edge.to))
   if (mode === 'all') {
@@ -487,7 +543,7 @@ function GraphPreview({
       {drawableRoutes.map((route) => (
         <path
           key={`${route.edge.from}-${route.edge.to}-${route.index}-halo`}
-          className={`editor-preview__edge-halo editor-preview__edge-halo--${route.kind}`}
+          className={`editor-preview__edge-halo editor-preview__edge-halo--${route.kind}${coldEdge(route.index)}`}
           d={route.d}
         />
       ))}
@@ -499,6 +555,7 @@ function GraphPreview({
             `editor-preview__edge--${route.kind}`,
             route.edge.dependency ? 'editor-preview__edge--dep' : '',
             route.index === selectedEdgeIndex ? 'editor-preview__edge--selected' : '',
+            coldEdge(route.index).trim(),
           ].join(' ')}
           style={route.kind === 'exit' ? undefined : { strokeWidth: edgeStrokeWidth(route.edge.weight) }}
           d={route.d}
@@ -523,6 +580,10 @@ function GraphPreview({
           role="button"
           aria-label={`${t('editor.selEdge')}: ${route.edge.from} → ${route.edge.to}`}
           onClick={() => onSelectEdge(route.index)}
+          onMouseEnter={() => setHover({ kind: 'edge', index: route.index })}
+          onMouseLeave={() => setHover(null)}
+          onFocus={() => setHover({ kind: 'edge', index: route.index })}
+          onBlur={() => setHover(null)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault()
@@ -539,6 +600,7 @@ function GraphPreview({
           className={[
             `editor-preview__label editor-preview__label--${route.kind}`,
             route.index === selectedEdgeIndex ? 'editor-preview__label--selected' : '',
+            coldEdge(route.index).trim(),
           ].join(' ')}
           transform={`translate(${route.label.x}, ${route.label.y})`}
         >
@@ -555,6 +617,7 @@ function GraphPreview({
           node.id === start ? 'editor-preview__node--start' : '',
           node.apiTemplateId ? '' : 'editor-preview__node--terminal',
           node.id === selectedNodeID ? 'editor-preview__node--selected' : '',
+          coldNode(node.id).trim(),
         ].join(' ')
         return (
           <g
@@ -565,6 +628,10 @@ function GraphPreview({
             role="button"
             aria-label={`${t('editor.selNode')}: ${node.id}`}
             onClick={() => onSelectNode(nodeIndex)}
+            onMouseEnter={() => setHover({ kind: 'node', id: node.id })}
+            onMouseLeave={() => setHover(null)}
+            onFocus={() => setHover({ kind: 'node', id: node.id })}
+            onBlur={() => setHover(null)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault()

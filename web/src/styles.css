@@ -1510,6 +1510,59 @@ a:hover {
   fill: var(--text-muted) !important;
 }
 
+/* Hover focus: unrelated elements fade so the hovered node/edge neighborhood
+   can be traced through a dense graph. */
+.editor-preview__cold {
+  opacity: 0.16;
+  transition: opacity 0.12s ease;
+}
+
+.editor-preview__edge,
+.editor-preview__node,
+.editor-preview__label {
+  transition: opacity 0.12s ease;
+}
+
+/* Legend: a one-line decoder for the preview's visual language. */
+.editor-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.editor-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-legend__line {
+  display: inline-block;
+  width: 22px;
+  height: 0;
+  border-top: 2.4px solid #344054;
+}
+
+.editor-legend__line--back {
+  border-top: 1.6px dashed #7b8494;
+}
+
+.editor-legend__line--dep {
+  border-top: 2px dashed var(--accent);
+}
+
+.editor-legend__box {
+  display: inline-block;
+  width: 16px;
+  height: 11px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
 /* Selection panel: the inline editor for whatever node/edge was clicked. */
 .editor-sel {
   display: flex;
