@@ -26,18 +26,21 @@ wait_up() { # url
 }
 
 ensure_not_up() { # url label
-  if curl -fsS -o /dev/null "$1" 2>/dev/null; then
+  # No -f here: any HTTP response (even 4xx/5xx) means something already owns the port.
+  if curl -sS -o /dev/null "$1" 2>/dev/null; then
     echo "$2 is already responding at $1; set SAMPLE_ADDR/ENGINE_ADDR to free ports" >&2
     exit 1
   fi
 }
 
-echo "==> building tmula"
-( cd server && go build -o ../bin/tmula ./cmd/tmula )
+echo "==> building tmula + sample API"
+( cd server && go build -o ../bin/tmula ./cmd/tmula && go build -o ../bin/sample-api ./examples/sample-api )
 
 ensure_not_up "http://${SAMPLE_ADDR}/healthz" "sample API"
 echo "==> starting sample shop API on ${SAMPLE_ADDR}"
-( cd server && SAMPLE_API_ADDR="${SAMPLE_ADDR}" go run ./examples/sample-api ) >/tmp/sample-api.log 2>&1 &
+# Run the built binary directly (not `go run`): go run does not forward SIGTERM,
+# so killing it on cleanup would orphan the API server and leave the port busy.
+SAMPLE_API_ADDR="${SAMPLE_ADDR}" ./bin/sample-api >/tmp/sample-api.log 2>&1 &
 pids+=($!)
 wait_up "http://${SAMPLE_ADDR}/healthz"
 
