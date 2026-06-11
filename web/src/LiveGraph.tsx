@@ -8,12 +8,16 @@ import {
   heatmapURL,
   heatWidth,
   layoutGraph,
+  outcomeRates,
+  outcomeSummary,
   parseHeatFrame,
   parseTraceFrame,
   requestTotal,
   terminalNodeIds,
+  terminalRole,
   traceURL,
   type HeatEdge,
+  type OutcomeSummary,
   type TraceEvent,
 } from './api'
 import { useI18n } from './i18n'
@@ -53,6 +57,11 @@ interface LiveGraphProps {
   runId: string
   active: boolean
   mode: 'events' | 'flow'
+  // Optional: called with the cumulative journey-outcome headline (completion/
+  // drop-off rates) whenever the counts move, so the parent can render it as stat
+  // cards next to the live metrics and the report. Both modes feed it: 'flow' from
+  // the per-edge aggregates, 'events' from the per-request trace.
+  onOutcome?: (outcome: OutcomeSummary) => void
 }
 
 // Visual + motion tuning. Colors track the GitHub-dark palette so green/red
@@ -109,7 +118,7 @@ interface NodeCount {
   errors: number
 }
 
-export default function LiveGraph({ graph, start, runId, active, mode }: LiveGraphProps) {
+export default function LiveGraph({ graph, start, runId, active, mode, onOutcome }: LiveGraphProps) {
   // Layout is pure and depends only on the graph + start, so memoize it.
   const positions = useMemo(
     () => layoutGraph(graph.nodes, graph.edges, start),
@@ -121,9 +130,25 @@ export default function LiveGraph({ graph, start, runId, active, mode }: LiveGra
   const view = useMemo(() => boundingBox(positions, PAD), [positions])
 
   return mode === 'flow' ? (
-    <FlowView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
+    <FlowView
+      graph={graph}
+      start={start}
+      runId={runId}
+      active={active}
+      positions={positions}
+      view={view}
+      onOutcome={onOutcome}
+    />
   ) : (
-    <EventsView graph={graph} start={start} runId={runId} active={active} positions={positions} view={view} />
+    <EventsView
+      graph={graph}
+      start={start}
+      runId={runId}
+      active={active}
+      positions={positions}
+      view={view}
+      onOutcome={onOutcome}
+    />
   )
 }
 
@@ -135,13 +160,14 @@ interface ModeProps {
   active: boolean
   positions: Record<string, { x: number; y: number }>
   view: { x: number; y: number; w: number; h: number }
+  onOutcome?: (outcome: OutcomeSummary) => void
 }
 
 // ---------------------------------------------------------------------------
 // Events mode (Phase 1): per-request travelling dots.
 // ---------------------------------------------------------------------------
 
-function EventsView({ graph, start, runId, active, positions, view }: ModeProps) {
+function EventsView({ graph, start, runId, active, positions, view, onOutcome }: ModeProps) {
   const { t } = useI18n()
   // Terminal endpoints (done/exit). A dot whose destination is one of these is a
   // user finishing/leaving rather than making a call, so we tint it as a completion
@@ -152,6 +178,10 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
   // animation frame (via tick) reads these refs to paint.
   const dotsRef = useRef<Dot[]>([])
   const countsRef = useRef<Map<string, NodeCount>>(new Map())
+  // Journey-outcome counters for the headline (completion/drop-off rates): an
+  // entry event starts a journey, an event into a terminal ends one. Kept as a ref
+  // like the other live counters and emitted upward only when something moved.
+  const outcomeRef = useRef({ started: 0, completed: 0, dropped: 0 })
   const seqRef = useRef(0) // monotonic dot id
   const rafRef = useRef<number | null>(null)
   const esRef = useRef<EventSource | null>(null)
@@ -180,12 +210,27 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
 
   function ingest(events: TraceEvent[]) {
     const counts = countsRef.current
+    const outcome = outcomeRef.current
+    let outcomeMoved = false
     for (const ev of events) {
       // Per-node live counters: attribute the request to its destination node.
       const c = counts.get(ev.to) ?? { total: 0, errors: 0 }
       c.total += 1
       if (!ev.ok) c.errors += 1
       counts.set(ev.to, c)
+
+      // Outcome counters: an entry event (from === "") starts a journey; an event
+      // into a terminal ends one — a completion or a drop-off by the endpoint's
+      // role. Mid-journey requests touch neither side.
+      if (ev.from === '') {
+        outcome.started += 1
+        outcomeMoved = true
+      }
+      if (terminals.has(ev.to)) {
+        if (terminalRole(ev.to) === 'dropoff') outcome.dropped += 1
+        else outcome.completed += 1
+        outcomeMoved = true
+      }
 
       // Only animate edges we can place; skip events that name unknown nodes.
       if (!positions[ev.to]) continue
@@ -212,6 +257,7 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
     if (dotsRef.current.length > MAX_DOTS) {
       dotsRef.current = dotsRef.current.slice(dotsRef.current.length - MAX_DOTS)
     }
+    if (outcomeMoved) onOutcome?.(outcomeRates(outcome.started, outcome.completed, outcome.dropped))
     ensureLoop.current()
   }
 
@@ -222,6 +268,7 @@ function EventsView({ graph, start, runId, active, positions, view }: ModeProps)
     // Reset live state for a fresh run.
     dotsRef.current = []
     countsRef.current = new Map()
+    outcomeRef.current = { started: 0, completed: 0, dropped: 0 }
     tick()
 
     const es = new EventSource(traceURL(runId))
@@ -391,12 +438,15 @@ function edgeKey(from: string, to: string): string {
   return `${from} ${to}`
 }
 
-function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
+function FlowView({ graph, start, runId, active, positions, view, onOutcome }: ModeProps) {
   const { t } = useI18n()
   // The latest per-edge aggregates, keyed by endpoints. Held in a ref so the SSE
   // handler can replace it without a render per frame; tick() repaints on update.
   const heatRef = useRef<Map<string, HeatEdge>>(new Map())
   const totalRef = useRef(0) // cumulative request count across all edges
+  // The last journey-outcome summary sent upward, so frames that don't move the
+  // outcome counts (mid-journey traffic only) don't re-render the parent.
+  const lastOutcomeRef = useRef<OutcomeSummary | null>(null)
   const pulseRef = useRef(0) // performance.now() of the last frame, drives the pulse
   const rafRef = useRef<number | null>(null)
   const [, tick] = useReducer((n: number) => n + 1, 0)
@@ -434,7 +484,22 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
     // non-terminal nodes); completions/drop-offs into done/exit render as flow but
     // never inflate the request total. Counts are cumulative, so summing the
     // current edges gives the running total.
-    totalRef.current = requestTotal(Array.from(heat.values()), terminals)
+    const current = Array.from(heat.values())
+    totalRef.current = requestTotal(current, terminals)
+    // Emit the journey-outcome headline (completion/drop-off rates) upward when
+    // its counts moved — entry and terminal inflow are cumulative too, so the
+    // summary is recomputed from the same edge set the request total uses.
+    const outcome = outcomeSummary(current, terminals)
+    const last = lastOutcomeRef.current
+    if (
+      !last ||
+      last.started !== outcome.started ||
+      last.completed !== outcome.completed ||
+      last.dropped !== outcome.dropped
+    ) {
+      lastOutcomeRef.current = outcome
+      onOutcome?.(outcome)
+    }
     pulseRef.current = performance.now()
     ensurePulse.current()
   }
@@ -445,6 +510,7 @@ function FlowView({ graph, start, runId, active, positions, view }: ModeProps) {
     if (!active) return
     heatRef.current = new Map()
     totalRef.current = 0
+    lastOutcomeRef.current = null
     tick()
 
     const es = new EventSource(heatmapURL(runId))
@@ -872,15 +938,6 @@ function trimToRim(
   const ux = dx / len
   const uy = dy / len
   return { x1: a.x + ux * r, y1: a.y + uy * r, x2: b.x - ux * r, y2: b.y - uy * r }
-}
-
-// terminalRole classifies a terminal node as a 'completion' or a 'dropoff' for
-// styling and copy. 'exit' is the drop-off (a user left); 'done' — and any other
-// template-less endpoint — reads as a completion (a user finished), so an unnamed
-// terminal defaults to the positive outcome rather than looking like a leak.
-type TerminalRole = 'completion' | 'dropoff'
-function terminalRole(id: string): TerminalRole {
-  return id === 'exit' ? 'dropoff' : 'completion'
 }
 
 // labelOffset returns a small perpendicular nudge for an edge's count label so it

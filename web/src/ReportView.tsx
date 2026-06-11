@@ -1,4 +1,4 @@
-import type { MetricSeries, Report, Stats } from './api'
+import type { MetricSeries, OutcomeSummary, Report, Stats } from './api'
 import { useI18n } from './i18n'
 
 // errorRateKind picks a stat color by how alarming the error rate is, so a glance
@@ -67,11 +67,55 @@ export function StatsView({ stats }: { stats: Stats }) {
   )
 }
 
+// OutcomeView renders the journey-outcome headline — the completion rate (journeys
+// that reached done) and the drop-off rate (journeys that left at exit) — in the
+// same stat-card grid as StatsView so it reads as part of the run's headline
+// metrics. The summary is accumulated client-side from the live flow/trace stream
+// (the report API carries no terminal aggregates), so callers render this only
+// when a summary with started journeys exists; the shared-link viewer has none.
+export function OutcomeView({ outcome }: { outcome: OutcomeSummary }) {
+  const { t } = useI18n()
+  const vars = (count: number) => ({
+    count: count.toLocaleString(),
+    started: outcome.started.toLocaleString(),
+  })
+  return (
+    <div className="statgrid" style={{ marginTop: 10 }}>
+      <div className="stat">
+        <div className="stat__label">{t('stat.completionRate')}</div>
+        {/* Completion is the positive outcome (the done node's calm green). */}
+        <div className="stat__value stat__value--ok">
+          {(outcome.completionRate * 100).toFixed(1)}
+          <span className="stat__unit">%</span>
+        </div>
+        <div className="stat__sub">{t('stat.completionSub', vars(outcome.completed))}</div>
+      </div>
+      <div className="stat">
+        <div className="stat__label">{t('stat.dropOffRate')}</div>
+        {/* A drop-off is normal user behavior, not an error — keep it neutral. */}
+        <div className="stat__value">
+          {(outcome.dropOffRate * 100).toFixed(1)}
+          <span className="stat__unit">%</span>
+        </div>
+        <div className="stat__sub">{t('stat.dropOffSub', vars(outcome.dropped))}</div>
+      </div>
+    </div>
+  )
+}
+
 // ReportView renders a run report read-only: it is shared by the operator view
 // and the viewer (shared-link) page so both stay consistent. The findings list
 // shows backend-provided text verbatim (it is data); only the heading and the
-// empty-state line are translated.
-export default function ReportView({ report }: { report: Report }) {
+// empty-state line are translated. `outcome` is the optional journey-outcome
+// headline streamed live by the operator console; the viewer has no stream, so
+// it simply omits the prop and the cards.
+export default function ReportView({
+  report,
+  outcome,
+}: {
+  report: Report
+  outcome?: OutcomeSummary | null
+}) {
   const { t } = useI18n()
   // A Go nil slice marshals to JSON null, so default to an empty list.
   const findings = report.findings ?? []
@@ -79,6 +123,7 @@ export default function ReportView({ report }: { report: Report }) {
   return (
     <div>
       <StatsView stats={report.stats} />
+      {outcome && outcome.started > 0 && <OutcomeView outcome={outcome} />}
 
       {(serverMetrics.length > 0 || report.metricsError) && (
         <div style={{ marginTop: 22 }}>

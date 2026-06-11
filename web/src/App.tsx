@@ -19,6 +19,7 @@ import {
   streamURL,
   traceable,
   type ExperimentForm,
+  type OutcomeSummary,
   type Report,
   type Stats,
 } from './api'
@@ -29,7 +30,7 @@ import { LANGS, useI18n } from './i18n'
 import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
-import ReportView, { StatsView } from './ReportView'
+import ReportView, { OutcomeView, StatsView } from './ReportView'
 import { doctorForm, type DoctorIssue } from './scenarioDoctor'
 import Viewer from './Viewer'
 
@@ -58,6 +59,7 @@ const initialForm: ExperimentForm = {
   allowlist: 'localhost, 127.0.0.1',
   users: 20,
   maxSteps: shopPreset.maxSteps,
+  deviationPct: 0,
   start: shopPreset.start,
   graphJSON: defaultGraph,
   templatesJSON: defaultTemplates,
@@ -94,6 +96,10 @@ function Operator() {
   const [runMode, setRunMode] = useState<string>('')
   const [status, setStatus] = useState<string>('')
   const [stats, setStats] = useState<Stats | null>(null)
+  // outcome is the journey-outcome headline (completion/drop-off rates) the live
+  // graph streams up while a traced run flows; it outlives the stream so the
+  // report can show it after the run completes.
+  const [outcome, setOutcome] = useState<OutcomeSummary | null>(null)
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
   // loadedPresetKey is the nameKey of the template just applied from a chip, kept
@@ -162,6 +168,7 @@ function Operator() {
     setError('')
     setReport(null)
     setStats(null)
+    setOutcome(null)
     setStatus('starting')
     try {
       const blocking = doctorForm(form).find((i) => i.severity === 'error')
@@ -482,6 +489,25 @@ function Operator() {
                   onChange={(e) => set('maxSteps', Math.max(1, Number(e.target.value) || 1))}
                 />
               </Field>
+              <Field
+                label={t('field.deviation')}
+                help={t('help.deviation')}
+                tip={<HelpTip label={t('field.deviation')} text={t('help.deviation.tip')} />}
+              >
+                <div className="input-suffix">
+                  <input
+                    className="input"
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={form.deviationPct}
+                    onChange={(e) =>
+                      set('deviationPct', Math.min(100, Math.max(0, Number(e.target.value) || 0)))
+                    }
+                  />
+                  <span className="input-suffix__unit">{t('unit.percent')}</span>
+                </div>
+              </Field>
               {!openModel && (
                 <Field label={t('field.users')} help={t('help.users')}>
                   <input
@@ -606,6 +632,7 @@ function Operator() {
                   runId={runId}
                   active={isRunning}
                   mode={liveMode}
+                  onOutcome={setOutcome}
                 />
               </div>
             )}
@@ -626,6 +653,9 @@ function Operator() {
                   <h3 className="viz__title">{t('viz.metrics.title')}</h3>
                 </div>
                 <StatsView stats={stats} />
+                {/* The journey-outcome headline accumulates from the live trace/flow
+                    stream; it only shows once at least one journey has started. */}
+                {outcome && outcome.started > 0 && <OutcomeView outcome={outcome} />}
               </div>
             )}
           </section>
@@ -646,7 +676,7 @@ function Operator() {
                 </a>
               )}
             </div>
-            <ReportView report={report} />
+            <ReportView report={report} outcome={outcome} />
           </section>
         )}
       </div>

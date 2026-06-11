@@ -22,6 +22,8 @@ import {
   latencyHeatmapURL,
   layoutGraph,
   lerpColor,
+  outcomeRates,
+  outcomeSummary,
   parseHeatFrame,
   parseLatencyFrame,
   parseAllowlist,
@@ -33,10 +35,18 @@ import {
   runDisabled,
   shareTokenFromQuery,
   terminalNodeIds,
+  terminalRole,
   traceable,
   traceURL,
   type ExperimentForm,
+  type RunSpec,
 } from './api'
+
+// expParams unwraps the experiment params for assertions (experiment is typed
+// `unknown` on the wire so the UI never depends on its shape elsewhere).
+function expParams(spec: RunSpec): { virtualUserCount: number; deviationRate: number } {
+  return (spec.experiment as { params: { virtualUserCount: number; deviationRate: number } }).params
+}
 
 // rgb parses a color into channels for assertions, accepting both the "rgb(r, g, b)"
 // form heatColor/lerpColor emit and the "#rrggbb" form of the ramp endpoints.
@@ -55,6 +65,7 @@ const form: ExperimentForm = {
   allowlist: 'localhost, 127.0.0.1 ',
   users: 3,
   maxSteps: 5,
+  deviationPct: 0,
   start: 'a',
   graphJSON: '{"id":"g","nodes":[{"id":"a"}],"edges":[]}',
   templatesJSON: '{"ta":{"method":"GET","path":"/a"}}',
@@ -247,6 +258,21 @@ describe('buildRunSpec', () => {
     expect(buildRunSpec({ ...open, maxConcurrency: 500 }).trace).toBe(true)
     // Open: uncapped (0) still attaches.
     expect(buildRunSpec({ ...open, maxConcurrency: 0 }).trace).toBe(true)
+  })
+
+  it('sends the deviation percent as a 0..1 deviationRate fraction', () => {
+    // The default (0%) keeps the exact 0 the server reads as "follow the path".
+    expect(expParams(buildRunSpec(form)).deviationRate).toBe(0)
+    // A friendly percent converts to the server's fraction contract.
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 25 })).deviationRate).toBeCloseTo(0.25, 9)
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 100 })).deviationRate).toBe(1)
+  })
+
+  it('clamps an out-of-range deviation percent into [0,1]', () => {
+    // The server hard-rejects deviationRate outside [0,1] with a 400; the builder
+    // degrades a hand-typed out-of-range percent gracefully instead.
+    expect(expParams(buildRunSpec({ ...form, deviationPct: 150 })).deviationRate).toBe(1)
+    expect(expParams(buildRunSpec({ ...form, deviationPct: -10 })).deviationRate).toBe(0)
   })
 })
 
@@ -848,6 +874,86 @@ describe('classifyEdge', () => {
   it('treats a terminal destination as terminal regardless of depth ordering', () => {
     // Even if a terminal somehow sat shallower than its source, terminal wins.
     expect(classifyEdge('browse', 'exit', terminals, depth)).toBe('terminal')
+  })
+})
+
+describe('terminalRole', () => {
+  it("classifies 'exit' as the drop-off", () => {
+    expect(terminalRole('exit')).toBe('dropoff')
+  })
+
+  it('reads any other terminal as a completion (an unnamed endpoint stays positive)', () => {
+    expect(terminalRole('done')).toBe('completion')
+    expect(terminalRole('finished')).toBe('completion')
+  })
+})
+
+describe('outcomeRates', () => {
+  it('derives the completion and drop-off rates from raw counts', () => {
+    expect(outcomeRates(200, 30, 50)).toEqual({
+      started: 200,
+      completed: 30,
+      dropped: 50,
+      completionRate: 0.15,
+      dropOffRate: 0.25,
+    })
+  })
+
+  it('is all-zero rates when nothing started (never NaN)', () => {
+    const o = outcomeRates(0, 0, 0)
+    expect(o.completionRate).toBe(0)
+    expect(o.dropOffRate).toBe(0)
+  })
+})
+
+describe('outcomeSummary', () => {
+  const terminals = new Set(['done', 'exit'])
+
+  it('folds entry volume and terminal inflow into journey-outcome rates', () => {
+    const edges = [
+      { from: '', to: 'browse', requests: 100 }, // journeys started
+      { from: 'browse', to: 'search', requests: 40 }, // mid-journey request → not an outcome
+      { from: 'browse', to: 'exit', requests: 20 }, // drop-off
+      { from: 'cart', to: 'exit', requests: 10 }, // drop-off from a second source
+      { from: 'checkout', to: 'done', requests: 15 }, // completion
+    ]
+    const o = outcomeSummary(edges, terminals)
+    expect(o.started).toBe(100)
+    expect(o.completed).toBe(15)
+    expect(o.dropped).toBe(30)
+    expect(o.completionRate).toBeCloseTo(0.15, 9)
+    expect(o.dropOffRate).toBeCloseTo(0.3, 9)
+  })
+
+  it('sums multiple entry edges (personas can start at different nodes)', () => {
+    const edges = [
+      { from: '', to: 'browse', requests: 70 },
+      { from: '', to: 'cart', requests: 30 },
+      { from: 'checkout', to: 'done', requests: 25 },
+    ]
+    const o = outcomeSummary(edges, terminals)
+    expect(o.started).toBe(100)
+    expect(o.completionRate).toBeCloseTo(0.25, 9)
+  })
+
+  it('counts an unnamed terminal as a completion, matching the flow view', () => {
+    const edges = [
+      { from: '', to: 'a', requests: 10 },
+      { from: 'a', to: 'finished', requests: 4 },
+    ]
+    const o = outcomeSummary(edges, new Set(['finished']))
+    expect(o.completed).toBe(4)
+    expect(o.dropped).toBe(0)
+  })
+
+  it('is all zeros with no traffic', () => {
+    expect(outcomeSummary([], terminals)).toEqual({
+      started: 0,
+      completed: 0,
+      dropped: 0,
+      completionRate: 0,
+      dropOffRate: 0,
+    })
   })
 })
 

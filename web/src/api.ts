@@ -6,6 +6,10 @@ export interface ExperimentForm {
   allowlist: string // comma-separated
   users: number
   maxSteps: number
+  // Chance (a friendly 0–100 percent) that a user wanders off the weighted path at
+  // a step — exploring another branch or abandoning mid-journey. Sent to the server
+  // as its 0..1 deviationRate fraction; dependency edges are never violated.
+  deviationPct: number
   start: string
   graphJSON: string
   templatesJSON: string
@@ -226,12 +230,17 @@ export function buildRunSpec(form: ExperimentForm): RunSpec {
         }
       : { maxRps: Math.max(1000, Math.ceil(form.users)), maxConcurrency: Math.max(200, Math.ceil(form.users)) }
 
+  // The form takes the deviation rate as a friendly percent (0–100); the server
+  // contract is a 0..1 fraction it hard-rejects outside [0,1], so clamp here so a
+  // hand-typed out-of-range value degrades gracefully instead of 400-ing the run.
+  const deviationRate = clamp01(form.deviationPct / 100)
+
   const spec: RunSpec = {
     experiment: {
       name: 'ui-run',
       targetEnvId: 'env',
       scenarioGraphId: 'graph',
-      params: { virtualUserCount: form.users, deviationRate: 0, authStrategy: 'pool' },
+      params: { virtualUserCount: form.users, deviationRate, authStrategy: 'pool' },
     },
     targetEnv: {
       baseUrl: form.baseUrl,
@@ -525,6 +534,57 @@ export function requestTotal(
     total += e.requests
   }
   return total
+}
+
+// terminalRole classifies a terminal node as a 'completion' or a 'dropoff' for
+// styling, copy, and the outcome headline. 'exit' is the drop-off (a user left);
+// 'done' — and any other template-less endpoint — reads as a completion (a user
+// finished), so an unnamed terminal defaults to the positive outcome rather than
+// looking like a leak.
+export type TerminalRole = 'completion' | 'dropoff'
+export function terminalRole(id: string): TerminalRole {
+  return id === 'exit' ? 'dropoff' : 'completion'
+}
+
+// OutcomeSummary is the journey-outcome headline: how many journeys began (entry
+// inflow), how many reached a completion terminal (done) vs a drop-off terminal
+// (exit), and those counts as fractions of the journeys started. Rates are 0..1;
+// with nothing started they are 0, never NaN.
+export interface OutcomeSummary {
+  started: number
+  completed: number
+  dropped: number
+  completionRate: number
+  dropOffRate: number
+}
+
+// outcomeRates derives the headline rates from raw outcome counts. It is split
+// from outcomeSummary so the events view — which counts per-request trace events
+// rather than per-edge aggregates — shares the exact same rate math.
+export function outcomeRates(started: number, completed: number, dropped: number): OutcomeSummary {
+  const rate = (n: number) => (started > 0 ? n / started : 0)
+  return { started, completed, dropped, completionRate: rate(completed), dropOffRate: rate(dropped) }
+}
+
+// outcomeSummary folds the cumulative per-edge flow into the completion/drop-off
+// headline. Journeys started are the entry edges (from === ""); outcomes are the
+// inflow into terminal nodes, split by terminalRole. Mid-journey request edges
+// contribute to neither side: they are traffic, not outcomes.
+export function outcomeSummary(
+  edges: { from: string; to: string; requests: number }[],
+  terminals: Set<string>,
+): OutcomeSummary {
+  let started = 0
+  let completed = 0
+  let dropped = 0
+  for (const e of edges) {
+    if (e.from === '') started += e.requests
+    if (terminals.has(e.to)) {
+      if (terminalRole(e.to) === 'dropoff') dropped += e.requests
+      else completed += e.requests
+    }
+  }
+  return outcomeRates(started, completed, dropped)
 }
 
 // HEAT_OK / HEAT_ERR are the endpoints of the error-ratio color ramp (the same

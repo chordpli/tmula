@@ -129,6 +129,9 @@ const en: Record<string, string> = {
   'help.start': 'Where every user begins.',
   'field.maxSteps': 'Max steps',
   'help.maxSteps': 'Longest path a user may take before stopping.',
+  'field.deviation': 'Deviation rate',
+  'help.deviation': 'Chance a user wanders off the weighted path at each step. 0 follows the scenario exactly.',
+  'unit.percent': '%',
   'field.users': 'Virtual users',
   'help.users': 'The size of the fixed user pool that loops through the scenario.',
   'check.trace': 'Show live traffic while the run streams',
@@ -227,6 +230,8 @@ const en: Record<string, string> = {
     'A random pause between each step of a user, picked between the min and max milliseconds — so traffic looks human, not instant.',
   'help.personas.tip':
     'Split arrivals into weighted user types, each able to start at a different node and use its own think time. Leave empty for one uniform crowd.',
+  'help.deviation.tip':
+    'Virtual users probabilistically deviate from the journey — exploring other paths or giving up mid-way. Dependency edges are never violated.',
 
   // Import (Feature B)
   'import.title': 'Import from OpenAPI / HAR / access log',
@@ -285,6 +290,11 @@ const en: Record<string, string> = {
   'stat.p99': 'Latency p99',
   'stat.max': 'max {ms} ms',
   'stat.timeouts': 'Timeouts',
+  // Journey-outcome headline: how journeys ended (reached done vs left at exit).
+  'stat.completionRate': 'Completion rate',
+  'stat.completionSub': '{count} of {started} journeys reached done',
+  'stat.dropOffRate': 'Drop-off rate',
+  'stat.dropOffSub': '{count} of {started} journeys left at exit',
 
   // Findings (ReportView)
   'metrics.title': 'Server metrics',
@@ -393,6 +403,9 @@ const ko: Record<string, string> = {
   'help.start': '모든 사용자가 출발하는 지점입니다.',
   'field.maxSteps': '최대 단계',
   'help.maxSteps': '사용자가 멈추기 전까지 거칠 수 있는 가장 긴 경로입니다.',
+  'field.deviation': '경로 이탈률',
+  'help.deviation': '각 단계에서 사용자가 가중치 경로를 벗어날 확률입니다. 0이면 시나리오를 그대로 따릅니다.',
+  'unit.percent': '%',
   'field.users': '가상 사용자',
   'help.users': '시나리오를 반복하는 고정 사용자 풀의 크기입니다.',
   'check.trace': '실행이 스트리밍되는 동안 실시간 트래픽 보기',
@@ -489,6 +502,8 @@ const ko: Record<string, string> = {
     '사용자의 각 단계 사이에 두는 무작위 대기 시간으로, 최소~최대 밀리초 사이에서 정해집니다. 덕분에 트래픽이 즉각적이지 않고 사람처럼 보입니다.',
   'help.personas.tip':
     '도착하는 사용자를 가중치 있는 유형으로 나눕니다. 유형마다 다른 노드에서 시작하고 자기 생각 시간을 쓸 수 있습니다. 비우면 단일 균일 집단으로 실행합니다.',
+  'help.deviation.tip':
+    '가상 유저가 확률적으로 경로를 이탈(탐험/중도포기)합니다. 의존성 엣지는 절대 위반되지 않습니다.',
 
   // Import (Feature B)
   'import.title': 'OpenAPI / HAR / 액세스 로그에서 가져오기',
@@ -547,6 +562,11 @@ const ko: Record<string, string> = {
   'stat.p99': '지연 p99',
   'stat.max': '최대 {ms} ms',
   'stat.timeouts': '타임아웃',
+  // 여정 결과 헤드라인: 완주(done 도달) 대 이탈(exit 도달).
+  'stat.completionRate': '완주율',
+  'stat.completionSub': '{started}개 여정 중 {count}개가 완료(done)에 도달했습니다',
+  'stat.dropOffRate': '이탈률',
+  'stat.dropOffSub': '{started}개 여정 중 {count}개가 중간에 이탈(exit)했습니다',
 
   // Findings (ReportView)
   'metrics.title': '서버 메트릭',
