@@ -536,31 +536,34 @@ function GraphPreview({
       }}
     >
       <defs>
-        {/* markerUnits=userSpaceOnUse keeps the arrowhead a fixed, dainty size
-            instead of inflating with the weight-scaled stroke width. */}
+        {/* markerUnits=userSpaceOnUse keeps the arrowhead a fixed size instead
+            of inflating with the weight-scaled stroke. refX=9 tucks the head's
+            body over the line's last 9px, so the triangle reads as the line's
+            own tip — and on dashed strokes it covers a trailing dash gap that
+            would otherwise leave the head floating apart from the dashes. */}
         <marker
           id="editor-arrow"
           viewBox="0 0 10 10"
-          refX="8.5"
+          refX="9"
           refY="5"
-          markerWidth="8"
-          markerHeight="8"
+          markerWidth="10"
+          markerHeight="10"
           markerUnits="userSpaceOnUse"
           orient="auto-start-reverse"
         >
-          <path className="editor-preview__arrow" d="M 0 0.8 L 10 5 L 0 9.2 z" />
+          <path className="editor-preview__arrow" d="M 0 1 L 10 5 L 0 9 z" />
         </marker>
         <marker
           id="editor-arrow-dep"
           viewBox="0 0 10 10"
-          refX="8.5"
+          refX="9"
           refY="5"
-          markerWidth="8"
-          markerHeight="8"
+          markerWidth="10"
+          markerHeight="10"
           markerUnits="userSpaceOnUse"
           orient="auto-start-reverse"
         >
-          <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 0.8 L 10 5 L 0 9.2 z" />
+          <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1 L 10 5 L 0 9 z" />
         </marker>
       </defs>
       {drawableRoutes.map((route) => (
