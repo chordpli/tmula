@@ -161,10 +161,7 @@ func keyOf(f domain.Finding) findingKey {
 
 // diffFindings returns the findings in want whose key is absent from have.
 func diffFindings(want, have []domain.Finding) []domain.Finding {
-	present := make(map[findingKey]bool, len(have))
-	for _, f := range have {
-		present[keyOf(f)] = true
-	}
+	present := keySet(have)
 	var out []domain.Finding
 	for _, f := range want {
 		if !present[keyOf(f)] {
@@ -172,6 +169,43 @@ func diffFindings(want, have []domain.Finding) []domain.Finding {
 		}
 	}
 	return out
+}
+
+// keySet collects the finding keys of fs for membership tests.
+func keySet(fs []domain.Finding) map[findingKey]bool {
+	present := make(map[findingKey]bool, len(fs))
+	for _, f := range fs {
+		present[keyOf(f)] = true
+	}
+	return present
+}
+
+// BaselineDiff is a current run's findings diffed against a baseline run's,
+// bucketed by the same (category, evidenceRef) identity the comparison view
+// uses. It is the data a regression gate needs: only New should fail a CI job.
+type BaselineDiff struct {
+	New        []domain.Finding // present only in the current run (would fail the gate)
+	Resolved   []domain.Finding // present only in the baseline (fixed/gone)
+	Persisting []domain.Finding // present in both; carries the current run's occurrence
+}
+
+// DiffAgainstBaseline classifies the current run's findings relative to a
+// baseline run's. Every bucket is sorted most-severe first for deterministic
+// output. Persisting carries the current-run finding because its description
+// holds this run's numbers — what a CI table should show.
+func DiffAgainstBaseline(baseline, current []domain.Finding) BaselineDiff {
+	inBaseline := keySet(baseline)
+	var persisting []domain.Finding
+	for _, f := range current {
+		if inBaseline[keyOf(f)] {
+			persisting = append(persisting, f)
+		}
+	}
+	return BaselineDiff{
+		New:        sortFindings(diffFindings(current, baseline)),
+		Resolved:   sortFindings(diffFindings(baseline, current)),
+		Persisting: sortFindings(persisting),
+	}
 }
 
 // intersectFindings returns the findings present in both a and b, pairing each

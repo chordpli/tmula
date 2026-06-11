@@ -33,11 +33,17 @@ var version = "0.0.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		// --fail-on-findings is an expected CI gate, not a crash: report it
-		// plainly and exit 2 rather than logging a fatal error.
+		// --fail-on-findings (exit 2) and the --baseline regression gate
+		// (exit 3) are expected CI outcomes, not crashes: report them plainly
+		// rather than logging a fatal error. Distinct codes let a pipeline tell
+		// "findings exist" from "this change introduced new findings".
 		if errors.Is(err, errFindings) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
+		}
+		if errors.Is(err, errNewFindings) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(3)
 		}
 		slog.Error("fatal", "err", err)
 		os.Exit(1)

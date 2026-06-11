@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/chordpli/tmula/server/internal/api"
+	"github.com/chordpli/tmula/server/internal/gate"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
@@ -42,6 +43,9 @@ func runScenario(args []string) error {
 		asJSON         = fs.Bool("json", false, "print the raw report JSON instead of a summary")
 		failOnFindings = fs.Bool("fail-on-findings", false, "exit non-zero if any finding is detected (CI gate)")
 		failOnSeverity = fs.String("fail-on-severity", "", "gate only on findings at/above this severity: warning | critical")
+		baselineRun    = fs.String("baseline", "", "regression gate: baseline run id, fetched from --engine; exits non-zero only on findings new vs the baseline")
+		baselineFile   = fs.String("baseline-file", "", "regression gate: baseline report JSON file (a previous `tmula run --json` output)")
+		knownIssues    = fs.String("known-issues", "", "known-issues YAML; matching new findings are suppressed in the baseline gate until their expires date (YYYY-MM-DD)")
 		summary        = fs.String("summary", "", "append a markdown run summary to this file (default: $GITHUB_STEP_SUMMARY when set)")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
@@ -50,7 +54,7 @@ func runScenario(args []string) error {
 			"  tmula run scenario.yaml --users 50\n"+
 			"  tmula run --target http://localhost:9000 --get /health --users 20\n"+
 			"  tmula run scenario.yaml --open 278 --for 3600\n\n"+
-			"exit codes: 0 ok · 1 error · 2 findings (with --fail-on-findings)\n\n")
+			"exit codes: 0 ok · 1 error · 2 findings (with --fail-on-findings) · 3 new findings (with --baseline)\n\n")
 		fs.PrintDefaults()
 	}
 	// Go's flag package stops at the first non-flag argument, so a natural
@@ -81,6 +85,35 @@ func runScenario(args []string) error {
 	case "", "warning", "critical":
 	default:
 		return fmt.Errorf("--fail-on-severity must be warning or critical, got %q", *failOnSeverity)
+	}
+
+	// The baseline gate's inputs are validated and loaded before the run: a
+	// mistyped path or a malformed known-issues file must fail in seconds, not
+	// after minutes of load generation.
+	if *baselineRun != "" && *baselineFile != "" {
+		return fmt.Errorf("use only one of --baseline (run id via --engine) or --baseline-file (report JSON)")
+	}
+	if *baselineRun != "" && *engine == "" {
+		return fmt.Errorf("--baseline takes a run id from a long-running engine; pass --engine, or use --baseline-file with a saved report (an in-process run starts with empty history)")
+	}
+	hasBaseline := *baselineRun != "" || *baselineFile != ""
+	if *knownIssues != "" && !hasBaseline {
+		return fmt.Errorf("--known-issues only affects the baseline gate; pass --baseline or --baseline-file")
+	}
+	var known []gate.KnownIssue
+	if *knownIssues != "" {
+		var err error
+		if known, err = loadKnownIssues(*knownIssues); err != nil {
+			return err
+		}
+	}
+	var baseFindings []cliFinding
+	baseLabel := ""
+	if *baselineFile != "" {
+		var err error
+		if baseFindings, baseLabel, err = loadBaselineFile(*baselineFile); err != nil {
+			return err
+		}
 	}
 
 	sc, err := buildScenario(file, *target, *get, *post)
@@ -118,6 +151,15 @@ func runScenario(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+
+	// A run-id baseline resolves through the engine before the run starts, for
+	// the same fail-fast reason as the file checks above.
+	if *baselineRun != "" {
+		var err error
+		if baseFindings, baseLabel, err = fetchBaselineRun(ctx, *engine, *baselineRun); err != nil {
+			return err
+		}
+	}
 
 	// In-process is the default: drive the control plane through its Go API so a
 	// scenario's credential secrets never have to cross the wire (the credential
@@ -169,13 +211,31 @@ func runScenario(args []string) error {
 	} else {
 		printReport(report)
 	}
+	// The baseline gate verdict is computed before the summary so the four-way
+	// table lands in it. Expired-suppression warnings go to stderr in any mode;
+	// the human rendering is skipped under --json (stdout is the report
+	// document there — the verdict still reaches CI via the exit code and the
+	// markdown summary).
+	var gateRes *gate.Result
+	if hasBaseline {
+		res := gate.Evaluate(toDomainFindings(baseFindings), toDomainFindings(report.Findings), known, time.Now().UTC())
+		gateRes = &res
+		warnExpired(res.Expired)
+		if !*asJSON {
+			printGateResult(res, baseLabel)
+		}
+	}
 	// The markdown summary is written before the failed/killed and gate checks
 	// below: a broken run is exactly when the summary is needed (it is what a CI
 	// job shows after the gate makes it exit non-zero). It is best-effort — a
 	// summary-file problem must never mask the run's real outcome or downgrade
 	// the gate's exit code, so a write failure is reported but not returned.
 	if path := summaryPath(*summary); path != "" {
-		if err := writeSummary(path, markdownReport(report)); err != nil {
+		md := markdownReport(report)
+		if gateRes != nil {
+			md += "\n" + markdownBaselineGate(*gateRes, baseLabel)
+		}
+		if err := writeSummary(path, md); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		} else {
 			// A breadcrumb, also for the local user who happens to have
@@ -185,6 +245,16 @@ func runScenario(args []string) error {
 		}
 	}
 
+	// Exit-code ladder, in precedence order — a later gate is consulted only
+	// when every earlier one passed:
+	//   1. exit 1: the run did not complete cleanly (failed/killed). Fail loud,
+	//      unconditionally — no gate may make a broken run look green.
+	//   2. exit 2: --fail-on-findings / --fail-on-severity, the absolute gate.
+	//      It fails on any (matching) finding, baseline or not, so it keeps its
+	//      meaning even when a --baseline is also passed.
+	//   3. exit 3: --baseline / --baseline-file, the regression gate. It fails
+	//      only on findings new vs the baseline, after known-issue suppression.
+	//
 	// A run that did not complete cleanly (failed or killed — e.g. a timeout or
 	// circuit-breaker trip) is a non-zero exit regardless of findings, so it
 	// never silently passes a CI gate. A "failed" run often has no kill reason, so
@@ -197,6 +267,9 @@ func runScenario(args []string) error {
 	}
 	if n := gatingFindings(report.Findings, *failOnFindings, strings.ToLower(*failOnSeverity)); n > 0 {
 		return fmt.Errorf("%w (%d)", errFindings, n)
+	}
+	if gateRes != nil && len(gateRes.New) > 0 {
+		return fmt.Errorf("%w (%d)", errNewFindings, len(gateRes.New))
 	}
 	return nil
 }
@@ -413,6 +486,9 @@ type cliFinding struct {
 	Severity    string `json:"severity"`
 	Description string `json:"description"`
 	EvidenceRef string `json:"evidenceRef"`
+	// RootCauseClass is the `tmula reproduce` verdict when one was recorded:
+	// functional / load-dependent / flaky.
+	RootCauseClass string `json:"rootCauseClass"`
 }
 
 // printReport renders a human-readable summary of the run and its findings.
@@ -445,7 +521,14 @@ func printReport(r cliReport) {
 		if f.EvidenceRef != "" {
 			ref = " [" + f.EvidenceRef + "]"
 		}
-		fmt.Printf("  • [%s] %s: %s%s\n", strings.ToUpper(f.Severity), f.Category, f.Description, ref)
+		// A root-cause class only exists after a `tmula reproduce` pass
+		// annotated the stored finding; surface it so a refetched report shows
+		// the triage already done.
+		cause := ""
+		if f.RootCauseClass != "" {
+			cause = " (root cause: " + f.RootCauseClass + ")"
+		}
+		fmt.Printf("  • [%s] %s: %s%s%s\n", strings.ToUpper(f.Severity), f.Category, f.Description, ref, cause)
 	}
 }
 
