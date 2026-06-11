@@ -469,13 +469,14 @@ function routeStrokeWidth(route: PreviewRoute): number | undefined {
   return edgeStrokeWidth(route.edge.weight)
 }
 
-// headSizeFor scales the arrowhead with its line: a thin 1.1px stroke gets a
-// ~8.5px head, the thickest 3px stroke a ~11.5px one — so head and line stay
-// in proportion ("in sync") across every weight instead of one fixed size
-// looking stubby on thick lines and bloated on thin ones. Sizes are rounded
-// to 0.5px so routes share a small set of marker definitions.
+// headSizeFor scales the arrowhead with its line — a thin 1.1px stroke gets a
+// ~9px head, the thickest 3px stroke a ~13px one — so head and line stay in
+// proportion ("in sync") across every weight. The constants are sized for the
+// preview's real on-screen scale (the SVG renders below 1:1), where a head
+// must clear its line by several pixels per side to read as an arrow at all.
+// Sizes are bucketed to 0.5px so routes share a small set of marker defs.
 function headSizeFor(strokeWidth: number): number {
-  return Math.round((6.5 + strokeWidth * 1.6) * 2) / 2
+  return Math.round((7 + strokeWidth * 2) * 2) / 2
 }
 
 // markerIDFor names the shared marker definition for a given head size.
@@ -576,27 +577,27 @@ function GraphPreview({
             key={markerIDFor(size, false)}
             id={markerIDFor(size, false)}
             viewBox="0 0 10 10"
-            refX="9"
+            refX="8"
             refY="5"
             markerWidth={size}
             markerHeight={size}
             markerUnits="userSpaceOnUse"
             orient="auto-start-reverse"
           >
-            <path className="editor-preview__arrow" d="M 0 1.8 L 10 5 L 0 8.2 z" />
+            <path className="editor-preview__arrow" d="M 0 0.6 L 10 5 L 0 9.4 z" />
           </marker>,
           <marker
             key={markerIDFor(size, true)}
             id={markerIDFor(size, true)}
             viewBox="0 0 10 10"
-            refX="9"
+            refX="8"
             refY="5"
             markerWidth={size}
             markerHeight={size}
             markerUnits="userSpaceOnUse"
             orient="auto-start-reverse"
           >
-            <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 1.8 L 10 5 L 0 8.2 z" />
+            <path className="editor-preview__arrow editor-preview__arrow--dep" d="M 0 0.6 L 10 5 L 0 9.4 z" />
           </marker>,
         ])}
       </defs>
