@@ -1,22 +1,30 @@
 <h1 align="center">tmula</h1>
 
 <p align="center">
-  <b>A real-user traffic simulator - find the issues real users would hit, without recruiting them.</b><br>
+  <b>
+    A real-user traffic simulator - find the issues real users would hit,
+    without recruiting them.
+  </b><br>
   Drive virtual users through an explicit <i>behavior graph</i> against your API: they move like
   real people, deviate within the rules, and can swarm a single endpoint - surfacing bugs that
   plain load generation and manual testing miss.
 </p>
 
 <p align="center">
+  🌐 <b>README</b>:
+  <a href="README.md">English</a> · <a href="README.ko.md">한국어</a><br>
   📖 <b>User manual</b> - the full guide (concepts, every JSON field, CLI, findings, FAQ):
   <a href="docs/guide.en.md">English</a> · <a href="docs/guide.ko.md">한국어</a>
 </p>
 
 <p align="center">
   <img src="docs/images/demo-live.gif" width="840"
-       alt="tmula web console during a live run: requests stream across the branching shop journey on the traffic-flow map while the latency heatmap and live metrics fill in">
+       alt="tmula web console during a live run">
   <br>
-  <sub><i>The web console during a live run - requests stream across the behavior graph (edge thickness is request volume, red marks errors) while the latency heatmap fills in.</i></sub>
+  <sub><i>
+    The web console during a live run - requests stream across the behavior graph
+    while the latency heatmap fills in.
+  </i></sub>
 </p>
 
 ---
@@ -30,7 +38,7 @@ as an explicit **behavior graph**, then send virtual traffic through that graph 
 the flow slows down, breaks, or concentrates.
 
 Virtual users follow a journey, branch, hesitate, sometimes go off-script, and pile onto
-whatever is hot. In tmula that journey is represented as nodes = API calls, weighted edges =
+high-traffic endpoints. In tmula that journey is represented as nodes = API calls, weighted edges =
 transitions, and dependency edges that are never skipped. It surfaces issues in three modes:
 
 - **Scenario-following** - does the happy path hold up under realistic, branching traffic?
@@ -47,13 +55,6 @@ Observation is **client-side first** (status codes, latency tails, and error / a
 contract findings); server-side metrics are opt-in. A single Go binary with the web console baked
 in runs **locally first** and **scales out** to distributed master/worker mode for large traffic.
 
-> tmula는 기존 부하 테스트 도구를 대체하려는 도구가 아니라, **사용자 여정을 행동 그래프로 먼저
-> 모델링하고** 그 흐름 위에서 부하와 실패를 관찰하기 위한 traffic simulation 도구입니다. 가상
-> 사용자가 실제 사람처럼 시나리오를 따라 이동하고, 규칙 안에서 이탈하고, 특정 API에 부하를
-> 집중시켜 - **실제 사용자를 모으지 않고도** 어디서 흐름이 느려지고, 실패하고, 몰리는지
-> 확인합니다. 단일 Go 바이너리(웹 UI 내장)로 로컬에서 바로 돌리고, 필요하면 분산 마스터/워커로
-> 확장합니다.
-
 ---
 
 ## Quickstart
@@ -67,21 +68,23 @@ curl -fsSL https://raw.githubusercontent.com/chordpli/tmula/main/install.sh | sh
 tmula demo
 ```
 
-`tmula demo` runs the whole loop self-contained - no config file, no second terminal. It
-**[1/4]** boots a tiny shop API with planted bugs (a flaky cart, a checkout that degrades under
-load, a rare broken product link) on an ephemeral local port, **[2/4]** **learns** a behavior
-graph from that shop's access log, **[3/4]** starts the engine + web console (default `:8080`,
-change with `--addr`), opens the browser straight into the run's live view (`/?run=<run-id>` -
-the flow map and live metrics, no form to fill), and replays the learned traffic against the
-shop for `--duration` (default 60s), then **[4/4]** prints the findings summary plus concrete
-next steps: a ready-to-paste
-`tmula reproduce` command to triage a finding in isolation, the run's HTML report URL, and the
-`tmula init` / `tmula run` pair that points the same loop at your own service. It stays up until
-Ctrl-C so those commands keep working; `--no-browser` skips opening the console.
+`tmula demo` runs the whole loop self-contained - no config file, no second terminal:
+
+1. Boots a tiny shop API with planted bugs: a flaky cart, a checkout that degrades
+   under load, and a rare broken product link.
+2. **Learns** a behavior graph from that shop's access log.
+3. Starts the engine + web console (default `:8080`, change with `--addr`), opens the
+   browser straight into the run's live view (`/?run=<run-id>`), and replays the learned traffic
+   against the shop for `--duration` (default 60s).
+4. Prints the findings summary plus concrete next steps: a ready-to-paste
+   `tmula reproduce` command, the run's HTML report URL, and the `tmula init` / `tmula run` pair
+   that points the same loop at your own service.
+
+It stays up until Ctrl-C so those commands keep working; `--no-browser` skips opening the console.
 
 > The browser console page needs a binary with the embedded UI - the install script's prebuilt
 > binary and the Docker image ship it. With a plain `go build` the demo still works end to end;
-> the terminal summary and the `report.html` link are the result surfaces either way.
+> either way, the terminal summary and `report.html` link still show the results.
 
 **Try it with Docker** - no Go/Node, no install. One command brings up the console (real UI
 baked in) plus both example APIs, each with planted bugs:
@@ -91,10 +94,11 @@ git clone https://github.com/chordpli/tmula.git && cd tmula
 docker compose up                    # builds on first run, then starts everything
 ```
 
-Open <http://localhost:8080>, pick the **shop** or **ticketing** preset, then point it at the bundled
-API: set **Base URL** to `http://sample-api:9000` (shop) or `http://ticketing-api:9100` (ticketing) and
-add that host (`sample-api` / `ticketing-api`) to the **Allowlist**, then hit **Run**. Inside the
-Compose network the engine reaches the SUTs by service name (not `localhost`), so both fields use it.
+Open <http://localhost:8080>, pick the **shop** or **ticketing** preset, then point it at the
+bundled API: set **Base URL** to `http://sample-api:9000` (shop) or `http://ticketing-api:9100`
+(ticketing) and add that host (`sample-api` / `ticketing-api`) to the **Allowlist**, then hit
+**Run**. Inside the Compose network the engine reaches the example APIs by service name
+(not `localhost`), so both fields use it.
 
 **Run it for real** - the same installed binary serves the console or runs scenarios:
 
@@ -125,14 +129,14 @@ version of `tmula demo` (explicit curl/jq calls; needs `go`, `jq`, `curl`) - see
 
 | Feature | What it does | Status |
 |---------|--------------|--------|
-| **Scenario-following** | Users walk the behavior graph by edge weight, honoring dependency edges | ✅ Works |
-| **Deviation** | Per-step probability (`deviationRate`, console **Deviation rate**) of abandoning the journey or exploring an unlikely transition - never breaking a dependency | ✅ Works |
-| **Load-concentration** | Aim a run at one endpoint (`--get`/`--post`, or a one-node graph), or spike the open arrival rate | ✅ Works |
-| **Think time** | A random pause between a user's steps, in both workload models | ✅ Works |
-| **Findings thresholds** | Per-run `findings` block tuning the error-rate / p95 / availability gates | ✅ Works |
-| **Payload mutation** | Mutated request bodies (null / type-swap / boundary values) surface input-validation bugs | 🚧 [Roadmap](#roadmap) |
-| **Step reordering** | Visit permitted steps out of their scripted order | 🚧 [Roadmap](#roadmap) |
-| **Concentration profiles** | Time-shaped concurrency aimed at one node of a larger graph | 🚧 [Roadmap](#roadmap) |
+| **Scenario-following** | Follows edge weights and honors dependency edges | ✅ Works |
+| **Deviation** | Uses `deviationRate` for off-script paths; dependencies still hold | ✅ Works |
+| **Load-concentration** | Targets one endpoint or spikes open arrivals | ✅ Works |
+| **Think time** | Adds a random pause between user steps | ✅ Works |
+| **Findings thresholds** | Tunes error-rate, p95, and availability gates | ✅ Works |
+| **Payload mutation** | Mutates bodies to surface input-validation bugs | 🚧 [Roadmap](#roadmap) |
+| **Step reordering** | Visits permitted steps out of scripted order | 🚧 [Roadmap](#roadmap) |
+| **Concentration profiles** | Applies timed concurrency to one graph node | 🚧 [Roadmap](#roadmap) |
 
 Two workload models drive arrivals: **closed** (a fixed pool of looping users) and **open** (users
 arrive at a rate over time, for organic concurrency). Open is the realistic default and takes an
@@ -193,7 +197,7 @@ Attempts (3, single session, no concurrent load):
   #2  not reproduced  browse:200(3ms) search:200(4ms) product:200(4ms) cart:200(5ms) checkout:200(8ms)
   #3  not reproduced  browse:200(2ms) search:200(5ms) product:200(4ms) cart:200(6ms) checkout:200(8ms)
 
-Verdict: load-dependent — reproduced 0/3 attempts under no load → likely load-dependent (concurrency or saturation)
+Verdict: load-dependent — reproduced 0/3 attempts without load → likely concurrency or saturation
 ```
 
 - **functional** - the failure reproduced on *every* isolated attempt: it does not need load, so
@@ -214,29 +218,29 @@ each entry with a mandatory `reason` and `expires` date so nothing is silenced f
 verdict (new / resolved / persisting / suppressed) lands in the terminal output and the GitHub
 Actions step summary. Full reference: [the user manual](docs/guide.en.md#the-cli).
 
-> finding은 이제 증거를 동봉합니다. finding마다 대표 실패 세션(세션 ID·시드 재현 좌표·페르소나·
-> 실패까지의 그래프 경로)과 상태 코드·발생 시간 분포가 붙고, `tmula reproduce`는 그 시드 좌표로
-> 세션 하나를 부하 없이 재실행해 **functional**(부하 무관 기능 버그) / **load-dependent**(동시성·
-> 포화 의존) / **flaky**를 판별합니다 - 트래픽 구성의 재현이지 타이밍의 재현이 아니므로 증명이
-> 아닌 신호입니다. `--baseline`(+`--known-issues`) 회귀 게이트는 베이스라인 대비 **새로운**
-> finding이 있을 때만 exit 3으로 CI를 실패시킵니다.
-
 ---
 
 ## Commands
 
 The `tmula` CLI - one binary, no curl/jq, no separately running server:
 
-| Command | What it does |
-|---------|--------------|
-| `tmula demo` | The whole loop in one command: boot a planted-bug shop, **learn** its behavior graph from an access log, replay the learned traffic (engine + web console included), print the findings and next steps - `--addr :8080`, `--duration 60s`, `--no-browser` |
-| `tmula --role local\|master\|worker` | Serve the engine + embedded web console |
-| `tmula run <scenario.yaml>` | Run a scenario and print findings - `--users`, `--open <rate> --for <s>`, `--fail-on-findings` (CI gate, exit 2 on issues), `--baseline <run-id>`/`--baseline-file <report.json>` + `--known-issues <yaml>` (regression gate, exit 3 only on findings *new* vs a baseline run), `--summary` (markdown report; auto-lands on the GitHub Actions step summary) |
-| `tmula run --target <url> --get\|--post <path>` | Single-endpoint quick run |
-| `tmula reproduce --engine <url> --run <id> --finding <category/ref>` | Replay one finding's evidence session alone (no load) and classify it `functional` / `load-dependent` / `flaky` |
-| `tmula init --from <openapi.yaml\|session.har\|access.log>` | Scaffold a scenario from an API spec or HAR recording - or **learn the behavior graph from an access log** (sessions, branch weights, drop-offs, think time). Log formats are auto-detected: nginx/Apache combined, JSON lines, AWS ALB, CloudFront, Caddy, Traefik |
+- `tmula demo`: the whole loop in one command. It boots a shop with planted bugs, **learns** its
+  behavior graph from an access log, replays the learned traffic, and prints findings plus next
+  steps. Options: `--addr :8080`, `--duration 60s`, `--no-browser`.
+- `tmula --role local|master|worker`: serve the engine + embedded web console.
+- `tmula run <scenario.yaml>`: run a scenario and print findings. Key options include `--users`,
+  `--open <rate> --for <s>`, `--fail-on-findings`, `--baseline <run-id>`,
+  `--baseline-file <report.json>`, `--known-issues <yaml>`, and `--summary`.
+- `tmula run --target <url> --get|--post <path>`: single-endpoint quick run.
+- `tmula reproduce --engine <url> --run <id> --finding <category/ref>`: replay one finding's
+  evidence session alone (no load) and classify it `functional` / `load-dependent` / `flaky`.
+- `tmula init --from <openapi.yaml|session.har|access.log>`: scaffold a scenario from an API spec,
+  HAR recording, or access log. Log formats are auto-detected: nginx/Apache combined, JSON lines,
+  AWS ALB, CloudFront, Caddy, and Traefik.
 
-Gate merges on it with the bundled **GitHub Action** (`uses: chordpli/tmula@main` - installs the binary, runs the scenario, posts the findings summary on the workflow page and optionally the PR). See [Running in CI](docs/guide.en.md#running-in-ci).
+Use the bundled **GitHub Action** (`uses: chordpli/tmula@main`) to gate merges. It installs the
+binary, runs the scenario, and posts the findings summary on the workflow page and optionally on
+the PR. See [Running in CI](docs/guide.en.md#running-in-ci).
 
 Build & run from source:
 
@@ -262,28 +266,38 @@ personas / deviation rate), hit **Run**, and watch it live:
 - findings, each with a collapsible **evidence panel** (representative sessions with seed
   coordinates, status-code and timing distributions), a standalone **HTML report**, **compare
   with previous run**, and read-only **share** links,
-- opt-in **server metrics**: Prometheus series fetched over the run's window, shown beside the client-side stats,
-- a one-click **OpenAPI / HAR / access-log import** (logs go further: the branching graph is *learned* from real traffic, and the import reports its **coverage** - how many lines were used, skipped, and why) and scenario **presets**, in a bilingual UI (English / 한국어).
+- opt-in **server metrics**: Prometheus series fetched over the run's window, shown beside the
+  client-side stats,
+- a one-click **OpenAPI / HAR / access-log import** and scenario **presets**, in a bilingual UI
+  (English / 한국어). Logs go further: the branching graph is *learned* from real traffic, and the
+  import reports its **coverage** - how many lines were used, skipped, and why.
 
 <p align="center">
   <img src="docs/images/01-flow-map.png" width="840"
-       alt="tmula traffic-flow map: virtual users walking a branching shop journey (browse → search / category → product → cart → checkout → done); edge thickness is request volume and red counts mark where the happy path broke">
+       alt="tmula traffic-flow map for a branching shop journey">
   <br>
-  <sub><i>The traffic-flow map from a branching-shop run - edge thickness is request volume, and the red counts mark where the happy path broke (cart / checkout 5xx).</i></sub>
+  <sub><i>
+    The traffic-flow map from a branching-shop run - edge thickness is request volume,
+    and red counts mark where the happy path broke.
+  </i></sub>
 </p>
 
 <p align="center">
   <img src="docs/images/02-config-load-model.png" width="480"
-       alt="Load-model configuration form: workload (open / closed), arrival rate, duration, max concurrency, think time, and weighted personas">
+       alt="Load-model configuration form">
   <br>
-  <sub><i>Dial in the load - an open arrival rate (or a closed pool that loops), think time, and weighted personas, each able to start at a different node.</i></sub>
+  <sub><i>
+    Dial in the load - open arrival rate or a closed pool, think time, and weighted personas.
+  </i></sub>
 </p>
 
 <p align="center">
   <img src="docs/images/03-latency-heatmap.png" width="760"
-       alt="Latency heatmap: request density by latency band (rows, 0-5 ms up to 5000+ ms) over wall-clock time (columns)">
+       alt="Latency heatmap by time and latency band">
   <br>
-  <sub><i>The latency heatmap - request density by latency band (rows) over time (columns); most requests sit in the 0-10 ms bands with a thin tail.</i></sub>
+  <sub><i>
+    The latency heatmap - request density by latency band over time.
+  </i></sub>
 </p>
 
 > A plain `make build` / `go build` embeds only a placeholder page that tells you to run
@@ -296,10 +310,14 @@ personas / deviation rate), hit **Run**, and watch it live:
 Two complete, runnable demos make it clear how to point tmula at your own API - pick one as a
 **preset** in the web console (it fills the scenario *and* the target) or run it from the CLI.
 
-| Example | What it is | Planted bugs it surfaces |
-|---------|-----------|--------------------------|
-| **shop** - `server/examples/sample-api` (`:9000`) | A branching store journey: `browse → search / category → product → cart → checkout` | ~8% cart 500s, a checkout that degrades under load, product 404s, a search latency tail |
-| **ticketing** - `server/examples/ticketing-api` (`:9100`) | A concert-seat purchase: `events → detail → seats → hold → pay` | Seat-contention 409s, a payment gateway that buckles in the on-sale rush, sold-out 404s |
+- **shop** - `server/examples/sample-api` (`:9000`)
+  - Journey: `browse → search / category → product → cart → checkout`
+  - Planted bugs: ~8% cart 500s, a checkout that degrades under load, product 404s, and a search
+    latency tail
+- **ticketing** - `server/examples/ticketing-api` (`:9100`)
+  - Journey: `events → detail → seats → hold → pay`
+  - Planted bugs: seat-contention 409s, a payment gateway that buckles in the on-sale rush, and
+    sold-out 404s
 
 Each ships a sample API server, a behavior graph + templates, and an importable **OpenAPI / HAR**
 ([`examples/imports/`](examples/imports)). Full reference - the **User manual**
@@ -325,11 +343,6 @@ move into the body when they do:
   built and tested but unwired. Today you concentrate load with a single-endpoint run or an
   open-model `spike` arrival shape.
 
-> 위 항목들은 설계(일부는 구현·테스트까지) 되어 있지만 **아직 실행 경로에 연결되지 않은**
-> 기능입니다. README 본문과 사용자 매뉴얼은 현재 실제로 동작하는 기능만 설명하며, 페이로드
-> 변형(payload mutation) · 단계 재정렬(step reordering) · 부하 집중 프로파일은 배선이 끝나는
-> 시점에 본문으로 옮깁니다.
-
 ---
 
 ## Architecture
@@ -340,7 +353,7 @@ metrics are opt-in.
 
 ```
 server/                  Go backend module
-server/cmd/tmula         entrypoint: serve (--role local|master|worker), run, reproduce, init, bench, demo
+server/cmd/tmula         entrypoint: serve, run, reproduce, init, bench, demo
 server/internal/domain   core model: experiments, scenario graphs, virtual users, ...
 server/internal/engine   scenario graph execution (dependency edges inviolable)
 server/internal/load     virtual users, load profiles, protocol adapters
@@ -362,7 +375,8 @@ examples/                scenario files, imports, one-command demo, USAGE guide
 ## Requirements
 
 - macOS / Linux for the prebuilt binary, **or** Go 1.25+ and Node 20+ to build from source
-- `jq` + `curl` only for the manual demo script (`examples/run-demo.sh`); `tmula demo` needs nothing extra
+- `jq` + `curl` only for the manual demo script (`examples/run-demo.sh`); `tmula demo` needs
+  nothing extra
 - Docker + Postgres - optional, only for the distributed-store integration test
 
 ## License
