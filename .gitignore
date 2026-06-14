@@ -1,6 +1,8 @@
 # --- Build artifacts ---
 /bin/
 /dist/
+# tmula skill artifacts (scaffold/enrich/run/triage write here): generated, not versioned.
+/json/
 *.exe
 *.test
 *.out
@@ -30,7 +32,19 @@ Thumbs.db
 # --- Local dev tooling (vskills / codex / omc) — not part of the product ---
 # Remove these lines if you want to version the tooling/skills.
 .omc/
-.claude/
+# .claude/ is local-only EXCEPT the shipped tmula-* skills, the project hook
+# (tmula-guard) and the settings that wire it (auto-discovered + versioned).
+# Personal settings.local.json stays ignored.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/tmula-scaffold/
+!.claude/skills/tmula-enrich/
+!.claude/skills/tmula-run/
+!.claude/skills/tmula-triage/
+!.claude/skills/tmula-up/
 .codex/
 /context/
 .vills-lock.json

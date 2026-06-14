@@ -10,6 +10,8 @@
 //	POST /checkout  the flakiest path: ~8% baseline failures that climb with
 //	                concurrent load and are capped at 40% — visibly degraded and
 //	                worse under traffic, but never fully down (CONTRACT/threshold)
+//	GET  /openapi.json  the API's own OpenAPI 3 spec (relative server), so tmula
+//	                can scaffold straight from the URL with no local file
 //
 // Run it from server/:  go run ./examples/sample-api   (listens on :9000)
 package main
@@ -107,6 +109,16 @@ func main() {
 		writeJSON(w, http.StatusOK, `{"order":"placed"}`)
 	})
 
+	// Serve the API's own OpenAPI 3 description, like a real service would
+	// (Springdoc/FastAPI/etc.), so tmula can discover the spec straight from the
+	// running server: `tmula-scaffold http://host` (or `tmula-up http://host`)
+	// probes /openapi.json and scaffolds a scenario with no local file. The
+	// server URL is RELATIVE ("/"), so the scaffolder targets whatever host it
+	// fetched the spec from — no hard-coded port to keep in sync.
+	mux.HandleFunc("GET /openapi.json", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, openapiSpec)
+	})
+
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, `{"status":"ok"}`)
 	})
@@ -123,3 +135,32 @@ func writeJSON(w http.ResponseWriter, code int, body string) {
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(body))
 }
+
+// openapiSpec is the shop API's own OpenAPI 3 description, served at
+// GET /openapi.json. The single server URL is relative ("/") so a tool that
+// fetches this from http://host:port targets that same host:port. It mirrors
+// the handlers above (and examples/imports/shop.openapi.yaml).
+const openapiSpec = `{
+  "openapi": "3.0.0",
+  "info": { "title": "Shop API", "version": "1.0.0",
+    "description": "The demo shop API the tmula examples target. Served by server/examples/sample-api." },
+  "servers": [ { "url": "/" } ],
+  "paths": {
+    "/browse":   { "get":  { "operationId": "browse",   "summary": "Landing page" } },
+    "/search":   { "get":  { "operationId": "search",   "summary": "Search products" } },
+    "/category": { "get":  { "operationId": "category", "summary": "Category listing" } },
+    "/product":  { "get":  { "operationId": "product",  "summary": "Product detail" } },
+    "/cart": {
+      "post": {
+        "operationId": "addToCart", "summary": "Add an item to the cart",
+        "requestBody": { "content": { "application/json": { "example": { "productId": "p7", "qty": 1 } } } }
+      }
+    },
+    "/checkout": {
+      "post": {
+        "operationId": "checkout", "summary": "Place the order",
+        "requestBody": { "content": { "application/json": { "example": { "total": 42 } } } }
+      }
+    }
+  }
+}`

@@ -5,7 +5,7 @@ SERVER_DIR := server
 SERVER_PKG := ./...
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build go-build web-build embed web demo dev test vet fmt lint run clean tidy
+.PHONY: all build go-build web-build embed web demo shop ticketing dev test vet fmt lint run clean tidy
 
 all: build
 
@@ -62,6 +62,19 @@ demo: embed
 	  (cd $(SERVER_DIR) && SAMPLE_API_ADDR=:9000 go run ./examples/sample-api) & \
 	  (cd $(SERVER_DIR) && TICKETING_API_ADDR=:9100 go run ./examples/ticketing-api) & \
 	  $(BINARY) --role local --addr :8080'
+
+## shop: run just the demo shop SUT (the planted-bug "shop" API the examples target,
+## also serving its own OpenAPI at /openapi.json). Default :9000; override with
+## SAMPLE_API_ADDR=:PORT. Ctrl-C stops it.
+shop:
+	@echo "→ shop SUT on $${SAMPLE_API_ADDR:-:9000}  (spec at /openapi.json · Ctrl-C to stop)"
+	cd $(SERVER_DIR) && SAMPLE_API_ADDR=$${SAMPLE_API_ADDR:-:9000} go run ./examples/sample-api
+
+## ticketing: run just the demo ticketing SUT (concert seats, on-sale-rush bugs).
+## Default :9100; override with TICKETING_API_ADDR=:PORT. Ctrl-C stops it.
+ticketing:
+	@echo "→ ticketing SUT on $${TICKETING_API_ADDR:-:9100}  (Ctrl-C to stop)"
+	cd $(SERVER_DIR) && TICKETING_API_ADDR=$${TICKETING_API_ADDR:-:9100} go run ./examples/ticketing-api
 
 ## dev: hot-reload UI dev server (proxies /api to a separately running engine).
 ## Run `make run` (or `make web`) in another terminal first.
