@@ -248,10 +248,34 @@ Build & run from source:
 |-------------|--------------|
 | `make web` | Build the React UI, embed it, run the console on :8080 |
 | `make build` | Go binary only - fast, UI is a placeholder (CLI path) |
+| `make demo` | Engine + **both** example SUTs (shop :9000 · ticketing :9100) |
+| `make shop` · `make ticketing` | Run **one** example SUT on its own — shop :9000 / ticketing :9100 (override the port with `SAMPLE_API_ADDR=:PORT` / `TICKETING_API_ADDR=:PORT`) |
 | `make dev` | UI hot-reload dev server (proxies `/api` to a running engine) |
 | `make test` · `make lint` | Go unit tests · `go vet` + gofmt check |
 
 Health check: <http://localhost:8080/healthz>.
+
+---
+
+## Drive it from Claude Code (skills)
+
+If you use [Claude Code](https://docs.claude.com/en/docs/claude-code), this repo ships a suite of
+**skills** that take you from an API to triaged findings conversationally — no need to remember the
+commands above. Open the repo in Claude Code and just say what you want, or run the orchestrator:
+
+```
+/tmula-up http://your-api        # or a Swagger/OpenAPI URL, a HAR, or an access log
+```
+
+It walks **scaffold → enrich → run → triage**: discovers the spec from the URL (if the API serves
+one), writes a `json/scenario.json`, makes it runnable and safe, load-tests it behind a
+**non-production safety gate**, and classifies what broke — stopping to confirm before sending
+traffic. The four stages are also standalone skills (`tmula-scaffold` / `tmula-enrich` / `tmula-run`
+/ `tmula-triage`). A guard hook blocks a run against a non-loopback host unless you opt in.
+
+**Skills docs:** overview [`docs/skills.md`](docs/skills.md) · full guide
+([English](docs/skills-guide.md) · [한국어](docs/skills-guide.ko.md)) · hands-on walkthrough
+([English](docs/skills-tutorial.md) · [한국어](docs/skills-tutorial.ko.md)).
 
 ---
 
