@@ -2,12 +2,13 @@
 
 <p align="center">
   <b>
-    A real-user traffic simulator - find the issues real users would hit,
-    without recruiting them.
+    See where your user flow breaks first under load - feed it an access log
+    and it learns the journey for you.
   </b><br>
-  Drive virtual users through an explicit <i>behavior graph</i> against your API: they move like
-  real people, deviate within the rules, and can swarm a single endpoint - surfacing bugs that
-  plain load generation and manual testing miss.
+  tmula turns real traffic into an explicit <i>behavior graph</i>, then drives virtual users
+  through it - branching, hesitating, sometimes off-script, swarming a single endpoint - and tells
+  you not just <i>that</i> something failed but <i>where in the journey</i> it failed and
+  <i>whether load or a real bug</i> caused it.
 </p>
 
 <p align="center">
@@ -31,15 +32,18 @@
 
 ## What is tmula?
 
-tmula is not trying to replace mature load-testing suites. Tools like k6, Locust, JMeter,
-Gatling, Artillery, and nGrinder already cover scripting, scenarios, distributed execution,
-dashboards, and CI in depth. **tmula** starts from a narrower angle: model the user journey
-as an explicit **behavior graph**, then send virtual traffic through that graph to see where
-the flow slows down, breaks, or concentrates.
+Most load tools answer "how many requests per second can it take?" tmula answers a different one:
+**when traffic flows the way your users actually move, where does the flow break first - and is that
+breakage load, or a real bug?**
+
+The fastest way in is an access log. Point tmula at one and it *learns* the user journey - which
+endpoints follow which, how often, how fast - as an explicit **behavior graph**: nodes = API calls,
+weighted edges = transitions, and dependency edges that are never skipped. (No log? Scaffold the
+graph from an OpenAPI spec or a HAR, or draw it by hand.) Then it sends virtual traffic through that
+graph and watches where the flow slows down, breaks, or concentrates.
 
 Virtual users follow a journey, branch, hesitate, sometimes go off-script, and pile onto
-high-traffic endpoints. In tmula that journey is represented as nodes = API calls, weighted edges =
-transitions, and dependency edges that are never skipped. It surfaces issues in three modes:
+high-traffic endpoints. It surfaces issues in three modes:
 
 - **Scenario-following** - does the happy path hold up under realistic, branching traffic?
 - **Deviation** - a configurable per-step probability that a user goes off-script: it abandons
@@ -48,12 +52,26 @@ transitions, and dependency edges that are never skipped. It surfaces issues in 
 - **Load-concentration** - aim a whole run at a single endpoint (`tmula run --get /path`), or
   spike the open-model arrival rate, and watch where it degrades.
 
+When a flow does break, tmula doesn't stop at the number. It can replay a failing session in
+isolation to tell a **load-dependent** failure from a **functional** one, then gate the run against
+a baseline so CI blocks only *new* findings.
+
+The generated traffic is a **dependency-safe approximation** of the learned distribution, not a
+replay. At each step the walker re-normalizes the learned weights over only the *eligible* next
+steps - those whose dependencies are already satisfied - and the node cap folds rare endpoints into
+bridged transitions. The shape of the journey is preserved while the hard preconditions (no checkout
+before cart) always hold: a trade tmula makes on purpose.
+
 (Payload mutation, step reordering, and time-shaped concentration profiles are built but not yet
 wired into a run - see the [Roadmap](#roadmap).)
 
 Observation is **client-side first** (status codes, latency tails, and error / availability /
 contract findings); server-side metrics are opt-in. A single Go binary with the web console baked
 in runs **locally first** and **scales out** to distributed master/worker mode for large traffic.
+
+tmula is **not** a replacement for mature load-testing suites - k6, Locust, JMeter, Gatling,
+Artillery, and nGrinder cover scripting, distributed execution, dashboards, and CI in far more
+depth. It starts from the narrower angle above, and leans on the same foundations.
 
 ---
 
