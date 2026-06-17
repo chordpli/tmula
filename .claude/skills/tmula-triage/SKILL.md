@@ -80,6 +80,14 @@ Suppress issues you already know about, with a mandatory expiry so "ignore" can'
 
 ## C. CI wiring
 
+**Supplying credentials in CI.** Never commit tokens in the scenario file. Two safe patterns:
+- **External source via env var**: set `auth.source.env: TMULA_CREDS` (and `auth.source.format: csv` or
+  `tokens`) in the scenario file, then inject the credential body from a CI secret store:
+  `TMULA_CREDS="$(cat $SECRET_FILE)" tmula run ...`. The secret is resolved in-process and never
+  crosses the wire.
+- **Env-backed source (no scenario edit needed)**: write the pool body from a CI secret into a temp file
+  and set `auth.source.file` to its path, or use the `env` form above.
+
 Exit codes make a clean gate: `0` ok · `1` run error · `2` any finding (with `--fail-on-findings` or
 `--fail-on-severity`) · `3` new findings vs `--baseline`. Pick **one** gate:
 
