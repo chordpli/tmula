@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -26,6 +29,11 @@ type bootstrapAuth struct {
 	// prewarmConcurrency bounds the provisioning burst: min(RateCap.MaxConcurrency,
 	// bootstrapMaxConcurrency), always at least 1.
 	prewarmConcurrency int
+	// keepAccounts records the run's opt-out: when true the provider was built with
+	// no teardown func, so its Teardown is a cache-clearing no-op and the accounts
+	// are intentionally left in place (for a later reproduce under the same live
+	// principals).
+	keepAccounts bool
 }
 
 // bootstrapAuthFor builds the bootstrap-signup provider for a CredBootstrapSignup
@@ -44,7 +52,8 @@ func (s *Server) bootstrapAuthFor(spec RunSpec, guard *safety.Guard) (*bootstrap
 		// error reaching the runtime with no flow to provision from.
 		return nil, fmt.Errorf("api: bootstrap run has no signup flow to provision from")
 	}
-	flow, err := compileSignupFlow(*spec.CredentialPool.SignupFlow)
+	sf := *spec.CredentialPool.SignupFlow
+	flow, err := compileSignupFlow(sf)
 	if err != nil {
 		return nil, fmt.Errorf("api: compile signup flow: %w", err)
 	}
@@ -61,9 +70,59 @@ func (s *Server) bootstrapAuthFor(spec RunSpec, guard *safety.Guard) (*bootstrap
 	if err != nil {
 		return nil, fmt.Errorf("api: build bootstrap provider: %w", err)
 	}
+	// Wire the teardown transport when the flow declares a teardown journey and the
+	// run did not opt out with keep-accounts. A nil teardown makes the provider's
+	// Teardown a cache-clearing no-op (the keep-accounts path), which is exactly the
+	// gating-safety contract: a runnable bootstrap pool either has a teardown or an
+	// explicit keep-accounts opt-out (enforced by Validate on the run path).
+	if sf.HasTeardown() && !spec.CredentialPool.KeepAccounts {
+		teardown, err := s.teardownFuncFor(spec, sf, guard)
+		if err != nil {
+			return nil, fmt.Errorf("api: compile teardown flow: %w", err)
+		}
+		provider.SetTeardown(teardown)
+	}
 	return &bootstrapAuth{
 		provider:           provider,
 		prewarmConcurrency: effectivePrewarmConcurrency(spec.TargetEnv.RateCap.MaxConcurrency),
+		keepAccounts:       spec.CredentialPool.KeepAccounts,
+	}, nil
+}
+
+// teardownFuncFor compiles a signup flow's teardown journey into an auth.TeardownFunc:
+// each call walks the teardown flow once through the findings-isolated RunOnce,
+// rendering the provisioned account's subject as {{.subject}} (and its index as
+// {{.userIndex}}), so a "DELETE /accounts/{{.subject}}" removes the exact account
+// that was provisioned. The teardown runner is guarded like the run and the signup,
+// and carries no result/event sink, so deprovision traffic produces zero findings.
+func (s *Server) teardownFuncFor(spec RunSpec, sf domain.SignupFlow, guard *safety.Guard) (auth.TeardownFunc, error) {
+	graph, templates, err := compileSignupSteps(sf.Teardown, "teardown")
+	if err != nil {
+		return nil, err
+	}
+	start := sf.TeardownStart
+	if start == "" {
+		start = sf.Teardown[0].ID
+	}
+	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, templates, load.WithGuard(guard))
+	nodeTmpl, err := runner.ResolveNodeTemplates(graph)
+	if err != nil {
+		return nil, fmt.Errorf("api: compile teardown flow: %w", err)
+	}
+	maxSteps := len(sf.Teardown)
+	return func(ctx context.Context, userIndex int, cred domain.Credential) error {
+		user := load.VirtualUser{
+			ID:   "teardown-" + strconv.Itoa(userIndex),
+			Cred: cred,
+			Vars: map[string]string{
+				"userIndex": strconv.Itoa(userIndex),
+				"subject":   cred.Subject,
+			},
+		}
+		// The teardown walk is findings-isolated (RunOnce touches no sink) and seeded
+		// off the run seed + index, mirroring the signup walk for the same identity.
+		_, err := runner.RunOnce(ctx, graph, nodeTmpl, start, maxSteps, user, spec.Seed+int64(userIndex))
+		return err
 	}, nil
 }
 
@@ -123,6 +182,42 @@ func (b *bootstrapAuth) Prewarm(ctx context.Context, n int) error {
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// teardownBaseTimeout and teardownPerAccount scale the deprovision budget with the
+// pool size: a fresh context with a timeout of base + perAccount*n, capped, so a
+// large pool gets enough time to tear down without an unbounded hang on a wedged
+// teardown endpoint.
+const (
+	teardownBaseTimeout = 30 * time.Second
+	teardownPerAccount  = 50 * time.Millisecond
+	teardownMaxTimeout  = 10 * time.Minute
+)
+
+// runTeardown deprovisions the run's bootstrap accounts. It is invoked from a
+// deferred call on the run-execution goroutine AFTER the run finishes (or is
+// killed), and it runs Teardown on a FRESH context.Background() — never the run
+// context — with a timeout scaled to the pool size, so a killed or timed-out run
+// still deprovisions every account it created. A keep-accounts run skips it
+// entirely (the provider has no teardown func anyway, but skip avoids the no-op
+// churn). Teardown is best-effort: an orphaned account is logged at ERROR inside
+// the provider and the aggregated error is logged here, never propagated into the
+// run's status — the load result stands on its own.
+func (b *bootstrapAuth) runTeardown(runID domain.ID, poolSize int) {
+	if b == nil || b.keepAccounts {
+		return
+	}
+	timeout := teardownBaseTimeout + time.Duration(poolSize)*teardownPerAccount
+	if timeout > teardownMaxTimeout {
+		timeout = teardownMaxTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := b.provider.Teardown(ctx); err != nil {
+		// Best-effort: orphans are already logged per-account at ERROR by the
+		// provider; surface the aggregate here too, but never fail the run for it.
+		slog.Error("bootstrap teardown incomplete", "run", runID, "err", err)
+	}
 }
 
 // compileSignupFlow turns a declarative domain.SignupFlow into a runnable
