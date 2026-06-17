@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -17,10 +18,18 @@ import (
 type loginAuth struct {
 	provider *auth.LoginProvider
 	// shared is true for the client_credentials scope: every user shares one token
-	// (cache key 0) and one holder. Per-user mints one token per index. The shared
-	// holder itself (one pointer handed to every session) is wired in the shared
-	// scope step; here per-user is the path.
+	// (cache key 0) and one holder. Per-user mints one token per index.
 	shared bool
+
+	// sharedMu guards the lazy construction of the single shared holder. In the
+	// shared scope every seed() returns the SAME holder POINTER (and the same
+	// refresh closure bound to it), built exactly once here, so one mint serves all
+	// sessions and one refresh rotates the token for all of them. It is a pointer,
+	// never copied — copying it would give each session an independent token box and
+	// silently break the shared (client_credentials) semantics.
+	sharedMu      sync.Mutex
+	sharedHolder  load.CredentialHolder
+	sharedRefresh load.RefreshFunc
 }
 
 // loginAuthFor builds the login provider for a CredLogin run by compiling the
@@ -57,14 +66,18 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 	if err != nil {
 		return nil, fmt.Errorf("api: compile login flow: %w", err)
 	}
-	provider, err := auth.NewLoginProvider(tokenFunc)
+	return newLoginAuthFromToken(tokenFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared)
+}
+
+// newLoginAuthFromToken builds a loginAuth over a token func and scope. It is the
+// single construction point for the provider, so the run path and tests build the
+// same seam.
+func newLoginAuthFromToken(token auth.TokenFunc, shared bool) (*loginAuth, error) {
+	provider, err := auth.NewLoginProvider(token)
 	if err != nil {
 		return nil, fmt.Errorf("api: build login provider: %w", err)
 	}
-	return &loginAuth{
-		provider: provider,
-		shared:   spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared,
-	}, nil
+	return &loginAuth{provider: provider, shared: shared}, nil
 }
 
 // cacheKey maps a user/arrival index onto the login provider's cache key. Per-user
@@ -88,6 +101,9 @@ func (l *loginAuth) cacheKey(userIndex int) int {
 // memoized), so a single refresh reaches every session — see sharedHolder. The
 // holder is created here, above the runner, exactly once per principal.
 func (l *loginAuth) seed(ctx context.Context, userIndex int) (load.CredentialHolder, load.RefreshFunc, error) {
+	if l.shared {
+		return l.sharedSeed(ctx)
+	}
 	key := l.cacheKey(userIndex)
 	cred, err := l.provider.Acquire(ctx, key)
 	if err != nil {
@@ -96,6 +112,26 @@ func (l *loginAuth) seed(ctx context.Context, userIndex int) (load.CredentialHol
 	holder := load.NewCredentialHolder(cred)
 	refresh := l.refreshFunc(key, holder)
 	return holder, refresh, nil
+}
+
+// sharedSeed returns the single shared holder (and its refresh), building it once
+// on first call. Every session that seeds in the shared scope receives the SAME
+// holder pointer, so one client_credentials token is minted and one refresh
+// rotates it for all of them.
+func (l *loginAuth) sharedSeed(ctx context.Context) (load.CredentialHolder, load.RefreshFunc, error) {
+	l.sharedMu.Lock()
+	defer l.sharedMu.Unlock()
+	if l.sharedHolder != nil {
+		return l.sharedHolder, l.sharedRefresh, nil
+	}
+	cred, err := l.provider.Acquire(ctx, 0) // shared cache key is always 0
+	if err != nil {
+		return nil, nil, err
+	}
+	holder := load.NewCredentialHolder(cred)
+	l.sharedHolder = holder
+	l.sharedRefresh = l.refreshFunc(0, holder)
+	return l.sharedHolder, l.sharedRefresh, nil
 }
 
 // refreshFunc builds the per-principal refresh closure: it re-acquires the token

@@ -259,6 +259,33 @@ func TestReproduceLoginIsRefreshFree(t *testing.T) {
 	}
 }
 
+// TestSharedLoginRunMintsOneToken drives a closed shared-scope login run of
+// several users and asserts every protected request carried the SAME minted token
+// and the login endpoint was hit exactly once (one client_credentials grant for the
+// whole run).
+func TestSharedLoginRunMintsOneToken(t *testing.T) {
+	sut, st := newLoginSUT(0)
+	defer sut.Close()
+
+	rep := runInProcess(t, specLogin(sut.URL, 4, domain.LoginShared), 5*time.Second)
+	if rep.Run.Status != domain.RunCompleted {
+		t.Fatalf("status = %q, want completed", rep.Run.Status)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.minted != 1 {
+		t.Errorf("shared scope minted %d tokens, want 1 (one client_credentials grant)", st.minted)
+	}
+	// Every protected request carried the one shared token.
+	distinct := map[string]struct{}{}
+	for _, tok := range st.authSeen {
+		distinct[tok] = struct{}{}
+	}
+	if len(distinct) != 1 {
+		t.Errorf("shared run sent %d distinct tokens, want 1: %v", len(distinct), distinct)
+	}
+}
+
 func waitTerminal(t *testing.T, srv *Server, runID domain.ID, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
