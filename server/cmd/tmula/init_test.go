@@ -145,6 +145,47 @@ func TestImportScenarioNoteReportsFormatAndSkippedLines(t *testing.T) {
 	}
 }
 
+// TestImportScenarioNoteFlagsDerivedAuth covers the auth on-ramp: when an OpenAPI
+// import derives an auth block (here, an oauth2 password flow), `tmula init` must
+// tell the user it wired auth and that they only need to fill the REPLACE_ME
+// secret — so the "user authors nothing but the secret" promise is visible.
+func TestImportScenarioNoteFlagsDerivedAuth(t *testing.T) {
+	const doc = "openapi: 3.0.0\n" +
+		"servers:\n  - url: http://svc.test\n" +
+		"components:\n  securitySchemes:\n    oauth:\n      type: oauth2\n      flows:\n        password:\n          tokenUrl: /oauth/token\n" +
+		"security:\n  - oauth: []\n" +
+		"paths:\n  /items:\n    get:\n      operationId: listItems\n"
+	sc, note, err := importScenario([]byte(doc), "openapi", "api.yaml")
+	if err != nil {
+		t.Fatalf("importScenario: %v", err)
+	}
+	if sc.Auth == nil {
+		t.Fatal("expected a derived auth block")
+	}
+	if !strings.Contains(note, "auth") {
+		t.Errorf("note should mention the derived auth, got: %q", note)
+	}
+	if !strings.Contains(note, "REPLACE_ME") {
+		t.Errorf("note should tell the user to fill the REPLACE_ME secret, got: %q", note)
+	}
+}
+
+// TestImportScenarioNoteSilentWithoutAuth keeps the no-auth path quiet: an
+// OpenAPI doc with no security scheme produces no auth note (backward compatible).
+func TestImportScenarioNoteSilentWithoutAuth(t *testing.T) {
+	const doc = "openapi: 3.0.0\nservers:\n  - url: http://svc.test\npaths:\n  /items:\n    get: {}\n"
+	sc, note, err := importScenario([]byte(doc), "openapi", "api.yaml")
+	if err != nil {
+		t.Fatalf("importScenario: %v", err)
+	}
+	if sc.Auth != nil {
+		t.Fatalf("expected no auth, got %+v", sc.Auth)
+	}
+	if note != "" {
+		t.Errorf("no-auth import should emit no note, got: %q", note)
+	}
+}
+
 func TestDetectFormat(t *testing.T) {
 	cases := []struct {
 		format, name string
