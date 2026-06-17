@@ -123,3 +123,31 @@ func TestValidateCredentialPoolInvariant(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateRejectsUnresolvedSource pins the D1 contract: a credential pool
+// that still carries a Source (not yet resolved into Entries) is rejected by the
+// run path. The CLI resolves a source into entries at expand time, so a spec
+// reaching a run must carry real entries; an unresolved source on the wire would
+// mean the server was asked to read a client-chosen path, which it must not do.
+func TestValidateRejectsUnresolvedSource(t *testing.T) {
+	s := minimalSpec("http://127.0.0.1:1")
+	s.CredentialPool = &domain.CredentialPool{
+		ID:       "p",
+		Strategy: domain.CredPool,
+		Source:   &domain.CredentialSourceRef{File: "creds.csv", Format: "csv"},
+	}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("a pool carrying an unresolved source must be rejected by the run path")
+	}
+	if !strings.Contains(err.Error(), "resolved") {
+		t.Errorf("rejection should explain the source must be resolved, got: %v", err)
+	}
+
+	// A resolved pool (entries, no source) is still accepted.
+	ok := minimalSpec("http://127.0.0.1:1")
+	ok.CredentialPool = twoEntryPool()
+	if err := ok.Validate(); err != nil {
+		t.Errorf("a resolved entries pool must still validate: %v", err)
+	}
+}

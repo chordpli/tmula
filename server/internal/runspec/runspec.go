@@ -194,6 +194,16 @@ func (r RunSpec) validateCredentialPool() error {
 	if err := r.CredentialPool.Validate(); err != nil {
 		return fmt.Errorf("api: %w", err)
 	}
+	// D1 CONTRACT LINE: the run path rejects a pool that still carries an
+	// unresolved external source. The CLI resolves auth.source into entries at
+	// scenariofile.Expand time, so a spec reaching a run must carry real entries.
+	// This guard keeps the server from ever reading a client-chosen path off the
+	// wire. A later phase (P3, distributed auth) will narrow this to allow a
+	// server-side, allowlisted file/env source for distributed workers; until
+	// then any present source is refused here.
+	if r.CredentialPool.Source != nil {
+		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; distributed support is a follow-up)")
+	}
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
 		// Follow-up: the bootstrap provider exists but needs a signup transport this
 		// run path does not yet wire. Refuse rather than run unauthenticated.

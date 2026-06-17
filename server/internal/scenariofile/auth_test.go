@@ -1,13 +1,16 @@
 package scenariofile
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
+	"github.com/chordpli/tmula/server/internal/runspec"
 )
 
 const authYAML = `
@@ -179,6 +182,95 @@ auth:
 	if strings.Contains(string(b), "tok-alice") || strings.Contains(string(b), "tok-bob") {
 		t.Errorf("resolved spec leaked a secret: %s", b)
 	}
+}
+
+// TestExpandAuthSourceWrapAroundDeterminism is the critic's reproduce-determinism
+// guard: a file source with N rows, driven by a pool provider over K>N users,
+// hands out exactly entries[i%N] — identical to the equivalent inline users
+// block. It asserts the assignment for i<N AND i>=N, so the wrap-around (the
+// part reproduce relies on) is pinned, not just the first lap.
+func TestExpandAuthSourceWrapAroundDeterminism(t *testing.T) {
+	const csv = "subject,token\nu0,tok-0\nu1,tok-1\nu2,tok-2\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "creds.csv"), []byte(csv), 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+	const sourceYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  source:
+    file: creds.csv
+    format: csv
+`
+	const inlineYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  users:
+    - subject: u0
+      token: tok-0
+    - subject: u1
+      token: tok-1
+    - subject: u2
+      token: tok-2
+`
+	sourceSpec := mustExpandFrom(t, sourceYAML, dir)
+	inlineSpec := mustExpandFrom(t, inlineYAML, dir)
+
+	srcProv, err := auth.NewProvider(*sourceSpec.CredentialPool, nil)
+	if err != nil {
+		t.Fatalf("source provider: %v", err)
+	}
+	inProv, err := auth.NewProvider(*inlineSpec.CredentialPool, nil)
+	if err != nil {
+		t.Fatalf("inline provider: %v", err)
+	}
+
+	const n = 3
+	// Drive K = 2N+1 users so the comparison crosses two wrap boundaries.
+	for i := 0; i < 2*n+1; i++ {
+		sc, err := srcProv.Acquire(context.Background(), i)
+		if err != nil {
+			t.Fatalf("source Acquire(%d): %v", i, err)
+		}
+		ic, err := inProv.Acquire(context.Background(), i)
+		if err != nil {
+			t.Fatalf("inline Acquire(%d): %v", i, err)
+		}
+		// Identical to the inline pool...
+		if sc != ic {
+			t.Errorf("Acquire(%d): source=%+v inline=%+v differ", i, sc, ic)
+		}
+		// ...and exactly entries[i%N], for i<N and i>=N alike.
+		wantSubject := []string{"u0", "u1", "u2"}[i%n]
+		wantSecret := []string{"tok-0", "tok-1", "tok-2"}[i%n]
+		if sc.Subject != wantSubject || sc.Secret != wantSecret {
+			t.Errorf("Acquire(%d) = %+v, want entries[%d%%%d] = %s/%s", i, sc, i, n, wantSubject, wantSecret)
+		}
+	}
+}
+
+// mustExpandFrom parses and expands a scenario document, failing the test on any
+// error. It returns the expanded spec.
+func mustExpandFrom(t *testing.T, doc, dir string) runspec.RunSpec {
+	t.Helper()
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := ExpandFrom(s, dir)
+	if err != nil {
+		t.Fatalf("ExpandFrom: %v", err)
+	}
+	if spec.CredentialPool == nil {
+		t.Fatal("expanded spec has no credential pool")
+	}
+	return spec
 }
 
 // TestExpandAuthEnvSource resolves an env-backed auth source into Entries.
