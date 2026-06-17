@@ -208,12 +208,12 @@ const en: Record<string, string> = {
     'How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts.',
   'auth.mode.none': 'None',
   'auth.mode.none.desc': 'Run anonymously — no credentials are sent.',
-  'auth.mode.pool': 'Token pool',
-  'auth.mode.pool.desc': 'Paste or upload pre-issued tokens; each user gets one.',
-  'auth.mode.login': 'Login (mint a token)',
-  'auth.mode.login.desc': 'Walk a login flow once and capture the token from its response.',
-  'auth.mode.bootstrap': 'Generate test accounts',
-  'auth.mode.bootstrap.desc': 'Sign up a real account per user, then tear it down.',
+  'auth.mode.pool': 'Paste a token / account list',
+  'auth.mode.pool.desc': 'Easiest. Paste one bearer token, or a list of pre-issued tokens — one per user.',
+  'auth.mode.login': 'Login (auto / simple)',
+  'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
+  'auth.mode.bootstrap': 'Create test accounts',
+  'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
 
   // Auth · token pool
   'auth.pool.file': 'Upload a file',
