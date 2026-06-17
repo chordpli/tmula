@@ -184,6 +184,21 @@ type CredentialPool struct {
 	// existed.
 	Source          *CredentialSourceRef `json:"source,omitempty"`
 	BootstrapFlowID *ID                  `json:"bootstrapFlowId,omitempty"`
+	// SignupFlow is the declarative bootstrap-signup journey (signup steps + a
+	// capture mapping + an optional teardown journey) a CredBootstrapSignup pool
+	// walks once per virtual user to provision a real account and capture its token.
+	// It is transport-free; the orchestrator compiles it to a graph + templates at
+	// provider-build time. Required (in place of the legacy BootstrapFlowID) for a
+	// runnable bootstrap pool; ignored by other strategies. omitempty keeps a
+	// non-bootstrap pool serializing byte-identically.
+	SignupFlow *SignupFlow `json:"signupFlow,omitempty"`
+	// KeepAccounts opts a bootstrap-signup run out of teardown: the provisioned
+	// accounts are left in place after the run instead of being deprovisioned. It is
+	// the ONLY escape from the gating-safety rule that a bootstrap pool without a
+	// teardown flow is rejected — and it lets a kept-accounts run reproduce later
+	// under the same still-live principals. Ignored by other strategies. omitempty
+	// keeps a non-bootstrap pool serializing byte-identically.
+	KeepAccounts bool `json:"keepAccounts,omitempty"`
 	// LoginFlowID names the standalone login flow a CredLogin pool walks to mint a
 	// token (POST a login/token endpoint, capture the token). It is a declarative
 	// reference, not a node in the main scenario graph, so the simulated traffic
@@ -220,8 +235,21 @@ func (c CredentialPool) Validate() error {
 			}
 		}
 	}
-	if c.Strategy == CredBootstrapSignup && (c.BootstrapFlowID == nil || *c.BootstrapFlowID == "") {
-		return fmt.Errorf("credential pool %q: bootstrap-signup needs a non-empty bootstrapFlowId", c.ID)
+	if c.Strategy == CredBootstrapSignup {
+		// A runnable bootstrap pool carries a declarative SignupFlow (the form the
+		// orchestrator compiles and walks); the legacy BootstrapFlowID is still
+		// accepted as a bare reference. Require at least one, and validate a present
+		// SignupFlow's shape (a resolvable token/secret capture above all).
+		hasFlow := c.SignupFlow != nil
+		hasLegacyID := c.BootstrapFlowID != nil && *c.BootstrapFlowID != ""
+		if !hasFlow && !hasLegacyID {
+			return fmt.Errorf("credential pool %q: bootstrap-signup needs a signupFlow (or a bootstrapFlowId)", c.ID)
+		}
+		if hasFlow {
+			if err := c.SignupFlow.Validate(); err != nil {
+				return fmt.Errorf("credential pool %q: %w", c.ID, err)
+			}
+		}
 	}
 	if c.Strategy == CredLogin {
 		if c.LoginFlowID == nil || *c.LoginFlowID == "" {
