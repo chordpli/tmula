@@ -118,6 +118,7 @@ const en: Record<string, string> = {
   'aria.thinkMax': 'Think time maximum (ms)',
   'field.personas': 'Personas',
   'badge.advanced': 'advanced',
+  'badge.optional': 'optional',
   'help.personas':
     'Optional JSON mix of weighted user types, each with its own entry node and pacing. Leave blank for one uniform population.',
 
@@ -243,8 +244,36 @@ const en: Record<string, string> = {
   'auth.login.startHint': 'The login flow node every mint begins at.',
   'auth.login.scope': 'Scope',
   'auth.login.scopeHint': 'Per-user mints one token each; shared mints one for everyone (client_credentials).',
+  'auth.login.scope.tip':
+    'Per-user: every virtual user logs in and gets its OWN token — and with a credential list below, each logs in as a different account. Shared: tmula logs in ONCE (client_credentials) and every virtual user reuses that single token. Pick per-user to simulate many real users; shared to model one service principal.',
   'auth.login.scope.perUser': 'Per user — one token per virtual user',
   'auth.login.scope.shared': 'Shared — one token for all (client_credentials)',
+  'auth.login.body': 'Login body',
+  'auth.login.bodyHint': 'The request body tmula sends to log in. Use {username}/{password} markers, or template a credential-list row.',
+  'auth.login.body.tip':
+    'The body sent to your login URL. For a single identity, put your credentials inline (or use the {username}/{password} markers). To log in many users, supply a credential list below and reference each row with {{.username}}/{{.password}}.',
+  'auth.login.body.multiTip':
+    'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
+  'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
+
+  // Auth · login · "log in multiple users" credential list (P8)
+  'auth.login.cred.toggle': 'Log in multiple users (credential list)',
+  'auth.login.cred.hint':
+    'Optional. Paste a username,password per account so each virtual user logs in as a different account. Leave it empty to log everyone in with the single body above.',
+  'auth.login.cred.file': 'Upload a file',
+  'auth.login.cred.fileHint': 'A CSV (username,password header) or JSONL ({username,password} per line).',
+  'auth.login.cred.formatHint': 'How the pasted text and file are encoded.',
+  'auth.login.cred.format.csv': 'CSV (username,password)',
+  'auth.login.cred.format.jsonl': 'JSONL ({username,password})',
+  'auth.login.cred.paste': 'Paste credentials',
+  'auth.login.cred.pasteHint':
+    'Parsed in your browser into login inputs — no file path is ever sent to the server. Each row becomes one account the login body templates in.',
+  'auth.login.cred.tip':
+    'These are login INPUTS — a username and password per account — not pre-issued tokens. tmula logs virtual user i in with row i (wrapping past the end), exposing the row to the login body as {{.username}} and {{.password}}. Parsed entirely in your browser; nothing but the resolved rows is ever sent.',
+  'auth.login.cred.placeholder.csv': 'username,password\nalice,pw-alice\nbob,pw-bob',
+  'auth.login.cred.placeholder.jsonl': '{"username":"alice","password":"pw-alice"}\n{"username":"bob","password":"pw-bob"}',
+  'auth.login.cred.count': '{count} account(s) parsed',
+
   'auth.login.graph': 'Login graph',
   'auth.login.graphHint': 'The login journey, authored like the scenario graph — a sibling, never a node in it.',
   'auth.login.graph.tip':
@@ -280,6 +309,9 @@ const en: Record<string, string> = {
   'doctor.authPoolInvalid': 'The pasted credentials could not be parsed: {error}',
   'doctor.authLoginGraphJson': 'Login graph JSON is invalid: {error}',
   'doctor.authLoginTemplatesJson': 'Login templates JSON is invalid: {error}',
+  'doctor.authLoginCredInvalid': 'The login credential list could not be parsed: {error}',
+  'doctor.authLoginCredUnused':
+    'A login credential list is supplied, but the login body never references {{.username}}/{{.password}} — every virtual user would log in with the same body. Template the row into the body to log them in as different accounts.',
   'doctor.authBootstrapUnconfirmed':
     'Generating accounts requires confirming the target is non-production before it can run.',
   'doctor.authBootstrapStepsJson': 'Signup steps JSON is invalid: {error}',
@@ -516,6 +548,7 @@ const ko: Record<string, string> = {
   'aria.thinkMax': '생각 시간 최대값 (ms)',
   'field.personas': '페르소나',
   'badge.advanced': '고급',
+  'badge.optional': '선택',
   'help.personas':
     '가중치가 있는 사용자 유형을 JSON으로 섞어 정의합니다(선택). 유형마다 시작 노드와 속도를 따로 가질 수 있습니다. 비워 두면 단일 균일 집단으로 실행합니다.',
 
@@ -639,8 +672,36 @@ const ko: Record<string, string> = {
   'auth.login.startHint': '토큰 발급이 시작되는 로그인 흐름 노드입니다.',
   'auth.login.scope': '범위',
   'auth.login.scopeHint': '사용자별은 각자 하나씩, 공유는 전체가 하나를 공유합니다(client_credentials).',
+  'auth.login.scope.tip':
+    '사용자별: 모든 가상 사용자가 로그인해 각자 토큰을 받습니다 — 아래 자격 증명 목록을 함께 주면 각자 다른 계정으로 로그인합니다. 공유: tmula가 한 번만 로그인하고(client_credentials) 모든 가상 사용자가 그 토큰 하나를 공유합니다. 여러 실제 사용자를 흉내 내려면 사용자별, 단일 서비스 주체를 모델링하려면 공유를 고르세요.',
   'auth.login.scope.perUser': '사용자별 — 가상 사용자마다 토큰 1개',
   'auth.login.scope.shared': '공유 — 전체가 토큰 1개 (client_credentials)',
+  'auth.login.body': '로그인 본문',
+  'auth.login.bodyHint': '로그인할 때 tmula가 보내는 요청 본문입니다. {username}/{password} 마커를 쓰거나, 자격 증명 목록의 행을 템플릿으로 넣으세요.',
+  'auth.login.body.tip':
+    '로그인 URL로 보내는 본문입니다. 단일 신원이면 자격 증명을 직접 넣거나 {username}/{password} 마커를 쓰세요. 여러 사용자를 로그인시키려면 아래에 자격 증명 목록을 주고, {{.username}}/{{.password}}로 각 행을 참조하세요.',
+  'auth.login.body.multiTip':
+    '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
+  'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
+
+  // Auth · 로그인 · "여러 사용자 로그인" 자격 증명 목록 (P8)
+  'auth.login.cred.toggle': '여러 사용자 로그인 (자격 증명 목록)',
+  'auth.login.cred.hint':
+    '선택. 계정마다 username,password를 붙여넣으면 각 가상 사용자가 다른 계정으로 로그인합니다. 비워 두면 위 단일 본문으로 모두 로그인합니다.',
+  'auth.login.cred.file': '파일 올리기',
+  'auth.login.cred.fileHint': 'CSV(username,password 헤더) 또는 JSONL(줄마다 {username,password}).',
+  'auth.login.cred.formatHint': '붙여넣은 텍스트와 파일의 인코딩 방식입니다.',
+  'auth.login.cred.format.csv': 'CSV (username,password)',
+  'auth.login.cred.format.jsonl': 'JSONL ({username,password})',
+  'auth.login.cred.paste': '자격 증명 붙여넣기',
+  'auth.login.cred.pasteHint':
+    '브라우저에서 로그인 입력값으로 파싱됩니다 — 파일 경로는 서버로 전송되지 않습니다. 각 행이 로그인 본문이 채워 넣는 하나의 계정이 됩니다.',
+  'auth.login.cred.tip':
+    '이것은 로그인 입력값입니다 — 계정마다 username과 password — 미리 발급한 토큰이 아닙니다. tmula는 가상 사용자 i를 i번째 행으로 로그인시키며(끝을 지나면 순환), 그 행을 로그인 본문에 {{.username}}·{{.password}}로 노출합니다. 전부 브라우저에서 파싱되며, 변환된 행 외에는 아무것도 전송되지 않습니다.',
+  'auth.login.cred.placeholder.csv': 'username,password\nalice,pw-alice\nbob,pw-bob',
+  'auth.login.cred.placeholder.jsonl': '{"username":"alice","password":"pw-alice"}\n{"username":"bob","password":"pw-bob"}',
+  'auth.login.cred.count': '계정 {count}개 파싱됨',
+
   'auth.login.graph': '로그인 그래프',
   'auth.login.graphHint': '로그인 여정입니다. 시나리오 그래프처럼 작성하며, 본 그래프의 노드가 아닌 별도 그래프입니다.',
   'auth.login.graph.tip':
@@ -676,6 +737,9 @@ const ko: Record<string, string> = {
   'doctor.authPoolInvalid': '붙여넣은 자격 증명을 파싱할 수 없습니다: {error}',
   'doctor.authLoginGraphJson': '로그인 그래프 JSON이 올바르지 않습니다: {error}',
   'doctor.authLoginTemplatesJson': '로그인 템플릿 JSON이 올바르지 않습니다: {error}',
+  'doctor.authLoginCredInvalid': '로그인 자격 증명 목록을 파싱할 수 없습니다: {error}',
+  'doctor.authLoginCredUnused':
+    '로그인 자격 증명 목록을 주었지만 로그인 본문이 {{.username}}/{{.password}}를 참조하지 않습니다 — 모든 가상 사용자가 같은 본문으로 로그인하게 됩니다. 본문에 행을 템플릿으로 넣어 서로 다른 계정으로 로그인시키세요.',
   'doctor.authBootstrapUnconfirmed':
     '계정 생성은 실행 전에 대상이 비프로덕션임을 확인해야 합니다.',
   'doctor.authBootstrapStepsJson': '가입 단계 JSON이 올바르지 않습니다: {error}',

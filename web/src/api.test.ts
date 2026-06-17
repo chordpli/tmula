@@ -36,6 +36,7 @@ import {
   outcomeRates,
   outcomeSummary,
   parseCredentials,
+  parseLoginCredentials,
   parseHeatFrame,
   parseLatencyFrame,
   parseAllowlist,
@@ -342,6 +343,45 @@ describe('parseCredentials', () => {
   })
 })
 
+describe('parseLoginCredentials (log in multiple users)', () => {
+  it('parses CSV username,password rows into { subject, token } login inputs', () => {
+    const out = parseLoginCredentials('csv', 'username,password\nalice,pw-a\nbob,pw-b\n')
+    // subject = username, token = password (login INPUTS, not pre-issued tokens).
+    expect(out).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+  })
+
+  it('reads the CSV columns by header name regardless of order', () => {
+    const out = parseLoginCredentials('csv', 'password,username\npw-a,alice')
+    expect(out).toEqual([{ subject: 'alice', token: 'pw-a' }])
+  })
+
+  it('throws when the CSV header lacks a username or password column', () => {
+    expect(() => parseLoginCredentials('csv', 'user,pass\nalice,pw')).toThrow(/username.*password|password.*username/i)
+  })
+
+  it('parses JSONL {username,password} objects into login inputs', () => {
+    const body = '{"username":"alice","password":"pw-a"}\n{"username":"bob","password":"pw-b"}\n'
+    expect(parseLoginCredentials('jsonl', body)).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+  })
+
+  it('throws when a JSONL row is missing its username or password', () => {
+    expect(() => parseLoginCredentials('jsonl', '{"username":"alice"}')).toThrow(/password/i)
+    expect(() => parseLoginCredentials('jsonl', '{"password":"pw"}')).toThrow(/username/i)
+    expect(() => parseLoginCredentials('jsonl', 'not json')).toThrow()
+  })
+
+  it('throws on an empty body for both formats', () => {
+    expect(() => parseLoginCredentials('csv', '   ')).toThrow()
+    expect(() => parseLoginCredentials('jsonl', '   ')).toThrow()
+  })
+})
+
 describe('parseSignupSteps', () => {
   it('parses a well-formed signup step array', () => {
     const steps = parseSignupSteps('[{"id":"signup","method":"POST","path":"/signup"}]', 'signup')
@@ -435,6 +475,60 @@ describe('buildAuth', () => {
     expect(build!.authStrategy).toBe('login')
     // No tokenVar is sent, so the backend auto-detects the token from the response.
     expect(build!.loginFlow?.tokenVar).toBeUndefined()
+  })
+
+  it('attaches credentialPool.entries from a CSV login credential list (multi-user)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+    })
+    expect(build!.credentialPool.strategy).toBe('login')
+    // Each row becomes { subject: username, token: password } so each virtual user logs
+    // in as a different account; the backend reads entries[i % N].
+    expect(build!.credentialPool.entries).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+    // The login flow itself still rides at the top level (the body templates the rows in).
+    expect(build!.loginFlow).toBeDefined()
+  })
+
+  it('attaches credentialPool.entries from a JSONL login credential list (multi-user)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'jsonl',
+      loginCredText: '{"username":"alice","password":"pw-a"}',
+    })
+    expect(build!.credentialPool.entries).toEqual([{ subject: 'alice', token: 'pw-a' }])
+  })
+
+  it('omits entries when the login credential list is empty (single-identity, unchanged)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredText: '   ', // blank → single-identity login
+    })
+    expect(build!.credentialPool.strategy).toBe('login')
+    // No entries: the run mints ONE identity from the login body, exactly as before.
+    expect(build!.credentialPool.entries).toBeUndefined()
+  })
+
+  it('propagates a malformed login credential list as a throw (fail-fast)', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'login',
+        loginUrlPath: '/login',
+        loginCredFormat: 'csv',
+        loginCredText: 'user,pass\nalice,pw', // wrong header names
+      }),
+    ).toThrow(/username|password/i)
   })
 
   it('builds a bootstrap pool with a signup flow, capture, teardown and keepAccounts', () => {
@@ -536,6 +630,23 @@ describe('buildRunSpec auth wiring', () => {
     expect(spec.credentialPool?.loginFlowId).toBe('login')
     expect(spec.loginFlow?.tokenVar).toBe('at')
     expect(spec.loginFlow?.start).toBe('login')
+  })
+
+  it('carries the multi-user login credential list through to the spec entries', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+    })
+    expect(expAuthStrategy(spec)).toBe('login')
+    expect(spec.credentialPool?.entries).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+    // The login flow still rides at the top level alongside the pool.
+    expect(spec.loginFlow).toBeDefined()
   })
 
   it('attaches a bootstrap credentialPool and the bootstrap authStrategy (confirmed)', () => {

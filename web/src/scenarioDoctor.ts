@@ -1,8 +1,10 @@
 import {
   allowlistMatchesHost,
   hostFromBaseUrl,
+  loginBodyReferencesRow,
   parseAllowlist,
   parseCredentials,
+  parseLoginCredentials,
   parseSegments,
   parseSignupSteps,
   type ExperimentForm,
@@ -122,6 +124,23 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
         issues.push(
           issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
         )
+      }
+    }
+    // "Log in multiple users": when a credential list is supplied, validate it parses
+    // (a malformed list cannot be sent) and warn when the login body never references a
+    // row — every virtual user would then log in with the same literal body, defeating
+    // the list. The body warning only applies to the simple mini-form, where the body is
+    // the editable template; the advanced mode authors the body inside raw templates.
+    if (form.loginCredText.trim()) {
+      let credsOk = false
+      try {
+        parseLoginCredentials(form.loginCredFormat, form.loginCredText)
+        credsOk = true
+      } catch (e) {
+        issues.push(issue('error', 'auth-login-cred-invalid', 'doctor.authLoginCredInvalid', { error: messageOf(e) }))
+      }
+      if (credsOk && form.loginMode === 'simple' && !loginBodyReferencesRow(form.loginBodyTemplate)) {
+        issues.push(issue('warning', 'auth-login-cred-unused', 'doctor.authLoginCredUnused'))
       }
     }
   } else if (form.authMode === 'bootstrap') {

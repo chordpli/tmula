@@ -56,6 +56,16 @@ export interface ExperimentForm {
   loginSubjectVar: string // captured variable that becomes the subject (optional)
   loginScope: LoginScope // 'per-user' (default) or 'shared' (client_credentials)
 
+  // "Log in multiple users" (P8): an OPTIONAL list of login credentials so each virtual
+  // user logs in as a different account. It is parsed IN THE BROWSER (like the token
+  // pool) into credentialPool.entries of { subject: username, token: password } — login
+  // INPUTS, not pre-issued tokens. Empty text = the single-identity login (unchanged):
+  // every virtual user logs in with the same body. The backend logs virtual user i in
+  // with entries[i % N], exposing the row to the body as {{.username}} (= subject) and
+  // {{.password}} (= token), plus {{.userIndex}} (the VU number).
+  loginCredText: string // raw pasted username,password rows (csv or jsonl); blank = single-identity
+  loginCredFormat: LoginCredFormat // how loginCredText (and the file) is encoded
+
   // 'bootstrap' mode: a signup flow that provisions a real account, a capture mapping,
   // and an optional teardown flow. The COMMON case (and an imported suggestedSignup) is
   // authored through the simple mini-form — a signup method+path with a body template,
@@ -111,6 +121,13 @@ export type CredFormat = 'csv' | 'jsonl' | 'tokens'
 // domain.LoginScope: per-user (one token per virtual user, the default) or shared
 // (one client_credentials token for every session).
 export type LoginScope = 'per-user' | 'shared'
+
+// LoginCredFormat is how the "log in multiple users" credential list is encoded. Unlike
+// CredFormat (which carries pre-issued tokens) these rows are login INPUTS — a username
+// and a password per account — so the formats name those columns: csv (a header row with
+// username + password columns) or jsonl ({"username":..,"password":..} per line). There
+// is no plain-tokens variant: a login always needs both halves of the credential.
+export type LoginCredFormat = 'csv' | 'jsonl'
 
 // CredentialEntry is one inline credential the console sends in credentialPool.entries.
 // The field name `token` matches the backend's authoring shape (scenariofile.Credential
@@ -182,6 +199,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'loginTokenVar'
   | 'loginSubjectVar'
   | 'loginScope'
+  | 'loginCredText'
+  | 'loginCredFormat'
   | 'signupMode'
   | 'signupUrlMethod'
   | 'signupUrlPath'
@@ -211,6 +230,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   loginTokenVar: '',
   loginSubjectVar: '',
   loginScope: 'per-user',
+  loginCredText: '',
+  loginCredFormat: 'csv',
   signupMode: 'simple',
   signupUrlMethod: 'POST',
   signupUrlPath: '',
@@ -437,6 +458,103 @@ function parseCredsTokens(body: string): CredentialEntry[] {
     throw new Error('token credentials have no non-blank line (need at least one credential)')
   }
   return out
+}
+
+// parseLoginCredentials resolves the "log in multiple users" list (a pasted/uploaded
+// username,password body) into the credentialPool.entries the login strategy carries.
+// Each row becomes { subject: username, token: password } — login INPUTS, mapped onto
+// the same wire entry shape the backend reads, so for login `subject` is the username
+// and `token` is the password (NOT a pre-issued token). The two formats name those
+// columns explicitly so the operator is never confused about which is which:
+//
+//   - 'csv'   — a header row that must include BOTH a "username" and a "password"
+//               column (in any order), then one credential per data row.
+//   - 'jsonl' — one {"username":..,"password":..} object per non-blank line.
+//
+// Blank lines (and a trailing newline) are ignored. It throws a clear, format-named
+// error on malformed input or when zero rows are parsed, so the console can surface the
+// reason inline rather than POSTing an empty list. Parsing in the browser mirrors the
+// token pool (the server never sees a file/env source, D1).
+export function parseLoginCredentials(format: LoginCredFormat, body: string): CredentialEntry[] {
+  switch (format) {
+    case 'csv':
+      return parseLoginCredsCSV(body)
+    case 'jsonl':
+      return parseLoginCredsJSONL(body)
+    default:
+      throw new Error(`unknown login credential format "${format}"`)
+  }
+}
+
+// parseLoginCredsCSV reads a header row that must carry both a "username" and a
+// "password" column (in any order), then one login credential per data row. It reuses
+// the dependency-free RFC-4180-lite reader (splitCSVRow) and ignores blank lines.
+function parseLoginCredsCSV(body: string): CredentialEntry[] {
+  const rows = body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map(splitCSVRow)
+  if (rows.length === 0) throw new Error('login credential text is empty')
+  const header = rows[0].map((h) => h.trim())
+  const userIdx = header.indexOf('username')
+  const passIdx = header.indexOf('password')
+  if (userIdx < 0 || passIdx < 0) {
+    throw new Error('login credentials need a header with "username" and "password" columns')
+  }
+  const out: CredentialEntry[] = []
+  for (const rec of rows.slice(1)) {
+    const username = userIdx < rec.length ? rec[userIdx].trim() : ''
+    const password = passIdx < rec.length ? rec[passIdx] : ''
+    if (!username) throw new Error('a login credential row is missing its username')
+    if (!password) throw new Error('a login credential row is missing its password')
+    out.push({ subject: username, token: password })
+  }
+  if (out.length === 0) {
+    throw new Error('login credentials have no data rows (need at least one username,password)')
+  }
+  return out
+}
+
+// parseLoginCredsJSONL reads one {"username":..,"password":..} object per non-blank
+// line, mapping username -> subject and password -> token. Both are required.
+function parseLoginCredsJSONL(body: string): CredentialEntry[] {
+  const out: CredentialEntry[] = []
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      throw new Error('a login credential line is not valid JSON')
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('each login credential line must be a {username, password} object')
+    }
+    const { username, password } = parsed as { username?: unknown; password?: unknown }
+    if (typeof username !== 'string' || !username) {
+      throw new Error('a login credential is missing its username')
+    }
+    if (typeof password !== 'string' || !password) {
+      throw new Error('a login credential is missing its password')
+    }
+    out.push({ subject: username, token: password })
+  }
+  if (out.length === 0) {
+    throw new Error('login credentials have no rows (need at least one username/password)')
+  }
+  return out
+}
+
+// loginBodyReferencesRow reports whether a login body pulls a credential-list row in —
+// i.e. it mentions the {{.username}} or {{.password}} Go-template markers the backend
+// exposes for each entry. The scenario doctor uses it to warn when a multi-user list is
+// supplied but the body never templates a row in (so every virtual user would log in
+// with the same literal body — almost certainly a mistake). Whitespace inside the braces
+// (e.g. {{ .username }}) still counts.
+export function loginBodyReferencesRow(body: string): boolean {
+  return /\{\{\s*\.(username|password)\s*\}\}/.test(body)
 }
 
 // parseAllowlist mirrors the backend contract: comma-separated host patterns,
@@ -891,6 +1009,14 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
         loginFlowId: 'login',
       }
       if (form.loginScope === 'shared') credentialPool.loginScope = 'shared'
+      // "Log in multiple users": when the operator supplied a credential list, resolve it
+      // into entries of { subject: username, token: password } so each virtual user logs
+      // in as a different account (the backend uses entries[i % N], exposing the row as
+      // {{.username}}/{{.password}}). A blank list leaves entries off — the single-identity
+      // login, byte-identical to before this feature.
+      if (form.loginCredText.trim()) {
+        credentialPool.entries = parseLoginCredentials(form.loginCredFormat, form.loginCredText)
+      }
       return { authStrategy: 'login', credentialPool, loginFlow }
     }
     case 'bootstrap': {

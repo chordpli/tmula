@@ -18,6 +18,7 @@ import {
   MAX_TRACE_USERS,
   parseAllowlist,
   parseCredentials,
+  parseLoginCredentials,
   placeholderLabel,
   probeRun,
   reportHTMLURL,
@@ -32,6 +33,7 @@ import {
   type ExperimentForm,
   type ImportResult,
   type ImportStats,
+  type LoginCredFormat,
   type LoginScope,
   type OutcomeSummary,
   type Report,
@@ -107,6 +109,15 @@ const loginTemplatesPlaceholder = `{
     "extract": { "access_token": "$.access_token" }
   }
 }`
+
+// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
+// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so we can detect when the operator has not
+// edited it yet. LOGIN_BODY_MULTI is the smart default the multi-user path suggests:
+// each virtual user logs in as the NEXT credential-list row, so the body reads the row
+// via the {{.username}}/{{.password}} Go-template markers the backend exposes (NOT the
+// {username}/{password} markers the single-identity body uses).
+const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
+const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
 
 // signupStepsPlaceholder shows the bootstrap signup journey shape: a step list with a
 // bare method/path and an extract that captures the token. teardownPlaceholder shows
@@ -1405,6 +1416,21 @@ function AuthLoginFields({
 }) {
   const { t } = useI18n()
   const simple = form.loginMode === 'simple'
+  const hasCredList = form.loginCredText.trim().length > 0
+  // Smart default: when the operator supplies a credential list, the per-row body should
+  // pull the row in via {{.username}}/{{.password}}. Suggest the multi-user body ONLY
+  // when the current body is still untouched (the single-identity default) so we never
+  // clobber a hand-edited body; the operator can also apply it from the hint.
+  const bodyIsDefault = form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
+  const suggestMultiBody = hasCredList && bodyIsDefault
+  function setCredText(text: string) {
+    set('loginCredText', text)
+    // The first time a list appears, auto-upgrade an untouched body to the per-row
+    // template so the common case just works; a hand-edited body is left as-is.
+    if (text.trim() && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE) {
+      set('loginBodyTemplate', LOGIN_BODY_MULTI)
+    }
+  }
   return (
     <div className="authpanel">
       {simple ? (
@@ -1433,7 +1459,11 @@ function AuthLoginFields({
                 />
               </div>
             </Field>
-            <Field label={t('auth.login.scope')} help={t('auth.login.scopeHint')}>
+            <Field
+              label={t('auth.login.scope')}
+              help={t('auth.login.scopeHint')}
+              tip={<HelpTip label={t('auth.login.scope')} text={t('auth.login.scope.tip')} />}
+            >
               <select
                 className="select"
                 value={form.loginScope}
@@ -1444,20 +1474,33 @@ function AuthLoginFields({
               </select>
             </Field>
           </div>
+
+          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
+
           <Field
             label={t('auth.login.body')}
             help={t('auth.login.bodyHint')}
-            tip={<HelpTip label={t('auth.login.body')} text={t('auth.login.body.tip')} />}
+            tip={<HelpTip label={t('auth.login.body')} text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')} />}
           >
             <textarea
               className="textarea"
               value={form.loginBodyTemplate}
               onChange={(e) => set('loginBodyTemplate', e.target.value)}
               rows={4}
-              placeholder={'{"username": "{username}", "password": "{password}"}'}
+              placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
               spellCheck={false}
             />
           </Field>
+          {suggestMultiBody && (
+            <button
+              type="button"
+              className="btn btn--ghost"
+              style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+              onClick={() => set('loginBodyTemplate', LOGIN_BODY_MULTI)}
+            >
+              {t('auth.login.body.useMulti')}
+            </button>
+          )}
         </>
       ) : (
         <AuthLoginAdvancedBody form={form} set={set} />
@@ -1513,6 +1556,109 @@ function AuthLoginFields({
         </div>
       </details>
     </div>
+  )
+}
+
+// AuthLoginCredList is the OPTIONAL "log in multiple users" panel: a format selector, a
+// file upload, and a textarea of username,password rows, all parsed IN THE BROWSER (like
+// the token pool) into credentialPool.entries of { subject: username, token: password }.
+// Supply a list and each virtual user logs in as the NEXT row (a different account);
+// leave it empty and the login mints ONE identity from the body (the prior behavior).
+// It shows the live parsed count / error so the operator sees how many accounts were
+// recognized before running. Picking a file loads its text into the textarea (so the
+// operator sees exactly what will be sent) and routes through onCredText, which also
+// upgrades an untouched login body to the per-row template.
+function AuthLoginCredList({
+  form,
+  set,
+  onCredText,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  onCredText: (text: string) => void
+}) {
+  const { t } = useI18n()
+
+  // Live parse of the pasted text for the count / inline error. It never throws out of
+  // render: a malformed body surfaces as a short message, an empty body as nothing.
+  let count = 0
+  let parseError = ''
+  if (form.loginCredText.trim()) {
+    try {
+      count = parseLoginCredentials(form.loginCredFormat, form.loginCredText).length
+    } catch (e) {
+      parseError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Pick the format from the extension; .csv -> csv, .jsonl -> jsonl, else unchanged.
+    const lower = file.name.toLowerCase()
+    if (lower.endsWith('.csv')) set('loginCredFormat', 'csv')
+    else if (lower.endsWith('.jsonl')) set('loginCredFormat', 'jsonl')
+    try {
+      onCredText(await file.text())
+    } catch {
+      /* ignore an unreadable file; the operator can paste instead */
+    }
+  }
+
+  return (
+    <details className="advanced" open={form.loginCredText.trim().length > 0}>
+      <summary className="advanced__summary">
+        {t('auth.login.cred.toggle')}
+        <span className="field__badge">{t('badge.optional')}</span>
+      </summary>
+      <div className="stack advanced__body" style={{ gap: 16 }}>
+        <p className="card__hint">{t('auth.login.cred.hint')}</p>
+        <div className="import__grid">
+          <label className="field import__file">
+            <span className="field__label">{t('auth.login.cred.file')}</span>
+            <input className="filepick" type="file" accept=".csv,.jsonl" onChange={onFile} />
+            <span className="field__help">{t('auth.login.cred.fileHint')}</span>
+          </label>
+          <Field label={t('auth.pool.format')} help={t('auth.login.cred.formatHint')}>
+            <select
+              className="select"
+              value={form.loginCredFormat}
+              onChange={(e) => set('loginCredFormat', e.target.value as LoginCredFormat)}
+            >
+              <option value="csv">{t('auth.login.cred.format.csv')}</option>
+              <option value="jsonl">{t('auth.login.cred.format.jsonl')}</option>
+            </select>
+          </Field>
+        </div>
+
+        <Field
+          label={t('auth.login.cred.paste')}
+          help={t('auth.login.cred.pasteHint')}
+          tip={<HelpTip label={t('auth.login.cred.paste')} text={t('auth.login.cred.tip')} />}
+        >
+          <textarea
+            className="textarea"
+            value={form.loginCredText}
+            onChange={(e) => onCredText(e.target.value)}
+            rows={5}
+            placeholder={t(`auth.login.cred.placeholder.${form.loginCredFormat}`)}
+            spellCheck={false}
+          />
+        </Field>
+
+        {parseError ? (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{parseError}</span>
+          </div>
+        ) : count > 0 ? (
+          <p className="authpanel__ok" role="status">
+            <CheckMini />
+            {t('auth.login.cred.count', { count })}
+          </p>
+        ) : null}
+      </div>
+    </details>
   )
 }
 
