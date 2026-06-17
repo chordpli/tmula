@@ -229,3 +229,62 @@ func TestShardSpecForMapping(t *testing.T) {
 		t.Errorf("mapped ShardSpec invalid: %v", err)
 	}
 }
+
+// TestShardSpecForCarriesCredentialSource pins the distributed-auth mapping: a
+// source-backed credential pool copies its reference-only CredentialSourceRef
+// into the ShardSpec (so each worker resolves it locally and assigns by global
+// index), while an inline-entries pool and a nil pool leave it nil — no secret is
+// ever placed on the wire spec.
+func TestShardSpecForCarriesCredentialSource(t *testing.T) {
+	base := func() RunSpec {
+		return RunSpec{
+			Graph:     domain.ScenarioGraph{ID: "g", Nodes: []domain.Node{{ID: "a", APITemplateID: "ta"}}},
+			Templates: map[domain.ID]domain.APITemplate{"ta": {Method: "GET", Path: "/a"}},
+			TargetEnv: domain.TargetEnv{BaseURL: "http://sut.example"},
+			Start:     "a",
+			MaxSteps:  3,
+			Seed:      1,
+			Workers:   []string{"w1"},
+		}
+	}
+
+	t.Run("source pool copies the reference", func(t *testing.T) {
+		spec := base()
+		spec.CredentialPool = &domain.CredentialPool{
+			ID:       "p",
+			Strategy: domain.CredPool,
+			Source:   &domain.CredentialSourceRef{File: "creds.csv", Format: "csv"},
+		}
+		got := shardSpecFor(spec, "run-1")
+		if got.CredentialSource == nil {
+			t.Fatal("a source pool must copy its reference into the shard spec")
+		}
+		if got.CredentialSource.File != "creds.csv" || got.CredentialSource.Format != "csv" {
+			t.Errorf("source reference not copied faithfully: %+v", got.CredentialSource)
+		}
+		// The copy must be defensive: mutating the spec's ref must not change the
+		// shard's, and vice versa.
+		spec.CredentialPool.Source.File = "other.csv"
+		if got.CredentialSource.File != "creds.csv" {
+			t.Error("shard spec credential source must be a defensive copy")
+		}
+	})
+
+	t.Run("inline pool leaves the source nil", func(t *testing.T) {
+		spec := base()
+		spec.CredentialPool = &domain.CredentialPool{
+			ID:       "p",
+			Strategy: domain.CredPool,
+			Entries:  []domain.Credential{{Subject: "u0", Secret: "tok-0"}},
+		}
+		if got := shardSpecFor(spec, "run-1"); got.CredentialSource != nil {
+			t.Errorf("an inline pool must not place a source on the wire, got: %+v", got.CredentialSource)
+		}
+	})
+
+	t.Run("nil pool leaves the source nil", func(t *testing.T) {
+		if got := shardSpecFor(base(), "run-1"); got.CredentialSource != nil {
+			t.Errorf("a nil pool must leave the shard source nil, got: %+v", got.CredentialSource)
+		}
+	})
+}

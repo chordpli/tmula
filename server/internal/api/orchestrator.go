@@ -487,6 +487,18 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 	if spec.Workload != nil {
 		think = spec.Workload.ThinkTime
 	}
+	// Distributed auth: a source-backed credential pool ships its reference-only
+	// CredentialSourceRef (file/env + format, never a secret) so each worker
+	// resolves its own slice locally and assigns by global index. Validate has
+	// already confirmed that an authenticated distributed run carries a source (not
+	// inline entries, not bootstrap/login) — those are rejected with workers — so a
+	// non-nil Source here is always a usable shared reference. A nil pool or an
+	// inline pool leaves CredentialSource nil (the latter never reaches here).
+	var credSource *domain.CredentialSourceRef
+	if spec.CredentialPool != nil && spec.CredentialPool.Source != nil {
+		ref := *spec.CredentialPool.Source
+		credSource = &ref
+	}
 	return cluster.ShardSpec{
 		RunID:         runID,
 		ScenarioID:    scenarioIDForSpec(spec),
@@ -505,6 +517,9 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		Allowlist: spec.TargetEnv.Allowlist,
 		RateCap:   spec.TargetEnv.RateCap,
 		EnvClass:  spec.TargetEnv.EnvClass,
+		// Ship the reference-only credential source (never a secret) so an
+		// authenticated distributed run fans out by global index.
+		CredentialSource: credSource,
 	}
 }
 

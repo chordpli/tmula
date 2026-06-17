@@ -219,3 +219,107 @@ func TestLoginProviderBuiltAboveRunspec(t *testing.T) {
 		t.Error("runspec.CredentialProvider must not build a login provider (the orchestrator does)")
 	}
 }
+
+// sourcePool returns a CredPool that references an external source (no inline
+// entries), the reference-only shape distributed auth carries across the wire.
+func sourcePool(ref *domain.CredentialSourceRef) *domain.CredentialPool {
+	return &domain.CredentialPool{ID: "p", Strategy: domain.CredPool, Source: ref}
+}
+
+// bootstrapPool returns a bootstrap-signup pool naming a signup flow.
+func bootstrapPool() *domain.CredentialPool {
+	flowID := domain.ID("signup")
+	return &domain.CredentialPool{ID: "p", Strategy: domain.CredBootstrapSignup, BootstrapFlowID: &flowID}
+}
+
+// TestValidateDistributedSourceAuth pins the P3 D1 reconciliation — the run
+// path's new split of the old blanket "pool + workers is rejected" rule:
+//
+//   - a file/env SOURCE pool WITH workers is ALLOWED (the distributed carve-out:
+//     each worker resolves the shared, index-deterministic reference locally; no
+//     secret crosses the wire);
+//   - an INLINE-entries pool WITH workers stays REJECTED (secrets would serialize
+//     into the wire spec);
+//   - a SOURCE pool with NO workers stays REJECTED (the in-process/API server must
+//     not read a client-chosen path off the wire; the CLI resolves single-node
+//     sources at scenariofile.Expand);
+//   - a BOOTSTRAP pool with workers stays REJECTED (P4 depends on this);
+//   - an OPEN run with a source pool and workers stays REJECTED (open keys by
+//     arrival index, not the closed pool index, so a source carve-out would key the
+//     wrong principal — an explicit pin so it can never silently change).
+func TestValidateDistributedSourceAuth(t *testing.T) {
+	workers := func(s *runspec.RunSpec) { s.Workers = []string{"127.0.0.1:65535"} }
+
+	t.Run("file source + workers is accepted", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = sourcePool(&domain.CredentialSourceRef{File: "creds.csv", Format: "csv"})
+		workers(&s)
+		if err := s.Validate(); err != nil {
+			t.Fatalf("a file source pool with workers must be accepted (distributed carve-out), got: %v", err)
+		}
+	})
+
+	t.Run("env source + workers is accepted", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = sourcePool(&domain.CredentialSourceRef{Env: "TMULA_TOKENS", Format: "tokens"})
+		workers(&s)
+		if err := s.Validate(); err != nil {
+			t.Fatalf("an env source pool with workers must be accepted (distributed carve-out), got: %v", err)
+		}
+	})
+
+	t.Run("source + workers + AggregateWorkers is accepted", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = sourcePool(&domain.CredentialSourceRef{File: "creds.csv", Format: "csv"})
+		s.Workers = []string{"127.0.0.1:65535"}
+		s.AggregateWorkers = true
+		if err := s.Validate(); err != nil {
+			t.Fatalf("a source pool with aggregate workers must be accepted, got: %v", err)
+		}
+	})
+
+	t.Run("inline entries + workers stays rejected", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = twoEntryPool()
+		workers(&s)
+		if err := s.Validate(); err == nil {
+			t.Fatal("inline entries + workers must stay rejected (secrets would cross the wire)")
+		}
+	})
+
+	t.Run("source + no workers stays rejected", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = sourcePool(&domain.CredentialSourceRef{File: "creds.csv", Format: "csv"})
+		err := s.Validate()
+		if err == nil {
+			t.Fatal("a source pool without workers must stay rejected (the server must not read a client path)")
+		}
+		if !strings.Contains(err.Error(), "resolved") {
+			t.Errorf("rejection should explain the source must be resolved (single-node), got: %v", err)
+		}
+	})
+
+	t.Run("bootstrap + workers stays rejected", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.CredentialPool = bootstrapPool()
+		s.Experiment.Params.AuthStrategy = domain.CredBootstrapSignup
+		workers(&s)
+		if err := s.Validate(); err == nil {
+			t.Fatal("bootstrap-signup + workers must stay rejected (P4 depends on this)")
+		}
+	})
+
+	t.Run("open + source + workers stays rejected", func(t *testing.T) {
+		s := minimalSpec("http://127.0.0.1:1")
+		s.Workload = &domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, StartRate: 1},
+			DurationSeconds: 1,
+		}
+		s.CredentialPool = sourcePool(&domain.CredentialSourceRef{File: "creds.csv", Format: "csv"})
+		workers(&s)
+		if err := s.Validate(); err == nil {
+			t.Fatal("open + source + workers must stay rejected (open keys by arrival index, not pool index)")
+		}
+	})
+}

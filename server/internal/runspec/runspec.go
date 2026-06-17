@@ -225,19 +225,41 @@ func (r RunSpec) Validate() error {
 
 // validateCredentialPool checks an optional credential pool is usable on this
 // path. A nil pool is fine (the run is unauthenticated). The domain validation
-// rejects an unknown strategy and an empty "pool" strategy; on top of that, the
-// run path supports only the pre-supplied "pool" strategy today, so a
-// bootstrap-signup request fails loudly rather than silently running
-// unauthenticated, and a credential pool combined with distributed workers is
-// refused because the worker fan-out synthesizes its own (unauthenticated) users.
+// rejects an unknown strategy, an empty "pool" strategy, and an inline-vs-source
+// conflict; on top of that the run path applies the D1 split that decides which
+// authenticated runs may distribute.
 //
-// LOAD-BEARING FOR REPRODUCE FIDELITY: the rejection of (CredentialPool ≠ nil)
-// combined with (Workers > 0 || AggregateWorkers) is what guarantees that any
-// distributed run is always unauthenticated. CredentialProvider therefore returns
-// (nil, nil) for every distributed spec, which is the assumption reproduce.go's
-// sessionUser relies on to stay user-consistent: if a distributed run could carry
-// a credential pool, sessionUser would silently replay it under the wrong user.
-// See also: CredentialProvider and the sessionUser function in reproduce.go.
+// D1 SPLIT (the load-bearing distributed-auth contract): a distributed run
+// authenticates ONLY from a shared, index-deterministic SourceRef that the worker
+// resolves LOCALLY; inline secrets and bootstrap stay rejected with workers.
+// Concretely:
+//
+//   - Source != nil && NO workers  → REJECTED. The in-process/API server must not
+//     read a client-chosen path off the wire; the CLI resolves single-node sources
+//     into entries at scenariofile.Expand, so a non-distributed spec must carry
+//     real entries.
+//   - Source (file/env) != nil && workers → ALLOWED, the distributed carve-out:
+//     only the reference crosses the wire and each worker loads its own slice and
+//     assigns by GLOBAL index, so every worker reconstructs the same provider
+//     (PoolProvider.Acquire is a pure function of the global index). No secret is
+//     serialized. shardSpecFor copies the ref into ShardSpec.CredentialSource.
+//   - Inline Entries != nil && workers → REJECTED. The secrets would serialize
+//     into the wire spec.
+//   - Bootstrap-signup && workers → REJECTED. A bootstrap pool mints real accounts
+//     and has no shared reference to fan out; P4 keeps this rejected. (Domain
+//     Validate already forbids a Source on a bootstrap pool.)
+//   - Login && workers → REJECTED. A minted login token is a json:"-" secret the
+//     worker fan-out cannot resolve. (Domain Validate forbids a Source on a login
+//     pool, so login never reaches the carve-out.)
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: every distributed authenticated run is
+// either rejected here or carries a source the workers (and reproduce) resolve by
+// the SAME pure Acquire(global index). reproduce.go's sessionUser relies on this:
+// a distributed-auth finding replays under the same principal the shard ran as
+// because both rebuild the source-backed provider and key it by the global index.
+// If this split is ever changed, sessionUser must be updated in lockstep (D4: PR3
+// and PR4 land together). See also: CredentialProvider, the sessionUser function
+// in reproduce.go, and shardSpecFor in orchestrator.go.
 func (r RunSpec) validateCredentialPool() error {
 	if r.CredentialPool == nil {
 		return nil
@@ -245,15 +267,21 @@ func (r RunSpec) validateCredentialPool() error {
 	if err := r.CredentialPool.Validate(); err != nil {
 		return fmt.Errorf("api: %w", err)
 	}
-	// D1 CONTRACT LINE: the run path rejects a pool that still carries an
-	// unresolved external source. The CLI resolves auth.source into entries at
-	// scenariofile.Expand time, so a spec reaching a run must carry real entries.
-	// This guard keeps the server from ever reading a client-chosen path off the
-	// wire. A later phase (P3, distributed auth) will narrow this to allow a
-	// server-side, allowlisted file/env source for distributed workers; until
-	// then any present source is refused here.
+	hasWorkers := len(r.Workers) > 0 || r.AggregateWorkers
 	if r.CredentialPool.Source != nil {
-		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; distributed support is a follow-up)")
+		// Distributed carve-out: a source pool fanned out across workers ships only
+		// a reference; each worker resolves it locally and assigns by global index.
+		// Domain Validate guarantees a Source only ever rides a CredPool (login and
+		// bootstrap reject it), and the ref's shape (exactly one of file/env, known
+		// format) is already validated, so a present source here is always a usable
+		// distributed pool reference.
+		if hasWorkers {
+			return nil
+		}
+		// Source without workers: the single-node path must arrive pre-resolved.
+		// The CLI resolves auth.source into entries at scenariofile.Expand time, so
+		// the server never reads a client-chosen path off the wire.
+		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; a distributed run with workers ships the reference instead)")
 	}
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
 		// Follow-up: the bootstrap provider exists but needs a signup transport this
@@ -271,13 +299,13 @@ func (r RunSpec) validateCredentialPool() error {
 			return fmt.Errorf("api: %w", err)
 		}
 	}
-	if len(r.Workers) > 0 || r.AggregateWorkers {
-		// This rejection is load-bearing for reproduce fidelity — see the doc
-		// comment above before relaxing it. It applies to EVERY credential strategy
-		// (pool and login alike): a minted login token is still a json:"-" secret the
-		// worker fan-out cannot resolve, so a distributed authenticated run is
-		// refused regardless of strategy.
-		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
+	if hasWorkers {
+		// Inline-secret carry (entries pool or a minted login token) cannot fan out:
+		// the secret would serialize into the wire spec / a json:"-" secret the
+		// worker cannot resolve. Only a source-backed pool reaches workers (handled
+		// above). This rejection is load-bearing for reproduce fidelity — see the
+		// doc comment before relaxing it.
+		return fmt.Errorf("api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)")
 	}
 	return nil
 }
