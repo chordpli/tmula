@@ -350,6 +350,13 @@ func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepRe
 // cancelled mid-request), and a generic "transport" class for any other send
 // failure — the same classification the closed runner paths use.
 func errorClass(sr load.StepResult) string {
+	// A class the runtime stamped (e.g. obs.ErrorClassAuthRefresh on an
+	// exhausted-refresh 401) wins, so the open path excuses the same auth churn the
+	// closed path does. An exhausted-refresh 401 carries no Err, so this is the only
+	// place its class survives.
+	if sr.ErrorClass != "" {
+		return sr.ErrorClass
+	}
 	if sr.Err == nil {
 		return ""
 	}

@@ -489,6 +489,12 @@ func scenarioIDForSpec(spec RunSpec) domain.ID {
 }
 
 func errorClass(res load.StepResult) string {
+	// A class stamped by the runtime (e.g. obs.ErrorClassAuthRefresh on an
+	// exhausted-refresh 401) wins — it carries semantics the status/Err alone do
+	// not, and lets the aggregator excuse the auth churn from the error rate.
+	if res.ErrorClass != "" {
+		return res.ErrorClass
+	}
 	if res.Err != nil {
 		return "transport"
 	}

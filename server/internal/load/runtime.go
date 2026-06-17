@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/engine"
+	"github.com/chordpli/tmula/server/internal/obs"
 	"github.com/chordpli/tmula/server/internal/safety"
 )
 
@@ -38,7 +40,23 @@ type VirtualUser struct {
 	// never serialized (json:"-"), so a spec's Users array marshals byte-for-byte
 	// as before — the holder, like a minted token, never crosses the wire.
 	Holder CredentialHolder `json:"-"`
+	// Refresh, when non-nil, re-acquires this user's credential (re-runs the login
+	// flow for the user's index) and rotates the Holder in place. runSession calls
+	// it at most once per request on a 401, then retries the request once with the
+	// refreshed credential. It is the orchestrator's job to bind the correct index
+	// (the same Seed-offset the run path keys credentials by) into this closure, so
+	// the runtime never re-derives an index. Nil on every non-login run, and on
+	// that path no refresh is ever attempted. Like Holder it is a runtime-only seam
+	// (json:"-").
+	Refresh RefreshFunc `json:"-"`
 }
+
+// RefreshFunc re-acquires a virtual user's credential mid-run and rotates its
+// holder in place, returning an error if the re-acquire failed. It is the seam the
+// 401 recovery path drives: the orchestrator builds one per user, binding the
+// user's index and login transport, so the runtime stays free of index arithmetic
+// and the login transport.
+type RefreshFunc func(ctx context.Context) error
 
 // cred resolves the credential to render a step with: the live value from the
 // holder when one is set (the login/refresh path), otherwise the static Cred
@@ -67,6 +85,14 @@ type StepResult struct {
 	// status >= 400) and is a reslice of the session's precomputed walk —
 	// shared, never copied — so healthy traffic pays no per-step path cost.
 	Path []domain.ID
+	// ErrorClass, when non-empty, overrides the class the recording layer would
+	// otherwise derive from Resp/Err. The runtime sets it to
+	// obs.ErrorClassAuthRefresh for an exhausted-refresh 401 (the token expired
+	// and re-acquiring it did not recover), so the recording orchestrator carries
+	// that class through to the aggregator — which excuses it from the error rate.
+	// Empty for every ordinary result, so the existing class derivation (transport
+	// on a send error, empty otherwise) is unchanged.
+	ErrorClass string
 }
 
 // Runner drives many virtual users concurrently through a scenario graph,
@@ -451,6 +477,36 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 			SessionID:  u.ID,
 		}
 		resp, sErr := r.send(ctx, req)
+		// Mid-run auth recovery: a 401 with a refresher attached re-acquires the
+		// token and retries the request exactly ONCE. On a successful retry the
+		// original 401 is swallowed — only the retry is emitted, so a recovered
+		// session contributes exactly one (healthy) observation. When the refresh or
+		// the retry does not recover, the 401 is emitted ONCE carrying the
+		// auth-refresh class, which obs.failed() excuses from the error rate (expired
+		// auth is not a target defect). Reactive 401-only by design (no TTL/clock).
+		var authRefreshClass string
+		if sErr == nil && resp.StatusCode == http.StatusUnauthorized && u.Refresh != nil {
+			if err := u.Refresh(ctx); err != nil {
+				// Re-acquire failed (login endpoint down, etc.): keep the original 401
+				// but mark it auth-refresh so it does not inflate the error rate, and
+				// do not retry.
+				authRefreshClass = obs.ErrorClassAuthRefresh
+			} else {
+				// Re-render with the rotated credential and retry once.
+				retryReq, rErr := Render(tmpl, r.baseURL, u.cred(), sessionVars)
+				if rErr != nil {
+					sErr = rErr
+				} else {
+					retryReq.Correlation = req.Correlation
+					resp, sErr = r.send(ctx, retryReq)
+					if sErr == nil && resp.StatusCode == http.StatusUnauthorized {
+						// Refresh exhausted: the fresh token still 401s. Tag it so it is
+						// excused, rather than counted as a contract/threshold failure.
+						authRefreshClass = obs.ErrorClassAuthRefresh
+					}
+				}
+			}
+		}
 		if sErr == nil && len(tmpl.Extract) > 0 {
 			extracted, err := ExtractVariables(resp.Body, tmpl.Extract)
 			if err != nil {
@@ -461,7 +517,7 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 				}
 			}
 		}
-		sr := StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr, Seed: seed}
+		sr := StepResult{UserID: u.ID, NodeID: nodeID, Resp: resp, Err: sErr, Seed: seed, ErrorClass: authRefreshClass}
 		if sErr != nil || resp.StatusCode >= 400 {
 			sr.Path = walked // failed step: carry the journey for evidence
 		}
