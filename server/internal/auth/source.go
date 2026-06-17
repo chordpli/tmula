@@ -271,6 +271,28 @@ func (s FileSource) Load(_ context.Context) ([]domain.Credential, error) {
 	return creds, nil
 }
 
+// SourceFromRef builds a CredentialSource from a non-secret domain reference (a
+// file path or an env-var name plus its format). A file reference is rooted at
+// root and confined to it by FileSource's containment/symlink/size guards; root
+// is the resolver's working directory (an empty root falls back to "."). It is
+// the seam a worker (or the reproduce path) uses to turn the reference it
+// received off the wire into a loadable pool, so the same index-deterministic
+// PoolProvider can be reconstructed wherever the reference travels — never the
+// secrets it resolves to.
+func SourceFromRef(ref domain.CredentialSourceRef, root string) (CredentialSource, error) {
+	if err := ref.Validate(); err != nil {
+		return nil, fmt.Errorf("auth: credential source reference: %w", err)
+	}
+	format := Format(ref.Format)
+	if ref.Env != "" {
+		return EnvSource{Var: ref.Env, Format: format}, nil
+	}
+	if root == "" {
+		root = "."
+	}
+	return FileSource{Root: root, Path: ref.File, Format: format}, nil
+}
+
 // withinRoot reports whether path is root itself or lies inside it, comparing on
 // path boundaries so "/a/rootx" is not treated as inside "/a/root".
 func withinRoot(root, path string) bool {
