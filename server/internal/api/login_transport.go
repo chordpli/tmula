@@ -33,6 +33,20 @@ type LoginFlow struct {
 	MaxSteps   int
 	TokenVar   string
 	SubjectVar string
+	// Entries, when present, is the credential POOL of login-INPUT rows the P8
+	// multi-user login path logs in with: each domain.Credential is a row where
+	// Subject is the username and Secret is the password (NOT a pre-issued token).
+	// Virtual user i logs in with row i (wrapping: entries[i % len(entries)]) — the
+	// transport seeds the row into the render context as {{.username}}/{{.password}}
+	// (plus {{.subject}}/{{.secret}} aliases) BEFORE walking the flow, so a login
+	// body like {"username":"{{.username}}","password":"{{.password}}"} authenticates
+	// each VU as a different account, each minting (and re-minting on expiry) its own
+	// token. The minted credential's Subject defaults to the row's username so a
+	// finding/reproduce identifies which user — unless an explicit SubjectVar (or an
+	// auto-detected subject) overrides it. Empty Entries is the unchanged
+	// single-identity login: no row is seeded and {{.username}}/{{.password}} render
+	// empty. The passwords are in-process secrets (Credential.Secret is json:"-").
+	Entries []domain.Credential
 }
 
 // loginMaxStepsDefault bounds a login flow's walk when the flow does not set its
@@ -72,11 +86,39 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 	}
 
 	return func(ctx context.Context, userIndex int) (domain.Credential, error) {
+		// Seed the render context for this mint. userIndex is always threaded so a flow
+		// can template the index it is minting for. The username/password/secret keys
+		// are ALWAYS seeded (the render uses missingkey=error, so a flow that references
+		// {{.username}} must find the key) — they carry the login-INPUT row for the P8
+		// multi-user path and render EMPTY on the single-identity path (no entries).
+		//
+		// The row is ALSO seeded onto the login user's Cred so Render's built-in
+		// {{.subject}} (and {{.token}}) reflect the row's username/password: Render
+		// unconditionally sets ctx["subject"]=cred.Subject / ctx["token"]=cred.Secret
+		// AFTER copying Vars, so a Vars-only "subject" would be clobbered to the (empty)
+		// login credential. Putting the row on Cred makes {{.subject}} the row username.
+		// {{.secret}} is a Vars-only alias (Render exposes the secret as "token", not
+		// "secret"), so it is seeded explicitly. With no entries the row is the zero
+		// credential, so every key renders empty — any flow that did not reference these
+		// keys is byte-for-byte the previous single-identity login.
+		var row domain.Credential
+		hasRow := len(flow.Entries) > 0
+		if hasRow {
+			row = flow.Entries[userIndex%len(flow.Entries)]
+		}
+		vars := map[string]string{
+			"userIndex": strconv.Itoa(userIndex),
+			"username":  row.Subject,
+			"password":  row.Secret,
+			"secret":    row.Secret,
+		}
 		user := load.VirtualUser{
 			ID:   "login-" + strconv.Itoa(userIndex),
-			Vars: map[string]string{"userIndex": strconv.Itoa(userIndex)},
+			Vars: vars,
+			// Render exposes Cred.Subject as {{.subject}} and Cred.Secret as {{.token}}.
+			Cred: domain.Credential{Subject: row.Subject, Secret: row.Secret},
 		}
-		vars, final, err := runner.RunOnceCapture(ctx, flow.Graph, nodeTmpl, flow.Start, maxSteps, user, baseSeed+int64(userIndex))
+		captured, final, err := runner.RunOnceCapture(ctx, flow.Graph, nodeTmpl, flow.Start, maxSteps, user, baseSeed+int64(userIndex))
 		if err != nil {
 			return domain.Credential{}, fmt.Errorf("api: login user %d: %w", userIndex, err)
 		}
@@ -88,7 +130,7 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 			autoToken, autoSubject = load.DetectCredential(final.Body, final.SetCookie)
 		}
 
-		token := vars[flow.TokenVar]
+		token := captured[flow.TokenVar]
 		if flow.TokenVar == "" {
 			token = autoToken
 		}
@@ -99,11 +141,17 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 			return domain.Credential{}, fmt.Errorf("api: login user %d captured no token from variable %q", userIndex, flow.TokenVar)
 		}
 		cred := domain.Credential{Secret: token}
+		// Subject precedence: an explicit SubjectVar wins, then an auto-detected
+		// subject, then the login-input row's username (so a multi-user finding/
+		// reproduce identifies which account). The single-identity path (no row) keeps
+		// the SubjectVar-or-auto-detect behavior exactly as before.
 		switch {
 		case flow.SubjectVar != "":
-			cred.Subject = vars[flow.SubjectVar]
-		default:
+			cred.Subject = captured[flow.SubjectVar]
+		case autoSubject != "":
 			cred.Subject = autoSubject
+		case hasRow:
+			cred.Subject = row.Subject
 		}
 		return cred, nil
 	}, nil

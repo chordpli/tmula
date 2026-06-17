@@ -222,6 +222,174 @@ func TestExpandAuthLoginRoundTrip(t *testing.T) {
 	}
 }
 
+// loginUsersAuthYAML is a P8 multi-user login block: the login flow templates the
+// per-VU username/password, and auth.users supplies the login-INPUT rows
+// (subject=username, token=password). Each VU logs in as a different account.
+const loginUsersAuthYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+    headers:
+      Authorization: "Bearer {{.token}}"
+auth:
+  strategy: login
+  users:
+    - subject: alice
+      token: pw-a
+    - subject: bob
+      token: pw-b
+  login:
+    flow:
+      - id: login
+        request: POST /login
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+        extract:
+          token: access_token
+    capture:
+      token: token
+`
+
+// TestExpandAuthLoginUsers threads a P8 multi-user login block: auth.users carries
+// the login-INPUT rows (username/password) that reach the expanded pool's Entries,
+// and the login strategy is preserved. The rows are interpreted as inputs, not
+// pre-issued tokens.
+func TestExpandAuthLoginUsers(t *testing.T) {
+	s, err := Parse([]byte(loginUsersAuthYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Strategy != domain.CredLogin {
+		t.Fatalf("expected a login credential pool, got %+v", spec.CredentialPool)
+	}
+	pool := spec.CredentialPool
+	if len(pool.Entries) != 2 {
+		t.Fatalf("login pool entries = %d, want 2 (the login-input rows)", len(pool.Entries))
+	}
+	// subject=username, token=password — the login-input interpretation.
+	if pool.Entries[0].Subject != "alice" || pool.Entries[0].Secret != "pw-a" {
+		t.Errorf("row[0] = %+v, want alice/pw-a", pool.Entries[0])
+	}
+	if pool.Entries[1].Subject != "bob" || pool.Entries[1].Secret != "pw-b" {
+		t.Errorf("row[1] = %+v, want bob/pw-b", pool.Entries[1])
+	}
+	if spec.LoginFlow == nil {
+		t.Fatal("expanded login spec carries no login flow")
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("multi-user login spec failed validation: %v", err)
+	}
+	// The passwords (in auth.users.token) never serialize out of the expanded spec.
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	if strings.Contains(string(b), "pw-a") || strings.Contains(string(b), "pw-b") {
+		t.Errorf("multi-user login spec leaked a password: %s", b)
+	}
+	// The non-sensitive usernames remain (they identify which account).
+	if !strings.Contains(string(b), "alice") || !strings.Contains(string(b), "bob") {
+		t.Errorf("multi-user login spec dropped the usernames: %s", b)
+	}
+}
+
+// TestExpandAuthLoginNoUsersUnchanged pins that a login block with NO users still
+// expands to a single-identity login pool with no entries — the existing behavior is
+// unchanged.
+func TestExpandAuthLoginNoUsersUnchanged(t *testing.T) {
+	s, err := Parse([]byte(loginAuthYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Strategy != domain.CredLogin {
+		t.Fatalf("expected a login pool, got %+v", spec.CredentialPool)
+	}
+	if len(spec.CredentialPool.Entries) != 0 {
+		t.Errorf("a login block with no users should carry no entries, got %d", len(spec.CredentialPool.Entries))
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("single-identity login spec failed validation: %v", err)
+	}
+}
+
+// TestExpandAuthLoginFileSource resolves a file-backed source of login-INPUT rows
+// into the login pool's Entries, exactly like the pool strategy resolves its source.
+func TestExpandAuthLoginFileSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "users.csv"), []byte("subject,token\nalice,pw-a\nbob,pw-b\n"), 0o600); err != nil {
+		t.Fatalf("write users: %v", err)
+	}
+	const fileYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+    headers:
+      Authorization: "Bearer {{.token}}"
+auth:
+  strategy: login
+  source:
+    file: users.csv
+    format: csv
+  login:
+    flow:
+      - id: login
+        request: POST /login
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+        extract:
+          token: access_token
+    capture:
+      token: token
+`
+	s, err := Parse([]byte(fileYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := ExpandFrom(s, dir)
+	if err != nil {
+		t.Fatalf("ExpandFrom: %v", err)
+	}
+	pool := spec.CredentialPool
+	if pool == nil || pool.Strategy != domain.CredLogin {
+		t.Fatalf("expected a login pool, got %+v", pool)
+	}
+	if pool.Source != nil {
+		t.Errorf("resolved login pool should carry nil Source, got %+v", pool.Source)
+	}
+	if len(pool.Entries) != 2 || pool.Entries[0].Subject != "alice" || pool.Entries[0].Secret != "pw-a" {
+		t.Fatalf("login source did not resolve into login-input rows: %+v", pool.Entries)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("login-source spec failed validation: %v", err)
+	}
+}
+
+// TestExpandAuthLoginUsersAndSourceRejected keeps the exactly-one rule for the login
+// strategy: inline users and a source are mutually exclusive.
+func TestExpandAuthLoginUsersAndSourceRejected(t *testing.T) {
+	both := Scenario{
+		Target: "http://h:1",
+		Flow:   []Step{{ID: "a", Request: "GET /a"}},
+		Auth: &Auth{
+			Strategy: "login",
+			Users:    []Credential{{Subject: "alice", Token: "pw-a"}},
+			Source:   &AuthSource{File: "u.csv", Format: "csv"},
+			Login:    &AuthLogin{Flow: []Step{{ID: "login", Request: "POST /login"}}},
+		},
+	}
+	if _, err := Expand(both); err == nil {
+		t.Error("a login block with both inline users and a source should be rejected")
+	}
+}
+
 // TestExpandAuthPoolMarshalHidesSecret confirms the secret authored in the file
 // reaches the in-memory pool but never serializes out of the expanded spec, so an
 // authenticated scenario still honors the at-rest masking guarantee.

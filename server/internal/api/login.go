@@ -56,6 +56,15 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		MaxSteps:   spec.LoginFlow.MaxSteps,
 		TokenVar:   spec.LoginFlow.TokenVar,
 		SubjectVar: spec.LoginFlow.SubjectVar,
+		// P8 multi-user login: the pool's Entries are login-INPUT rows (username +
+		// password), threaded into the token func so virtual user i logs in as row
+		// i%N. They reach BOTH the run path and the reproduce path through this single
+		// builder, so reproduce of VU i re-logs-in as the same account deterministically
+		// (i%N is a pure function of the index). Empty entries is the single-identity
+		// login — unchanged. The CLI resolves a login Source into these Entries at
+		// expand time (like the pool strategy), so a login pool only ever arrives here
+		// with inline entries, never an unresolved Source.
+		Entries: spec.CredentialPool.Entries,
 	}
 	// A dedicated runner for the login flow: same adapter and base URL as the run,
 	// guarded so the login endpoint is allowlist-checked and rate-capped. It carries

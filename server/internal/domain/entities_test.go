@@ -113,10 +113,28 @@ func TestCredentialPoolValidateLogin(t *testing.T) {
 	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, LoginScope: LoginScope("global")}).Validate(); err == nil {
 		t.Error("login strategy with an unknown scope should fail")
 	}
-	// A login pool needs neither Entries nor Source: the exactly-one rule is for
-	// the pool strategy only, so a login pool carrying entries is still rejected.
-	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Entries: []Credential{{Secret: "s"}}}).Validate(); err == nil {
-		t.Error("login strategy should not also carry inline entries")
+	// P8: a login pool MAY carry Entries — they are login-INPUT rows (username +
+	// password), not pre-issued tokens, so virtual user i can log in as a different
+	// account. A login pool with entries is now accepted.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Entries: []Credential{{Subject: "alice", Secret: "pw"}}}).Validate(); err != nil {
+		t.Errorf("login strategy carrying login-input entries should be accepted (P8): %v", err)
+	}
+	// A login pool with NO entries is still valid: the single-identity login path.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login}).Validate(); err != nil {
+		t.Errorf("login strategy without entries (single-identity) should be accepted: %v", err)
+	}
+	// A login pool MAY also carry a Source (an external file/env of login-input rows).
+	// Its shape is validated like a pool source.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Source: &CredentialSourceRef{File: "users.csv", Format: "csv"}}).Validate(); err != nil {
+		t.Errorf("login strategy carrying a login-input source should be accepted (P8): %v", err)
+	}
+	// A malformed login Source is still rejected for its shape.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Source: &CredentialSourceRef{Format: "csv"}}).Validate(); err == nil {
+		t.Error("login strategy with a malformed source (neither file nor env) should fail")
+	}
+	// Entries AND Source together is a conflict for login too — pick one input source.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Entries: []Credential{{Subject: "a", Secret: "p"}}, Source: &CredentialSourceRef{File: "u.csv", Format: "csv"}}).Validate(); err == nil {
+		t.Error("login strategy with both inline entries and a source should be rejected")
 	}
 }
 
@@ -136,6 +154,20 @@ func TestCredentialPoolLoginMarshalNoSecret(t *testing.T) {
 	}
 	if strings.Contains(out, "secret") || strings.Contains(out, "\"token\"") {
 		t.Errorf("login pool carries a secret-shaped field: %s", out)
+	}
+
+	// P8: a login pool carrying login-INPUT rows must never serialize the password
+	// (the row's Secret), but keeps the non-sensitive username (the row's Subject).
+	multi := CredentialPool{ID: "p", Strategy: CredLogin, LoginFlowID: &login, Entries: []Credential{{Subject: "alice", Secret: "pw-secret-a"}}}
+	mb, err := json.Marshal(multi)
+	if err != nil {
+		t.Fatalf("marshal multi-user login pool: %v", err)
+	}
+	if strings.Contains(string(mb), "pw-secret-a") {
+		t.Errorf("multi-user login pool leaked a password: %s", mb)
+	}
+	if !strings.Contains(string(mb), "alice") {
+		t.Errorf("multi-user login pool dropped the non-sensitive username: %s", mb)
 	}
 
 	// A non-login pool does not grow a loginFlowId/loginScope key (omitempty).

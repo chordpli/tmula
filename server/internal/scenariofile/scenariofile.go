@@ -124,12 +124,20 @@ type Auth struct {
 	// (pre-supplied entries or a source) and "login" (mint a token from a login
 	// flow) are accepted; bootstrap-signup is a follow-up.
 	Strategy string `json:"strategy,omitempty"`
-	// Users is the pool of pre-supplied credentials, assigned to virtual users by
-	// index (wrapping around when there are more users than entries).
+	// Users is the pool of credential rows, assigned to virtual users by index
+	// (wrapping around when there are more users than rows). Its meaning depends on
+	// the strategy: for "pool" each row is a PRE-SUPPLIED credential (subject + a
+	// ready-to-use token); for "login" (P8 multi-user login) each row is a login
+	// INPUT — subject is the username and token is the PASSWORD — so virtual user i
+	// logs in as row i%N and mints its own token (the login flow templates
+	// {{.username}}/{{.password}}). Either way the token field is a secret authored
+	// in the file and masked at rest (the domain credential's secret is json:"-").
 	Users []Credential `json:"users,omitempty"`
 	// Source, when set, names an external credential pool instead of inlining
 	// Users: a file (resolved against the scenario file's directory) or an
 	// environment variable, in an explicit format. Mutually exclusive with Users.
+	// It carries the same rows Users would (tokens for "pool", username/password
+	// login inputs for "login").
 	Source *AuthSource `json:"source,omitempty"`
 	// Login, when set (strategy "login"), describes how to mint a token: a
 	// standalone login flow plus which response captures become the token (and
@@ -174,8 +182,11 @@ type AuthSignup struct {
 
 // AuthLogin authors a login (token-minting) credential strategy: a standalone
 // login flow (its own list of steps, exactly like the main flow), the captures
-// that become the credential, and an optional scope. It carries no secret — the
-// token comes from the live login response.
+// that become the credential, and an optional scope. The login block itself carries
+// no secret — the token comes from the live login response. P8 multi-user login:
+// the SURROUNDING auth.users / auth.source (not this block) may supply login-INPUT
+// rows (username/password) so each virtual user logs in as a different account; the
+// login flow templates {{.username}}/{{.password}} from the row it is minting for.
 type AuthLogin struct {
 	// Flow is the ordered login journey (usually a single POST to a login/token
 	// endpoint). Each step's extract captures response fields; capture names which
@@ -225,12 +236,17 @@ type AuthSource struct {
 // so the token can be authored in the file (the domain type hides its secret from
 // serialization); Expand copies Token into the domain credential's secret.
 type Credential struct {
-	// Subject is the non-sensitive principal id (e.g. a username), exposed to
-	// templates as {{.subject}}.
+	// Subject is the non-sensitive principal id, exposed to templates as
+	// {{.subject}}. For the "pool" strategy it is a credential's principal id; for
+	// the "login" strategy (P8) it is the USERNAME virtual user i logs in with
+	// (also exposed as {{.username}}).
 	Subject string `json:"subject,omitempty"`
-	// Token is the secret auth material (e.g. a JWT), exposed to templates as
-	// {{.token}}. It lives only in the authored file; the domain credential it
-	// maps to never serializes its secret.
+	// Token is the secret auth material authored in the file. For the "pool"
+	// strategy it is a ready-to-use token (e.g. a JWT), exposed to templates as
+	// {{.token}}; for the "login" strategy (P8) it is the PASSWORD the login flow
+	// posts (exposed as {{.password}}, with {{.secret}} as an alias). Either way it
+	// lives only in the authored file; the domain credential it maps to never
+	// serializes its secret.
 	Token string `json:"token,omitempty"`
 }
 
@@ -530,7 +546,7 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 		pool, err := buildPoolCredentials(a, dir, keepSourceRef)
 		return pool, nil, err
 	case domain.CredLogin:
-		return buildLoginCredentials(a)
+		return buildLoginCredentials(a, dir)
 	case domain.CredBootstrapSignup:
 		pool, err := buildBootstrapCredentials(a)
 		return pool, nil, err
@@ -566,23 +582,38 @@ func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.Creden
 		return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Source: &ref}, nil
 	}
 
-	var entries []domain.Credential
-	if hasUsers {
-		entries = make([]domain.Credential, len(a.Users))
+	entries, err := resolveAuthRows(a, dir)
+	if err != nil {
+		return domain.CredentialPool{}, err
+	}
+	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
+}
+
+// resolveAuthRows resolves the auth block's credential rows from EITHER inline
+// Users (each authored Subject/Token maps onto a domain credential's subject/secret)
+// OR an external Source (a file under dir, or an env var) loaded HERE. It is the
+// single resolution point shared by the pool strategy (tokens) and the login
+// strategy (login-INPUT rows: subject=username, token=password) — both read the
+// SAME row shape, only the interpretation differs. The caller has already enforced
+// mutual exclusion and that at least one is present where required; this helper
+// assumes exactly one of Users/Source is set when it is asked to resolve.
+func resolveAuthRows(a Auth, dir string) ([]domain.Credential, error) {
+	if len(a.Users) > 0 {
+		entries := make([]domain.Credential, len(a.Users))
 		for i, c := range a.Users {
 			entries[i] = domain.Credential{Subject: c.Subject, Secret: c.Token}
 		}
-	} else {
-		src, err := credentialSourceFor(*a.Source, dir)
-		if err != nil {
-			return domain.CredentialPool{}, err
-		}
-		entries, err = src.Load(context.Background())
-		if err != nil {
-			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
-		}
+		return entries, nil
 	}
-	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
+	src, err := credentialSourceFor(*a.Source, dir)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := src.Load(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("scenariofile: %w", err)
+	}
+	return entries, nil
 }
 
 // buildLoginCredentials compiles the login authoring block into a login pool plus
@@ -590,9 +621,33 @@ func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.Creden
 // built with the SAME buildGraph/buildTemplates helpers the main flow uses, so a
 // login journey is authored exactly like any other flow, and it never carries a
 // secret (the token is minted at run time).
-func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
-	if len(a.Users) > 0 || a.Source != nil {
-		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy mints tokens from a login flow and takes no inline users or source", domain.CredLogin)
+//
+// P8 MULTI-USER LOGIN: the auth block MAY carry a pool of login-INPUT rows — inline
+// auth.users (subject=username, token=password) or an external auth.source of the
+// same shape. They are NOT pre-issued tokens: virtual user i logs in as row i%N, so
+// each VU authenticates as a different account (the login flow templates
+// {{.username}}/{{.password}}). The rows are resolved HERE into pool.Entries — the
+// SAME single resolution point the pool strategy uses (resolveAuthRows), and a login
+// source is ALWAYS resolved into entries (never kept as a reference): a login pool
+// can never distribute (login+workers/--engine stays rejected because a minted token
+// and the inline passwords are secrets the fan-out cannot resolve), so a login pool
+// always arrives at the run path with Source nil and real in-process entries. With
+// no users and no source, it is the unchanged single-identity login.
+func buildLoginCredentials(a Auth, dir string) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+	hasUsers, hasSource := len(a.Users) > 0, a.Source != nil
+	if hasUsers && hasSource {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy takes either inline login-input users or a source, not both", domain.CredLogin)
+	}
+	var entries []domain.Credential
+	if hasUsers || hasSource {
+		// Login-input rows are always resolved to in-process entries here — a login
+		// pool never ships a source reference to a distributed engine (login is
+		// rejected with workers/--engine), so the run path always carries real rows.
+		resolved, err := resolveAuthRows(a, dir)
+		if err != nil {
+			return domain.CredentialPool{}, nil, err
+		}
+		entries = resolved
 	}
 	if a.Login == nil || len(a.Login.Flow) == 0 {
 		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy needs an auth.login.flow describing how to mint a token", domain.CredLogin)
@@ -631,6 +686,9 @@ func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpe
 		Strategy:    domain.CredLogin,
 		LoginFlowID: &flowID,
 		LoginScope:  scope,
+		// The login-INPUT rows (empty for the single-identity login). The orchestrator
+		// threads them into the login token func so VU i logs in as row i%N.
+		Entries: entries,
 	}
 	loginFlow := &runspec.LoginFlowSpec{
 		Graph:      graph,

@@ -117,6 +117,183 @@ func TestLoginTokenFuncDistinctPerIndex(t *testing.T) {
 	}
 }
 
+// TestLoginTokenFuncCredentialPoolRows drives the P8 multi-user login path: the
+// login flow carries a credential pool of login-INPUT rows (username/password), and
+// the transport seeds {{.username}}/{{.password}} from row i%N before walking the
+// flow. VU 0/1/2 each POST a DISTINCT account's credentials and capture a distinct
+// token; VU 3 wraps to row 0. The minted credential's Subject defaults to the row's
+// username so a finding identifies which user.
+func TestLoginTokenFuncCredentialPoolRows(t *testing.T) {
+	type loginReq struct {
+		U string `json:"u"`
+		P string `json:"p"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body loginReq
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.WriteHeader(http.StatusOK)
+		// Echo username+password back so the test can assert each VU logged in as a
+		// different account and got an account-specific token.
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok-" + body.U + "-" + body.P})
+	}))
+	defer srv.Close()
+
+	flow := LoginFlow{
+		Graph:     domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "t"}}},
+		Templates: map[domain.ID]domain.APITemplate{"t": {Method: "POST", Path: "/login", PayloadTemplate: `{"u":"{{.username}}","p":"{{.password}}"}`, Extract: map[string]string{"token": "access_token"}}},
+		Start:     "login",
+		MaxSteps:  4,
+		TokenVar:  "token",
+		Entries: []domain.Credential{
+			{Subject: "alice", Secret: "pw-a"},
+			{Subject: "bob", Secret: "pw-b"},
+			{Subject: "carol", Secret: "pw-c"},
+		},
+	}
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, flow.Templates, load.WithGuard(guardFor(t, srv.URL)))
+	tf, err := NewLoginTokenFunc(runner, flow, 1)
+	if err != nil {
+		t.Fatalf("new token func: %v", err)
+	}
+
+	want := []struct {
+		secret  string
+		subject string
+	}{
+		{"tok-alice-pw-a", "alice"},
+		{"tok-bob-pw-b", "bob"},
+		{"tok-carol-pw-c", "carol"},
+		{"tok-alice-pw-a", "alice"}, // VU 3 wraps to row 0
+	}
+	for i, w := range want {
+		cred, err := tf(context.Background(), i)
+		if err != nil {
+			t.Fatalf("mint %d: %v", i, err)
+		}
+		if cred.Secret != w.secret {
+			t.Errorf("VU %d secret = %q, want %q (each VU logs in as a different account)", i, cred.Secret, w.secret)
+		}
+		if cred.Subject != w.subject {
+			t.Errorf("VU %d subject = %q, want %q (minted subject defaults to the row's username)", i, cred.Subject, w.subject)
+		}
+	}
+}
+
+// TestLoginTokenFuncRowAliases proves the {{.subject}}/{{.secret}} aliases render
+// the same row as {{.username}}/{{.password}} — a login body may use either name.
+func TestLoginTokenFuncRowAliases(t *testing.T) {
+	var seenU, seenP string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			U string `json:"u"`
+			P string `json:"p"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seenU, seenP = body.U, body.P
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok"})
+	}))
+	defer srv.Close()
+
+	flow := LoginFlow{
+		Graph:     domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "t"}}},
+		Templates: map[domain.ID]domain.APITemplate{"t": {Method: "POST", Path: "/login", PayloadTemplate: `{"u":"{{.subject}}","p":"{{.secret}}"}`, Extract: map[string]string{"token": "access_token"}}},
+		Start:     "login",
+		MaxSteps:  4,
+		TokenVar:  "token",
+		Entries:   []domain.Credential{{Subject: "alice", Secret: "pw-a"}},
+	}
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, flow.Templates, load.WithGuard(guardFor(t, srv.URL)))
+	tf, err := NewLoginTokenFunc(runner, flow, 1)
+	if err != nil {
+		t.Fatalf("new token func: %v", err)
+	}
+	if _, err := tf(context.Background(), 0); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if seenU != "alice" || seenP != "pw-a" {
+		t.Errorf("{{.subject}}/{{.secret}} rendered %q/%q, want alice/pw-a", seenU, seenP)
+	}
+}
+
+// TestLoginTokenFuncRowSubjectOverridable proves an explicit SubjectVar (or an
+// auto-detected subject from the response) overrides the row's username as the
+// minted credential's Subject — the row default applies only when no subject is
+// captured.
+func TestLoginTokenFuncRowSubjectOverridable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok", "uid": "server-id-42"})
+	}))
+	defer srv.Close()
+
+	flow := LoginFlow{
+		Graph:      domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "t"}}},
+		Templates:  map[domain.ID]domain.APITemplate{"t": {Method: "POST", Path: "/login", PayloadTemplate: `{"u":"{{.username}}"}`, Extract: map[string]string{"token": "access_token", "subject": "uid"}}},
+		Start:      "login",
+		MaxSteps:   4,
+		TokenVar:   "token",
+		SubjectVar: "subject",
+		Entries:    []domain.Credential{{Subject: "alice", Secret: "pw-a"}},
+	}
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, flow.Templates, load.WithGuard(guardFor(t, srv.URL)))
+	tf, err := NewLoginTokenFunc(runner, flow, 1)
+	if err != nil {
+		t.Fatalf("new token func: %v", err)
+	}
+	cred, err := tf(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if cred.Subject != "server-id-42" {
+		t.Errorf("explicit SubjectVar should override the row username, got subject = %q", cred.Subject)
+	}
+}
+
+// TestLoginTokenFuncNoEntriesUnchanged pins that a login flow with NO entries is
+// byte-for-byte the current single-identity login: the userIndex var is still
+// threaded, {{.username}}/{{.password}} render empty, and the minted subject comes
+// from the flow (or auto-detect), never a row.
+func TestLoginTokenFuncNoEntriesUnchanged(t *testing.T) {
+	var seenUsername string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		seenUsername = body["u"]
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok-" + body["idx"], "user": "svc"})
+	}))
+	defer srv.Close()
+
+	flow := LoginFlow{
+		Graph:      domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "t"}}},
+		Templates:  map[domain.ID]domain.APITemplate{"t": {Method: "POST", Path: "/login", PayloadTemplate: `{"u":"{{.username}}","idx":"{{.userIndex}}"}`, Extract: map[string]string{"token": "access_token", "subject": "user"}}},
+		Start:      "login",
+		MaxSteps:   4,
+		TokenVar:   "token",
+		SubjectVar: "subject",
+		// No Entries: single-identity login.
+	}
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, flow.Templates, load.WithGuard(guardFor(t, srv.URL)))
+	tf, err := NewLoginTokenFunc(runner, flow, 1)
+	if err != nil {
+		t.Fatalf("new token func: %v", err)
+	}
+	cred, err := tf(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if seenUsername != "" {
+		t.Errorf("no-entries login rendered {{.username}} = %q, want empty (single-identity, no row)", seenUsername)
+	}
+	if cred.Secret != "tok-3" {
+		t.Errorf("no-entries login should still thread userIndex; secret = %q, want tok-3", cred.Secret)
+	}
+	if cred.Subject != "svc" {
+		t.Errorf("no-entries login subject = %q, want svc (from the flow, not a row)", cred.Subject)
+	}
+}
+
 // TestLoginTokenFuncErrorsOnEmptyToken fails loudly when the login succeeds but no
 // token was captured (a misconfigured capture or an endpoint that returned no
 // token), rather than handing back an empty credential that authenticates as
