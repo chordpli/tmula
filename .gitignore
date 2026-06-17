@@ -45,6 +45,7 @@ Thumbs.db
 !.claude/skills/tmula-run/
 !.claude/skills/tmula-triage/
 !.claude/skills/tmula-up/
+!.claude/skills/tmula-auth/
 .codex/
 /context/
 .vills-lock.json
