@@ -80,6 +80,13 @@ type Scenario struct {
 	// (open) is assigned a credential by index so the simulated traffic carries
 	// real auth material. Omit it to run unauthenticated (the default).
 	Auth *Auth `json:"auth,omitempty"`
+	// SuggestedSignup is a signup-authoring block the importer derives from a
+	// register/signup operation, offered to the UI as a "create test accounts"
+	// suggestion that is INDEPENDENT of Auth (Auth may be a login while a signup is
+	// suggested separately). Expand maps it onto the spec's SuggestedSignup
+	// (a domain.SignupFlow) without making it the run's auth. It carries no secret —
+	// the token is captured from the live signup response. Omit it for no suggestion.
+	SuggestedSignup *AuthSignup `json:"suggestedSignup,omitempty"`
 	// Metrics, when set, correlates the run with server-side Prometheus series:
 	// each named query is fetched over the run's window and shown in the report
 	// beside the client-side stats. The Prometheus host must be allowlisted.
@@ -440,6 +447,18 @@ func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, er
 		spec.Experiment.Params.AuthStrategy = pool.Strategy
 	}
 
+	// The suggested signup is advisory (a "create test accounts" offer), independent
+	// of the primary auth above: it rides the spec untouched by the run path. Build
+	// it with the SAME helper the bootstrap-signup strategy uses so the two agree on
+	// the domain shape.
+	if s.SuggestedSignup != nil {
+		flow, err := buildSignupFlow(s.SuggestedSignup)
+		if err != nil {
+			return runspec.RunSpec{}, err
+		}
+		spec.SuggestedSignup = flow
+	}
+
 	if s.Metrics != nil {
 		src := domain.MetricsSource{PrometheusURL: s.Metrics.Prometheus, Queries: s.Metrics.Queries}
 		if err := src.Validate(); err != nil {
@@ -644,22 +663,9 @@ func buildBootstrapCredentials(a Auth) (domain.CredentialPool, error) {
 	// auth.signup.capture.token is OPTIONAL: an empty token means tmula auto-detects
 	// the token from the signup response, so a signup block need not name a capture.
 
-	steps, err := buildSignupSteps(a.Signup.Flow)
+	flow, err := buildSignupFlow(a.Signup)
 	if err != nil {
 		return domain.CredentialPool{}, err
-	}
-	flow := &domain.SignupFlow{
-		Steps:   steps,
-		Start:   domain.ID(a.Signup.Start),
-		Capture: domain.SignupCapture{Token: a.Signup.Capture.Token, Subject: a.Signup.Capture.Subject},
-	}
-	if len(a.Signup.Teardown) > 0 {
-		teardown, err := buildSignupSteps(a.Signup.Teardown)
-		if err != nil {
-			return domain.CredentialPool{}, err
-		}
-		flow.Teardown = teardown
-		flow.TeardownStart = domain.ID(a.Signup.TeardownStart)
 	}
 	return domain.CredentialPool{
 		ID:           "cli-pool",
@@ -667,6 +673,33 @@ func buildBootstrapCredentials(a Auth) (domain.CredentialPool, error) {
 		SignupFlow:   flow,
 		KeepAccounts: a.KeepAccounts,
 	}, nil
+}
+
+// buildSignupFlow translates a signup-authoring block (the bootstrap-signup
+// strategy's auth.signup, or the importer's standalone suggestion) into the
+// declarative domain.SignupFlow the orchestrator compiles: signup steps + a
+// capture mapping + an optional teardown journey. It carries no secret — the
+// token is captured at run time. Shared by the bootstrap strategy and the
+// advisory SuggestedSignup so the two agree on the domain shape.
+func buildSignupFlow(sg *AuthSignup) (*domain.SignupFlow, error) {
+	steps, err := buildSignupSteps(sg.Flow)
+	if err != nil {
+		return nil, err
+	}
+	flow := &domain.SignupFlow{
+		Steps:   steps,
+		Start:   domain.ID(sg.Start),
+		Capture: domain.SignupCapture{Token: sg.Capture.Token, Subject: sg.Capture.Subject},
+	}
+	if len(sg.Teardown) > 0 {
+		teardown, err := buildSignupSteps(sg.Teardown)
+		if err != nil {
+			return nil, err
+		}
+		flow.Teardown = teardown
+		flow.TeardownStart = domain.ID(sg.TeardownStart)
+	}
+	return flow, nil
 }
 
 // buildSignupSteps translates authored flow steps ("METHOD /path" shorthand) into
