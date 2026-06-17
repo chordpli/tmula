@@ -25,6 +25,11 @@ type Response struct {
 	StatusCode int
 	LatencyMs  float64
 	Body       []byte
+	// SetCookie carries the response's Set-Cookie header values (one per cookie).
+	// It is populated only where a caller needs it (the findings-isolated setup
+	// walks that auto-detect a credential); the hot request path leaves it nil so a
+	// high-volume run does not retain cookie strings per response.
+	SetCookie []string
 }
 
 // RequestCorrelation identifies the synthetic traffic in downstream logs and
@@ -154,7 +159,12 @@ func (a *RESTAdapter) Send(ctx context.Context, r RenderedRequest) (Response, er
 	if err != nil {
 		return Response{StatusCode: resp.StatusCode, LatencyMs: latency}, fmt.Errorf("load: read body: %w", err)
 	}
-	return Response{StatusCode: resp.StatusCode, LatencyMs: latency, Body: body}, nil
+	return Response{
+		StatusCode: resp.StatusCode,
+		LatencyMs:  latency,
+		Body:       body,
+		SetCookie:  resp.Header.Values("Set-Cookie"),
+	}, nil
 }
 
 func setCorrelationHeaders(h http.Header, c RequestCorrelation) {

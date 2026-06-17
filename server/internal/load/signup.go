@@ -29,9 +29,13 @@ type SignupFlow struct {
 	Templates map[domain.ID]domain.APITemplate
 	Start     domain.ID
 	MaxSteps  int
-	// TokenVar names the captured variable that becomes the credential's secret
-	// (required). SubjectVar, when set, names the captured variable that becomes the
-	// non-sensitive subject (the account id, also threaded into teardown).
+	// TokenVar names the captured variable that becomes the credential's secret. It
+	// is OPTIONAL: when empty (and the flow's extract does not yield it), the runner
+	// auto-detects the token from the final signup response (body + Set-Cookie) via
+	// DetectCredential. An explicit TokenVar is authoritative and always wins.
+	// SubjectVar, when set, names the captured variable that becomes the
+	// non-sensitive subject (the account id, also threaded into teardown); when empty
+	// it too is auto-detected.
 	TokenVar   string
 	SubjectVar string
 }
@@ -108,13 +112,15 @@ func WithSignupRetry(r SignupRetry) SignupOption {
 // userIndex is threaded into the render context as {{.userIndex}} and into the
 // per-identity seed (baseSeed + userIndex) so each signup walk is deterministic and
 // the flow can template the index it is provisioning for. A signup that succeeds
-// but captures no token is an error: the caller must fail rather than authenticate
-// as nobody. The walk is a single pass; idempotency/backoff are layered on in a
-// later step.
+// but yields no token — neither an explicit capture nor an auto-detected one — is an
+// error: the caller must fail rather than authenticate as nobody. The walk is a
+// single pass; idempotency/backoff are layered on in a later step.
+//
+// TokenVar is optional: an empty TokenVar means "auto-detect", so a signup flow can
+// omit the extract+capture boilerplate for the common token shapes (see
+// DetectCredential). When TokenVar is set, the captured variable is authoritative
+// and auto-detection is not consulted for the token.
 func NewSignupRunner(runner *Runner, flow SignupFlow, baseSeed int64, opts ...SignupOption) (SignupFunc, error) {
-	if flow.TokenVar == "" {
-		return nil, fmt.Errorf("load: signup flow needs a token capture variable")
-	}
 	if flow.Start == "" {
 		return nil, fmt.Errorf("load: signup flow needs a start node")
 	}
@@ -146,15 +152,32 @@ func NewSignupRunner(runner *Runner, flow SignupFlow, baseSeed int64, opts ...Si
 				ID:   "signup-" + strconv.Itoa(userIndex),
 				Vars: map[string]string{"userIndex": strconv.Itoa(userIndex)},
 			}
-			vars, retryable, err := runner.signupWalk(ctx, flow, nodeTmpl, maxSteps, user, baseSeed+int64(userIndex))
+			vars, final, retryable, err := runner.signupWalk(ctx, flow, nodeTmpl, maxSteps, user, baseSeed+int64(userIndex))
 			if err == nil {
+				// Explicit capture is authoritative; auto-detect only fills what was not
+				// explicitly captured. Detect once so token and (when not explicitly named)
+				// subject come from the same response.
+				var autoToken, autoSubject string
+				if flow.TokenVar == "" || flow.SubjectVar == "" {
+					autoToken, autoSubject = DetectCredential(final.Body, final.SetCookie)
+				}
+
 				token := vars[flow.TokenVar]
+				if flow.TokenVar == "" {
+					token = autoToken
+				}
 				if token == "" {
+					if flow.TokenVar == "" {
+						return domain.Credential{}, fmt.Errorf("load: signup user %d: could not auto-detect a token in the signup response; set an explicit capture path", userIndex)
+					}
 					return domain.Credential{}, fmt.Errorf("load: signup user %d captured no token from variable %q", userIndex, flow.TokenVar)
 				}
 				cred := domain.Credential{Secret: token}
-				if flow.SubjectVar != "" {
+				switch {
+				case flow.SubjectVar != "":
 					cred.Subject = vars[flow.SubjectVar]
+				default:
+					cred.Subject = autoSubject
 				}
 				return cred, nil
 			}
@@ -195,21 +218,23 @@ func NewSignupRunner(runner *Runner, flow SignupFlow, baseSeed int64, opts ...Si
 //   - 429 / 5xx → transient: returned as retryable so the caller backs off.
 //   - any other non-2xx → a deterministic error (not retryable).
 //
-// retryable is meaningful only when err != nil.
-func (r *Runner) signupWalk(ctx context.Context, flow SignupFlow, nodeTmpl map[domain.ID]domain.APITemplate, maxSteps int, u VirtualUser, seed int64) (vars map[string]string, retryable bool, err error) {
+// retryable is meaningful only when err != nil. final is the last request's raw
+// response (body + Set-Cookie), so NewSignupRunner can auto-detect a token the flow
+// did not explicitly capture.
+func (r *Runner) signupWalk(ctx context.Context, flow SignupFlow, nodeTmpl map[domain.ID]domain.APITemplate, maxSteps int, u VirtualUser, seed int64) (vars map[string]string, final ResponseSnapshot, retryable bool, err error) {
 	walker, werr := engine.NewWalker(flow.Graph, seed)
 	if werr != nil {
-		return nil, false, fmt.Errorf("signup build walker: %w", werr)
+		return nil, ResponseSnapshot{}, false, fmt.Errorf("signup build walker: %w", werr)
 	}
 	path, werr := walker.Walk(flow.Start, maxSteps)
 	if werr != nil {
-		return nil, false, fmt.Errorf("signup walk: %w", werr)
+		return nil, ResponseSnapshot{}, false, fmt.Errorf("signup walk: %w", werr)
 	}
 
 	vars = copyVars(u.Vars)
 	for _, nodeID := range path {
 		if ctx.Err() != nil {
-			return nil, false, ctx.Err()
+			return nil, ResponseSnapshot{}, false, ctx.Err()
 		}
 		tmpl, ok := nodeTmpl[nodeID]
 		if !ok {
@@ -217,13 +242,13 @@ func (r *Runner) signupWalk(ctx context.Context, flow SignupFlow, nodeTmpl map[d
 		}
 		req, rerr := Render(tmpl, r.baseURL, u.Cred, vars)
 		if rerr != nil {
-			return nil, false, fmt.Errorf("signup render node %q: %w", nodeID, rerr)
+			return nil, ResponseSnapshot{}, false, fmt.Errorf("signup render node %q: %w", nodeID, rerr)
 		}
 		resp, serr := r.send(ctx, req)
 		if serr != nil {
 			// A transport error (or a guard kill) — treat as transient so the burst
 			// backs off; a cancelled context surfaces through ctx.Err on the next loop.
-			return nil, true, fmt.Errorf("signup send node %q: %w", nodeID, serr)
+			return nil, ResponseSnapshot{}, true, fmt.Errorf("signup send node %q: %w", nodeID, serr)
 		}
 		switch {
 		case resp.StatusCode >= 200 && resp.StatusCode < 300:
@@ -232,10 +257,13 @@ func (r *Runner) signupWalk(ctx context.Context, flow SignupFlow, nodeTmpl map[d
 			// 409 = account exists = success. Capture whatever token the conflict
 			// response carries; a recover step later in the flow may also supply one.
 		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-			return nil, true, fmt.Errorf("signup node %q returned status %d (transient)", nodeID, resp.StatusCode)
+			return nil, ResponseSnapshot{}, true, fmt.Errorf("signup node %q returned status %d (transient)", nodeID, resp.StatusCode)
 		default:
-			return nil, false, fmt.Errorf("signup node %q returned status %d", nodeID, resp.StatusCode)
+			return nil, ResponseSnapshot{}, false, fmt.Errorf("signup node %q returned status %d", nodeID, resp.StatusCode)
 		}
+		// Remember the latest accepted response so the caller can auto-detect a token
+		// the flow did not explicitly capture. Secret surface: returned, never logged.
+		final = ResponseSnapshot{Body: resp.Body, SetCookie: resp.SetCookie}
 		if len(tmpl.Extract) > 0 {
 			extracted, eerr := ExtractVariables(resp.Body, tmpl.Extract)
 			if eerr != nil {
@@ -244,12 +272,12 @@ func (r *Runner) signupWalk(ctx context.Context, flow SignupFlow, nodeTmpl map[d
 				if resp.StatusCode == http.StatusConflict {
 					continue
 				}
-				return nil, false, fmt.Errorf("signup extract node %q: %w", nodeID, eerr)
+				return nil, ResponseSnapshot{}, false, fmt.Errorf("signup extract node %q: %w", nodeID, eerr)
 			}
 			for k, v := range extracted {
 				vars[k] = v
 			}
 		}
 	}
-	return vars, false, nil
+	return vars, final, false, nil
 }

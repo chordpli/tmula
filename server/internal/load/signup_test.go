@@ -161,14 +161,26 @@ func TestNewSignupRunnerErrorsWithoutToken(t *testing.T) {
 	}
 }
 
-// TestNewSignupRunnerRequiresTokenVar rejects a flow with no token capture at
-// construction time.
-func TestNewSignupRunnerRequiresTokenVar(t *testing.T) {
+// TestNewSignupRunnerAllowsEmptyTokenVar accepts a flow with no explicit token
+// capture: an empty TokenVar means "auto-detect", so construction must succeed (the
+// token is resolved from the response at provision time, not rejected up front).
+func TestNewSignupRunnerAllowsEmptyTokenVar(t *testing.T) {
 	flow := signupFlowFixture()
 	flow.TokenVar = ""
 	r := NewRunner(NewRESTAdapter(2*time.Second), "http://127.0.0.1:1", flow.Templates)
+	if _, err := NewSignupRunner(r, flow, 1); err != nil {
+		t.Fatalf("empty TokenVar means auto-detect and must build: %v", err)
+	}
+}
+
+// TestNewSignupRunnerRequiresStart still rejects a flow missing a start node — the
+// one piece auto-detection cannot supply.
+func TestNewSignupRunnerRequiresStart(t *testing.T) {
+	flow := signupFlowFixture()
+	flow.Start = ""
+	r := NewRunner(NewRESTAdapter(2*time.Second), "http://127.0.0.1:1", flow.Templates)
 	if _, err := NewSignupRunner(r, flow, 1); err == nil {
-		t.Fatal("a signup flow with no token capture variable should be rejected")
+		t.Fatal("a signup flow with no start node should be rejected")
 	}
 }
 
