@@ -20,6 +20,16 @@ import (
 // effective prewarm concurrency is min(this, RateCap.MaxConcurrency).
 const bootstrapMaxConcurrency = 16
 
+// signupRetryAttempts and signupRetryBaseDelay tune the idempotent provisioning
+// retry: a transient 429/5xx is retried a few times with exponential backoff
+// starting at the base delay, so a flaky or rate-limited signup endpoint does not
+// fail the run on the first hiccup. A deterministic 409 is success and is never
+// retried.
+const (
+	signupRetryAttempts  = 4
+	signupRetryBaseDelay = 200 * time.Millisecond
+)
+
 // bootstrapAuth bundles the runtime pieces a bootstrap-signup run is driven by: the
 // signup provider (cache-by-index + in-flight dedup + Prewarm) and the
 // effective prewarm concurrency. It is built once per run, above the load runner,
@@ -62,7 +72,14 @@ func (s *Server) bootstrapAuthFor(spec RunSpec, guard *safety.Guard) (*bootstrap
 	// no result/event sink, so RunOnce (which the transport drives) stays findings-
 	// isolated even if those were set.
 	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, flow.Templates, load.WithGuard(guard))
-	signup, err := load.NewSignupRunner(runner, flow, spec.Seed)
+	// Idempotent provisioning: retry a transient 429/5xx with bounded, cancellable
+	// backoff (a deterministic 409 = success is handled inside the walk). Every retry
+	// still flows through the guarded runner, so the burst respects the run's rate
+	// cap. The default clock is a real cancellable timer.
+	signup, err := load.NewSignupRunner(runner, flow, spec.Seed, load.WithSignupRetry(load.SignupRetry{
+		MaxAttempts: signupRetryAttempts,
+		BaseDelay:   signupRetryBaseDelay,
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("api: compile signup flow: %w", err)
 	}
