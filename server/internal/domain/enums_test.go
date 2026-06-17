@@ -6,7 +6,8 @@ func TestEnumValidity(t *testing.T) {
 	valid := []interface{ Valid() bool }{
 		EnvDev, EnvStaging, EnvProdLocked,
 		ProtocolREST, ProtocolGRPC, ProtocolWS,
-		CredPool, CredBootstrapSignup,
+		CredPool, CredBootstrapSignup, CredLogin,
+		LoginPerUser, LoginShared,
 		LoadWeight, LoadRamp, LoadSpike, LoadSoak,
 		RunLocal, RunDistributed,
 		RunPending, RunRunning, RunCompleted, RunKilled, RunFailed,
@@ -22,6 +23,7 @@ func TestEnumValidity(t *testing.T) {
 
 	invalid := []interface{ Valid() bool }{
 		EnvClass("prod"), Protocol("tcp"), CredentialStrategy("oauth"),
+		LoginScope("global"),
 		LoadStrategy("burst"), RunMode("cluster"), RunStatus("paused"),
 		FindingCategory("perf"), Severity("fatal"), AccessRole("admin"),
 	}

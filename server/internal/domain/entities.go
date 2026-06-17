@@ -184,6 +184,17 @@ type CredentialPool struct {
 	// existed.
 	Source          *CredentialSourceRef `json:"source,omitempty"`
 	BootstrapFlowID *ID                  `json:"bootstrapFlowId,omitempty"`
+	// LoginFlowID names the standalone login flow a CredLogin pool walks to mint a
+	// token (POST a login/token endpoint, capture the token). It is a declarative
+	// reference, not a node in the main scenario graph, so the simulated traffic
+	// never observes the login. Required for the CredLogin strategy, ignored
+	// otherwise. omitempty keeps a non-login pool serializing byte-identically.
+	LoginFlowID *ID `json:"loginFlowId,omitempty"`
+	// LoginScope selects how many principals a CredLogin pool mints: per-user (the
+	// default, empty value) runs the login once per virtual user; shared runs it
+	// once and shares the single token (client_credentials). Ignored by other
+	// strategies. omitempty keeps a non-login pool serializing byte-identically.
+	LoginScope LoginScope `json:"loginScope,omitempty"`
 }
 
 // Validate checks the pool can actually provide credentials. For the pool
@@ -212,7 +223,30 @@ func (c CredentialPool) Validate() error {
 	if c.Strategy == CredBootstrapSignup && (c.BootstrapFlowID == nil || *c.BootstrapFlowID == "") {
 		return fmt.Errorf("credential pool %q: bootstrap-signup needs a non-empty bootstrapFlowId", c.ID)
 	}
+	if c.Strategy == CredLogin {
+		if c.LoginFlowID == nil || *c.LoginFlowID == "" {
+			return fmt.Errorf("credential pool %q: login strategy needs a non-empty loginFlowId", c.ID)
+		}
+		// The empty scope is the per-user default; any explicit value must be known.
+		if c.LoginScope != "" && !c.LoginScope.Valid() {
+			return fmt.Errorf("credential pool %q: invalid loginScope %q (want %q or %q)", c.ID, c.LoginScope, LoginPerUser, LoginShared)
+		}
+		// A login pool mints its tokens at run time, so it must not also carry a
+		// pre-supplied pool (inline entries or an external source).
+		if len(c.Entries) > 0 || c.Source != nil {
+			return fmt.Errorf("credential pool %q: login strategy mints tokens at run time and takes no inline entries or source", c.ID)
+		}
+	}
 	return nil
+}
+
+// EffectiveLoginScope resolves the pool's login scope, defaulting an empty value
+// to per-user. It is meaningful only for a CredLogin pool.
+func (c CredentialPool) EffectiveLoginScope() LoginScope {
+	if c.LoginScope == "" {
+		return LoginPerUser
+	}
+	return c.LoginScope
 }
 
 // --- Load profile -----------------------------------------------------------

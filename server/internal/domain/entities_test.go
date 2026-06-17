@@ -81,6 +81,74 @@ func TestCredentialPoolValidate(t *testing.T) {
 	}
 }
 
+// TestCredentialPoolValidateLogin pins the CredLogin (token-minting) strategy
+// branch: a login pool requires a non-empty LoginFlowID and a valid (or empty,
+// defaulting to per-user) LoginScope. It is added cleanly beside the Source and
+// bootstrap branches without disturbing them.
+func TestCredentialPoolValidateLogin(t *testing.T) {
+	login := ID("login")
+
+	// A login pool with a flow id (and the default, empty scope) is valid.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login}).Validate(); err != nil {
+		t.Errorf("valid login pool rejected: %v", err)
+	}
+	// An explicit per-user scope is valid.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, LoginScope: LoginPerUser}).Validate(); err != nil {
+		t.Errorf("login pool with per-user scope rejected: %v", err)
+	}
+	// An explicit shared scope is valid.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, LoginScope: LoginShared}).Validate(); err != nil {
+		t.Errorf("login pool with shared scope rejected: %v", err)
+	}
+	// Missing login flow id: rejected.
+	if err := (CredentialPool{Strategy: CredLogin}).Validate(); err == nil {
+		t.Error("login strategy without a login flow id should fail")
+	}
+	// Empty login flow id pointer value: rejected.
+	empty := ID("")
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &empty}).Validate(); err == nil {
+		t.Error("login strategy with an empty login flow id should fail")
+	}
+	// Unknown scope: rejected.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, LoginScope: LoginScope("global")}).Validate(); err == nil {
+		t.Error("login strategy with an unknown scope should fail")
+	}
+	// A login pool needs neither Entries nor Source: the exactly-one rule is for
+	// the pool strategy only, so a login pool carrying entries is still rejected.
+	if err := (CredentialPool{Strategy: CredLogin, LoginFlowID: &login, Entries: []Credential{{Secret: "s"}}}).Validate(); err == nil {
+		t.Error("login strategy should not also carry inline entries")
+	}
+}
+
+// TestCredentialPoolLoginMarshalNoSecret confirms a login pool serializes only its
+// non-secret declarative fields (the login flow id and scope) and never a secret —
+// the minted token is acquired at runtime and never round-trips through a spec.
+func TestCredentialPoolLoginMarshalNoSecret(t *testing.T) {
+	login := ID("login")
+	pool := CredentialPool{ID: "p", Strategy: CredLogin, LoginFlowID: &login, LoginScope: LoginShared}
+	b, err := json.Marshal(pool)
+	if err != nil {
+		t.Fatalf("marshal login pool: %v", err)
+	}
+	out := string(b)
+	if !strings.Contains(out, "login") || !strings.Contains(out, "shared") {
+		t.Errorf("login pool dropped its declarative reference: %s", out)
+	}
+	if strings.Contains(out, "secret") || strings.Contains(out, "\"token\"") {
+		t.Errorf("login pool carries a secret-shaped field: %s", out)
+	}
+
+	// A non-login pool does not grow a loginFlowId/loginScope key (omitempty).
+	plain := CredentialPool{ID: "p", Strategy: CredPool, Entries: []Credential{{Subject: "u0", Secret: "t"}}}
+	pb, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("marshal plain pool: %v", err)
+	}
+	if strings.Contains(string(pb), "loginFlowId") || strings.Contains(string(pb), "loginScope") {
+		t.Errorf("plain pool grew a login key: %s", pb)
+	}
+}
+
 // TestCredentialSourceRefMarshalNoSecret confirms a Source-based pool serializes
 // its non-sensitive reference (path/var/format) and never a secret, and that an
 // Entries-only pool serializes byte-identical to before the Source field existed

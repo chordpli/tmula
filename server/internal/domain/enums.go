@@ -48,12 +48,43 @@ const (
 	CredPool CredentialStrategy = "pool"
 	// CredBootstrapSignup registers accounts up front, one per virtual user.
 	CredBootstrapSignup CredentialStrategy = "bootstrap-signup"
+	// CredLogin mints a token at run time by walking a standalone login flow
+	// (POST a login/token endpoint, capture the token from the response) and
+	// hands it to a virtual user. It composes above the pool/bootstrap providers:
+	// the login flow is referenced by LoginFlowID, never inlined as a node in the
+	// main scenario graph, so the simulated traffic never observes the login.
+	CredLogin CredentialStrategy = "login"
 )
 
 // Valid reports whether s is a known credential strategy.
 func (s CredentialStrategy) Valid() bool {
 	switch s {
-	case CredPool, CredBootstrapSignup:
+	case CredPool, CredBootstrapSignup, CredLogin:
+		return true
+	default:
+		return false
+	}
+}
+
+// LoginScope selects how many principals a login (CredLogin) pool mints. per-user
+// (the default) runs the login flow once per virtual user so each authenticates
+// as a distinct principal; shared runs it once and hands the single token to every
+// session (the client_credentials machine-to-machine case).
+type LoginScope string
+
+const (
+	// LoginPerUser mints one token per virtual user (the default).
+	LoginPerUser LoginScope = "per-user"
+	// LoginShared mints one token shared by every session (client_credentials).
+	LoginShared LoginScope = "shared"
+)
+
+// Valid reports whether s is a known login scope. The empty value is NOT valid
+// here (callers treat "" as the per-user default before validating); pass an
+// explicit scope to Valid.
+func (s LoginScope) Valid() bool {
+	switch s {
+	case LoginPerUser, LoginShared:
 		return true
 	default:
 		return false
