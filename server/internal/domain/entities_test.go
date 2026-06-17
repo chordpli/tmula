@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,6 +78,114 @@ func TestCredentialPoolValidate(t *testing.T) {
 	}
 	if err := (CredentialPool{Strategy: CredBootstrapSignup}).Validate(); err == nil {
 		t.Error("bootstrap strategy without flow should fail")
+	}
+}
+
+// TestCredentialSourceRefMarshalNoSecret confirms a Source-based pool serializes
+// its non-sensitive reference (path/var/format) and never a secret, and that an
+// Entries-only pool serializes byte-identical to before the Source field existed
+// (no spurious "source" key).
+func TestCredentialSourceRefMarshalNoSecret(t *testing.T) {
+	// A Source-based pool: the reference carries a file path and a format, never
+	// a secret. The struct has no secret field by construction.
+	srcPool := CredentialPool{
+		ID:       "p",
+		Strategy: CredPool,
+		Source:   &CredentialSourceRef{File: "creds.csv", Format: "csv"},
+	}
+	b, err := json.Marshal(srcPool)
+	if err != nil {
+		t.Fatalf("marshal source pool: %v", err)
+	}
+	out := string(b)
+	if !strings.Contains(out, "creds.csv") || !strings.Contains(out, "csv") {
+		t.Errorf("source pool dropped its reference: %s", out)
+	}
+	if strings.Contains(out, "secret") || strings.Contains(out, "token") {
+		t.Errorf("source ref unexpectedly carries a secret-shaped field: %s", out)
+	}
+
+	// An Entries-only pool serializes exactly as it did before Source existed: no
+	// "source" key appears.
+	entPool := CredentialPool{
+		ID:       "p",
+		Strategy: CredPool,
+		Entries:  []Credential{{Subject: "u0", Secret: "tok-0"}},
+	}
+	eb, err := json.Marshal(entPool)
+	if err != nil {
+		t.Fatalf("marshal entries pool: %v", err)
+	}
+	if strings.Contains(string(eb), "source") {
+		t.Errorf("entries-only pool grew a source key: %s", eb)
+	}
+	if strings.Contains(string(eb), "tok-0") {
+		t.Errorf("entries pool leaked a secret: %s", eb)
+	}
+}
+
+// TestCredentialPoolValidateExactlyOne pins the exactly-one rule for the pool
+// strategy: precisely one of Entries or Source must be present. Both-set and
+// neither-set are rejected; either alone is accepted. The bootstrap path is
+// unaffected.
+func TestCredentialPoolValidateExactlyOne(t *testing.T) {
+	entriesOnly := CredentialPool{Strategy: CredPool, Entries: []Credential{{Secret: "s"}}}
+	if err := entriesOnly.Validate(); err != nil {
+		t.Errorf("entries-only pool rejected: %v", err)
+	}
+
+	sourceOnly := CredentialPool{Strategy: CredPool, Source: &CredentialSourceRef{File: "c.csv", Format: "csv"}}
+	if err := sourceOnly.Validate(); err != nil {
+		t.Errorf("source-only pool rejected: %v", err)
+	}
+
+	both := CredentialPool{
+		Strategy: CredPool,
+		Entries:  []Credential{{Secret: "s"}},
+		Source:   &CredentialSourceRef{File: "c.csv", Format: "csv"},
+	}
+	if err := both.Validate(); err == nil {
+		t.Error("a pool with both entries and a source should be rejected")
+	}
+
+	neither := CredentialPool{Strategy: CredPool}
+	if err := neither.Validate(); err == nil {
+		t.Error("a pool with neither entries nor a source should be rejected")
+	}
+
+	// An invalid Source (within an otherwise source-only pool) is rejected.
+	badSource := CredentialPool{Strategy: CredPool, Source: &CredentialSourceRef{Format: "csv"}}
+	if err := badSource.Validate(); err == nil {
+		t.Error("a pool whose source sets neither file nor env should be rejected")
+	}
+
+	// Bootstrap is unaffected: it ignores entries/source entirely.
+	flow := ID("signup")
+	if err := (CredentialPool{Strategy: CredBootstrapSignup, BootstrapFlowID: &flow}).Validate(); err != nil {
+		t.Errorf("bootstrap pool rejected after exactly-one change: %v", err)
+	}
+}
+
+// TestCredentialSourceRefValidate covers the reference's own shape rules:
+// exactly one of File/Env, and a known format.
+func TestCredentialSourceRefValidate(t *testing.T) {
+	if err := (CredentialSourceRef{File: "c.csv", Format: "csv"}).Validate(); err != nil {
+		t.Errorf("valid file ref rejected: %v", err)
+	}
+	if err := (CredentialSourceRef{Env: "TMULA_CREDS", Format: "tokens"}).Validate(); err != nil {
+		t.Errorf("valid env ref rejected: %v", err)
+	}
+	if err := (CredentialSourceRef{Format: "csv"}).Validate(); err == nil {
+		t.Error("a ref with neither file nor env should be rejected")
+	}
+	if err := (CredentialSourceRef{File: "c.csv", Env: "X", Format: "csv"}).Validate(); err == nil {
+		t.Error("a ref with both file and env should be rejected")
+	}
+	if err := (CredentialSourceRef{File: "c.csv", Format: "yaml"}).Validate(); err == nil {
+		t.Error("a ref with an unknown format should be rejected")
+	}
+	if err := (CredentialSourceRef{File: "c.csv"}).Validate(); err == nil {
+		t.Error("a ref with an empty format should be rejected")
 	}
 }
 
