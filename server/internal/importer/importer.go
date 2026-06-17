@@ -158,7 +158,7 @@ func journeyStage(o apiOp) int {
 	t := strings.ToLower(o.op.OperationID + " " + o.path)
 	has := func(subs ...string) bool { return matchesAny(t, subs...) }
 	switch {
-	case has("login", "signin", "sign-in", "logon", "oauth", "/token", "session", "register", "signup", "sign-up"):
+	case matchesAny(t, loginKeywords...):
 		return 0 // authenticate first
 	// Checkout keywords stay commerce-specific so generic verbs (completeProfile,
 	// confirmEmail) are not dragged to the end of an unrelated API.
@@ -176,6 +176,14 @@ func journeyStage(o apiOp) int {
 	default:
 		return 3 // unknown: a neutral middle
 	}
+}
+
+// loginKeywords are the substrings (case-insensitive) that mark an operationId or
+// path as an authentication / token-minting step. They drive journeyStage's "stage
+// 0" ordering for OpenAPI and the HAR importer's login-request discovery, so the
+// two paths agree on what a login endpoint looks like.
+var loginKeywords = []string{
+	"login", "signin", "sign-in", "logon", "oauth", "/token", "session", "register", "signup", "sign-up",
 }
 
 // matchesAny reports whether s contains any of subs.
@@ -230,8 +238,13 @@ func FromHAR(data []byte) (scenariofile.Scenario, error) {
 
 	var target string
 	flow := make([]scenariofile.Step, 0, len(h.Log.Entries))
+	// keptFor[i] is the flow index produced by entry i, or -1 if the entry was
+	// dropped (cross-origin, malformed path). It lets the auth extractor map a HAR
+	// entry (the login call, the auth-bearing requests) back onto the emitted steps.
+	keptFor := make([]int, len(h.Log.Entries))
 	ids := newIDSet()
-	for _, e := range h.Log.Entries {
+	for i, e := range h.Log.Entries {
+		keptFor[i] = -1
 		u, err := url.Parse(e.Request.URL)
 		if err != nil || u.Host == "" {
 			continue
@@ -261,6 +274,7 @@ func FromHAR(data []byte) (scenariofile.Scenario, error) {
 		if e.Request.PostData != nil {
 			body = e.Request.PostData.Text
 		}
+		keptFor[i] = len(flow)
 		flow = append(flow, scenariofile.Step{
 			// Derive the id from path+query so two calls to the same path with
 			// different queries (/search?q=1 vs ?q=2) get distinct ids.
@@ -272,7 +286,15 @@ func FromHAR(data []byte) (scenariofile.Scenario, error) {
 	if len(flow) == 0 {
 		return scenariofile.Scenario{}, fmt.Errorf("importer: har has no usable requests")
 	}
-	return scenariofile.Scenario{Target: target, Flow: flow}, nil
+
+	sc := scenariofile.Scenario{Target: target, Flow: flow}
+	// Auto-extract the captured auth: scan the entries for a live Authorization
+	// header / auth cookie and a login request, emit a login or pool auth block,
+	// and rewrite the replayed steps to carry Authorization: Bearer {{.token}}
+	// instead of the stale captured literal. Best-effort and resilient: a HAR with
+	// no auth yields no block, so an unauthenticated session imports unchanged.
+	extractHARAuth(&sc, h.Log.Entries, keptFor)
+	return sc, nil
 }
 
 // Marshal renders a scenario as a YAML document for writing to a file. It round-
@@ -322,18 +344,41 @@ type operation struct {
 	Security *[]securityRequirement `json:"security"`
 }
 
+// harDoc is the subset of a HAR file the importer reads. Beyond the request line
+// and body (used to build a step), it now also reads request Headers and Cookies —
+// to discover the live Authorization/auth-cookie credential — and the response
+// Content/Headers, so a login entry can be recognized by a token in its response
+// (via load.DetectCredential, reusing E1). Every added field is optional: a HAR
+// that omits them parses exactly as before.
 type harDoc struct {
 	Log struct {
-		Entries []struct {
-			Request struct {
-				Method   string `json:"method"`
-				URL      string `json:"url"`
-				PostData *struct {
-					Text string `json:"text"`
-				} `json:"postData"`
-			} `json:"request"`
-		} `json:"entries"`
+		Entries []harEntry `json:"entries"`
 	} `json:"log"`
+}
+
+type harEntry struct {
+	Request struct {
+		Method   string  `json:"method"`
+		URL      string  `json:"url"`
+		Headers  []harNV `json:"headers"`
+		Cookies  []harNV `json:"cookies"`
+		PostData *struct {
+			Text string `json:"text"`
+		} `json:"postData"`
+	} `json:"request"`
+	Response struct {
+		Headers []harNV `json:"headers"`
+		Content struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"response"`
+}
+
+// harNV is a HAR name/value pair, the shape HAR uses for request/response headers
+// and cookies.
+type harNV struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // openAPITarget derives a base URL from a v3 server or a v2 host/basePath. A
