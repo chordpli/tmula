@@ -27,6 +27,29 @@ type VirtualUser struct {
 	ID   string
 	Cred domain.Credential
 	Vars map[string]string
+	// Holder, when non-nil, is the live credential box the session reads its
+	// credential from per step instead of the static Cred — the seam the
+	// login/refresh path uses to rotate a token mid-run. It is nil for every
+	// existing (static-pool, bootstrap, unauthenticated) run, and on that path
+	// runSession renders Cred exactly as before and never touches a holder (no
+	// lock). It is a CredentialHolder (interface over a pointer), so the shared
+	// login scope can hand one holder to every user and a single refresh reaches
+	// all of them. It is a runtime-only seam wired in-process by the orchestrator,
+	// never serialized (json:"-"), so a spec's Users array marshals byte-for-byte
+	// as before — the holder, like a minted token, never crosses the wire.
+	Holder CredentialHolder `json:"-"`
+}
+
+// cred resolves the credential to render a step with: the live value from the
+// holder when one is set (the login/refresh path), otherwise the static Cred
+// (every existing run). Keeping the holder read here — and only when Holder!=nil —
+// is what guarantees the static path takes zero holder locks and renders Cred
+// byte-for-byte as before.
+func (u VirtualUser) cred() domain.Credential {
+	if u.Holder != nil {
+		return u.Holder.Get()
+	}
+	return u.Cred
 }
 
 // StepResult records the outcome of one node visit by one virtual user.
@@ -412,7 +435,11 @@ func (r *Runner) runSession(ctx context.Context, g domain.ScenarioGraph, nodeTmp
 				break
 			}
 		}
-		req, err := Render(tmpl, r.baseURL, u.Cred, sessionVars)
+		// Resolve the credential per step: u.cred() reads the live value from a
+		// holder when the user carries one (the login/refresh path, so a mid-run
+		// token rotation is visible on the next request), and otherwise returns the
+		// static u.Cred without touching any lock — the unchanged static path.
+		req, err := Render(tmpl, r.baseURL, u.cred(), sessionVars)
 		if err != nil {
 			emit(StepResult{UserID: u.ID, NodeID: nodeID, Err: err, Seed: seed, Path: walked})
 			continue
