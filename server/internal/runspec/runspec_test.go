@@ -186,11 +186,19 @@ func TestValidateLoginPool(t *testing.T) {
 		t.Error("a login pool with no login flow must be rejected")
 	}
 
-	// A login pool with a malformed login flow (no token capture) is rejected.
+	// A login pool with no explicit token capture is ACCEPTED: an empty tokenVar
+	// means the runner auto-detects the token from the login response.
+	autoDetect := loginSpec("http://127.0.0.1:1")
+	autoDetect.LoginFlow.TokenVar = ""
+	if err := autoDetect.Validate(); err != nil {
+		t.Errorf("a login flow with no explicit token capture (auto-detect) should be valid: %v", err)
+	}
+
+	// A login pool with a malformed login flow (no start node) is still rejected.
 	badFlow := loginSpec("http://127.0.0.1:1")
-	badFlow.LoginFlow.TokenVar = ""
+	badFlow.LoginFlow.Start = ""
 	if err := badFlow.Validate(); err == nil {
-		t.Error("a login flow with no token capture var must be rejected")
+		t.Error("a login flow with no start node must be rejected")
 	}
 
 	// Invariant 8: login + workers is rejected (a minted token is still a secret).

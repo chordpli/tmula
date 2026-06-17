@@ -43,12 +43,14 @@ func (s SignupStep) Validate() error {
 }
 
 // SignupCapture maps a signup flow's captured variables onto the minted
-// credential: Token (the secret bearer token, required) and Subject (the
-// non-sensitive principal id, optional but recommended so teardown and evidence
-// can name the account).
+// credential: Token (the secret bearer token) and Subject (the non-sensitive
+// principal id, optional but recommended so teardown and evidence can name the
+// account). Both are optional: an empty Token means "auto-detect" — the runner
+// resolves the token from the signup response (see load.DetectCredential) instead
+// of an explicitly named capture.
 type SignupCapture struct {
 	// Token names the captured variable that becomes the credential's secret.
-	// Required.
+	// Optional: empty means auto-detect the token from the signup response.
 	Token string `json:"token"`
 	// Subject names the captured variable that becomes the non-sensitive subject.
 	// Optional; when set it is also threaded into teardown as {{.subject}} so the
@@ -93,19 +95,18 @@ func (f *SignupFlow) HasTeardown() bool {
 }
 
 // Validate checks the flow is well-formed and can authenticate a run: a non-empty
-// step list with unique ids and a present start node, a resolvable token (secret)
-// capture, and — when a teardown journey is declared — well-formed teardown steps
-// with a present teardown start. It validates shape only; compiling and running the
-// flow is a concern of the layer above the domain.
+// step list with unique ids and a present start node, and — when a teardown journey
+// is declared — well-formed teardown steps with a present teardown start. The token
+// capture is optional: an empty Capture.Token means the runner auto-detects the
+// token from the signup response, so a flow without an explicit capture is valid. It
+// validates shape only; compiling and running the flow is a concern of the layer
+// above the domain.
 func (f *SignupFlow) Validate() error {
 	if f == nil {
 		return fmt.Errorf("signup flow: required")
 	}
 	if len(f.Steps) == 0 {
 		return fmt.Errorf("signup flow: at least one step is required")
-	}
-	if f.Capture.Token == "" {
-		return fmt.Errorf("signup flow: a token capture (the credential secret) is required")
 	}
 	if err := validateSignupSteps(f.Steps, f.Start, "signup"); err != nil {
 		return err

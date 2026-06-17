@@ -110,15 +110,18 @@ type LoginFlowSpec struct {
 	Templates map[domain.ID]domain.APITemplate `json:"templates"`
 	Start     domain.ID                        `json:"start"`
 	MaxSteps  int                              `json:"maxSteps,omitempty"`
-	// TokenVar names the captured variable that becomes the credential's secret
-	// (required). SubjectVar, when set, names the captured variable that becomes
-	// the non-sensitive subject.
-	TokenVar   string `json:"tokenVar"`
+	// TokenVar names the captured variable that becomes the credential's secret.
+	// Optional: an empty TokenVar means the runner auto-detects the token from the
+	// login response (see load.DetectCredential). SubjectVar, when set, names the
+	// captured variable that becomes the non-sensitive subject.
+	TokenVar   string `json:"tokenVar,omitempty"`
 	SubjectVar string `json:"subjectVar,omitempty"`
 }
 
-// Validate checks the login flow is well-formed: a non-empty graph, a start node
-// present in it, and a token capture variable.
+// Validate checks the login flow is well-formed: a non-empty graph and a start node
+// present in it. The token capture variable is optional — an empty TokenVar means
+// the runner auto-detects the token from the login response — so a flow without an
+// explicit capture is valid.
 func (f LoginFlowSpec) Validate() error {
 	if err := f.Graph.Validate(); err != nil {
 		return fmt.Errorf("login flow: %w", err)
@@ -135,9 +138,6 @@ func (f LoginFlowSpec) Validate() error {
 	}
 	if !known {
 		return fmt.Errorf("login flow: start node %q is not in the login graph", f.Start)
-	}
-	if f.TokenVar == "" {
-		return fmt.Errorf("login flow: a token capture variable (tokenVar) is required")
 	}
 	return nil
 }

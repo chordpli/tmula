@@ -45,12 +45,12 @@ func TestSignupFlowValidate(t *testing.T) {
 		t.Error("signup flow whose start node is not a step should be rejected")
 	}
 
-	// No token capture: rejected — a flow that captures no secret cannot
-	// authenticate the run.
+	// No token capture: ACCEPTED — an empty token capture means the runner
+	// auto-detects the token from the signup response, so the flow is still valid.
 	noToken := wellFormedSignupFlow()
 	noToken.Capture.Token = ""
-	if err := noToken.Validate(); err == nil {
-		t.Error("signup flow without a token capture should be rejected")
+	if err := noToken.Validate(); err != nil {
+		t.Errorf("signup flow with no explicit token capture (auto-detect) should be valid: %v", err)
 	}
 
 	// A step with no method/path is malformed.
@@ -101,12 +101,13 @@ func TestCredentialPoolValidateBootstrapSignupFlow(t *testing.T) {
 		t.Errorf("bootstrap pool with a well-formed signup flow rejected: %v", err)
 	}
 
-	// A SignupFlow with no token capture is rejected (no resolvable secret).
+	// A SignupFlow with no explicit token capture is ACCEPTED: the empty token
+	// capture means the runner auto-detects the token from the signup response.
 	noSecret := wellFormedSignupFlow()
 	noSecret.Capture.Token = ""
-	bad := CredentialPool{ID: "p", Strategy: CredBootstrapSignup, SignupFlow: noSecret}
-	if err := bad.Validate(); err == nil {
-		t.Error("bootstrap pool whose signup flow captures no secret should be rejected")
+	autoDetect := CredentialPool{ID: "p", Strategy: CredBootstrapSignup, SignupFlow: noSecret}
+	if err := autoDetect.Validate(); err != nil {
+		t.Errorf("bootstrap pool whose signup flow auto-detects the token should be valid: %v", err)
 	}
 
 	// The legacy BootstrapFlowID form still validates (P1/P2 invariant).
