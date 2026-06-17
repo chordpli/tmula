@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/safety"
@@ -30,6 +31,13 @@ var (
 	// only (they are not persisted), so an evicted run or a restarted engine
 	// cannot replay its sessions.
 	errSpecUnavailable = errors.New("run spec no longer available")
+	// errCredentialSourceUnavailable: a distributed-auth finding's run carried a
+	// reference-only credential source (the workers resolved it locally), but the
+	// source is not resolvable server-side at reproduce time — the file is gone or
+	// the env var is unset. The replay cannot rebuild the principal the shard ran
+	// as, so it is refused with a typed sentinel (a 410-class "gone", parallel to
+	// errSpecUnavailable) rather than replaying under the wrong — or no — user.
+	errCredentialSourceUnavailable = errors.New("credential source no longer available for reproduce")
 )
 
 // Reproduce attempt bounds: enough repeats to tell flaky from deterministic
@@ -242,14 +250,19 @@ func sessionJourney(spec RunSpec, sess domain.EvidenceSession) (domain.ID, int, 
 // selected — the same pure Acquire keying both run paths use. Closed sessions
 // additionally reuse their pool user's template vars.
 //
-// LOAD-BEARING INVARIANT: for distributed runs, spec.CredentialProvider()
-// always returns (nil, nil) — guaranteed by runspec.validateCredentialPool,
-// which rejects any spec combining a credential pool with workers. This means
-// the replay runs as the same (unauthenticated) user the distributed session
-// ran as, keeping the reproduce verdict user-consistent. If that validation
-// invariant is ever relaxed, this function must be updated to re-derive the
-// per-shard user assignment. See runspec.validateCredentialPool and
-// runspec.CredentialProvider for the full invariant.
+// LOAD-BEARING INVARIANT (post-P3 distributed-auth split): a distributed run is
+// authenticated ONLY from a reference-only credential SOURCE that the workers
+// resolved locally by GLOBAL index (runspec.validateCredentialPool rejects inline
+// secrets, bootstrap and login with workers). The reproduce path therefore
+// rebuilds that SAME source-backed provider here and re-acquires the principal by
+// the session's global index — the identical pure Acquire the shards used — so a
+// distributed-auth finding replays under the exact principal it ran as. A
+// distributed run with NO source pool stays unauthenticated, so the replay runs
+// as the same anonymous user. If the source is no longer resolvable server-side
+// (file gone, env unset), sessionUser returns errCredentialSourceUnavailable (a
+// 410-class typed sentinel) rather than replaying under the wrong — or no — user.
+// See runspec.validateCredentialPool and shardSpecFor (orchestrator.go) for the
+// other halves of this contract; PR3 and PR4 land together (D4).
 //
 // LOGIN (CredLogin) REPRODUCE IS REFRESH-FREE: a login finding is replayed under a
 // re-acquired token (one deterministic login of the same index), seeded onto Cred
@@ -296,6 +309,25 @@ func (s *Server) sessionUser(ctx context.Context, spec RunSpec, sess domain.Evid
 		return user, nil
 	}
 
+	// Distributed-auth (source pool) replay: the run authenticated by shipping a
+	// reference each worker resolved locally, so rebuild that SAME source-backed
+	// provider and re-acquire the principal by the session's GLOBAL index — the
+	// identical pure Acquire the shards used. A still-resolvable source replays the
+	// exact principal; an unresolvable one (file gone, env unset) is refused with a
+	// typed sentinel rather than replaying under the wrong user.
+	if spec.CredentialPool != nil && spec.CredentialPool.Source != nil {
+		provider, err := s.sourceProviderFor(ctx, *spec.CredentialPool.Source)
+		if err != nil {
+			return load.VirtualUser{}, err
+		}
+		cred, err := provider.Acquire(ctx, idx)
+		if err != nil {
+			return load.VirtualUser{}, fmt.Errorf("api: acquire credential for reproduce: %w", err)
+		}
+		user.Cred = cred
+		return user, nil
+	}
+
 	provider, err := spec.CredentialProvider()
 	if err != nil {
 		return load.VirtualUser{}, err
@@ -308,6 +340,29 @@ func (s *Server) sessionUser(ctx context.Context, spec RunSpec, sess domain.Evid
 		user.Cred = cred
 	}
 	return user, nil
+}
+
+// sourceProviderFor rebuilds the index-deterministic PoolProvider behind a
+// distributed-auth run's reference-only credential source, resolving it
+// server-side at reproduce time. The root is the engine's working directory —
+// the same operator-asserted location the workers read — so the reproduce
+// principal matches the shard's. A source that no longer resolves (file removed,
+// env unset) yields errCredentialSourceUnavailable, a 410-class typed sentinel,
+// so the handler reports "gone" instead of replaying under the wrong principal.
+func (s *Server) sourceProviderFor(ctx context.Context, ref domain.CredentialSourceRef) (auth.Provider, error) {
+	src, err := auth.SourceFromRef(ref, s.credentialRoot)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCredentialSourceUnavailable, err)
+	}
+	entries, err := src.Load(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCredentialSourceUnavailable, err)
+	}
+	provider, err := auth.NewPoolProvider(entries)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errCredentialSourceUnavailable, err)
+	}
+	return provider, nil
 }
 
 // findingSignal returns the per-step predicate that decides whether a replayed
@@ -454,7 +509,7 @@ func (s *Server) reproduceFinding(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, err)
 		case errors.As(err, &ge):
 			writeErr(w, http.StatusForbidden, ge.err)
-		case errors.Is(err, errSpecUnavailable):
+		case errors.Is(err, errSpecUnavailable), errors.Is(err, errCredentialSourceUnavailable):
 			writeErr(w, http.StatusGone, err)
 		case errors.Is(err, errNotReproducible):
 			writeErr(w, http.StatusUnprocessableEntity, err)
