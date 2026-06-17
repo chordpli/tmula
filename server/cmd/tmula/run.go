@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/chordpli/tmula/server/internal/api"
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/gate"
 	"github.com/chordpli/tmula/server/internal/load"
@@ -50,6 +51,8 @@ func runScenario(args []string) error {
 		knownIssues    = fs.String("known-issues", "", "known-issues YAML; matching new findings are suppressed in the baseline gate until their expires date (YYYY-MM-DD)")
 		summary        = fs.String("summary", "", "append a markdown run summary to this file (default: $GITHUB_STEP_SUMMARY when set)")
 		keepAccounts   = fs.Bool("keep-accounts", false, "bootstrap-signup: leave the provisioned accounts in place instead of deprovisioning them (the only way to run a signup flow that declares no teardown)")
+		authSource     = fs.String("auth-source", "", "attach an external credential pool without editing the scenario: file:./pool.csv or env:VAR. Resolved in-process (the secret never crosses the wire); overrides any auth block the scenario declares")
+		authFormat     = fs.String("auth-format", "", "credential body format for --auth-source: csv | jsonl | tokens (default: inferred from a .csv/.jsonl file extension, else tokens)")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
 	fs.Usage = func() {
@@ -166,6 +169,23 @@ func runScenario(args []string) error {
 	}
 	if err != nil {
 		return err
+	}
+
+	// --auth-source attaches (or overrides) the run's credential pool from a flag,
+	// so an operator can authenticate a scenario without editing it. It is resolved
+	// the same way P1 resolves a file/env source at expand time — in-process, into
+	// inline entries — so the secret never crosses the wire. The flag wins over any
+	// auth block the scenario declares (documented on the flag). It is resolved
+	// against the working directory (a flag path is operator-supplied at the CLI,
+	// not relative to the scenario file), confined there by auth.FileSource.
+	if *authSource != "" {
+		pool, err := resolveAuthSourceFlag(*authSource, *authFormat)
+		if err != nil {
+			return err
+		}
+		spec.CredentialPool = pool
+		spec.LoginFlow = nil // a flag pool is pre-supplied entries, never a login flow
+		spec.Experiment.Params.AuthStrategy = pool.Strategy
 	}
 
 	// --keep-accounts opts a bootstrap-signup run out of teardown. It is the only
@@ -378,6 +398,70 @@ func sourceBackedAuth(a *scenariofile.Auth) bool {
 	return a.Strategy == "" || a.Strategy == string(domain.CredPool)
 }
 
+// resolveAuthSourceFlag turns a --auth-source value ("file:./pool.csv" or
+// "env:VAR") plus an optional --auth-format into a fully resolved pre-supplied
+// credential pool. It resolves the source the SAME way scenariofile.Expand
+// resolves a scenario auth.source — in-process, into inline domain.Credential
+// entries — so the secret stays on this host and never crosses the wire. A file
+// path is rooted at the working directory (a flag path is supplied at the CLI,
+// not beside the scenario) and confined there by auth.FileSource's guards.
+//
+// The format is inferred when --auth-format is empty: a .csv or .jsonl file
+// extension picks csv/jsonl, otherwise tokens (one secret per line) — env has no
+// extension to infer from, so it too defaults to tokens. An unknown scheme or a
+// missing scheme separator is a clear flag error.
+func resolveAuthSourceFlag(flagVal, format string) (*domain.CredentialPool, error) {
+	scheme, ref, ok := strings.Cut(flagVal, ":")
+	if !ok || ref == "" {
+		return nil, fmt.Errorf("--auth-source %q must be file:<path> or env:<VAR>", flagVal)
+	}
+
+	f := auth.Format(format)
+	if format == "" {
+		f = inferAuthFormat(scheme, ref)
+	}
+
+	var src auth.CredentialSource
+	switch scheme {
+	case "file":
+		// A relative flag path is rooted at the working directory; an absolute path
+		// is rooted at its own directory so an operator may point anywhere on the
+		// host (a CLI flag is trusted operator input, unlike a scenario-embedded
+		// path). Either way auth.FileSource's containment/symlink/size guards apply.
+		root, path := ".", ref
+		if filepath.IsAbs(ref) {
+			root, path = filepath.Dir(ref), filepath.Base(ref)
+		}
+		src = auth.FileSource{Root: root, Path: path, Format: f}
+	case "env":
+		src = auth.EnvSource{Var: ref, Format: f}
+	default:
+		return nil, fmt.Errorf("--auth-source scheme %q is not supported (use file: or env:)", scheme)
+	}
+
+	entries, err := src.Load(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	return &domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
+}
+
+// inferAuthFormat picks a credential format from a --auth-source reference when
+// --auth-format is omitted: a .csv or .jsonl file extension selects that format,
+// otherwise (any other extension, or an env var with no extension) it falls back
+// to tokens — one secret per line.
+func inferAuthFormat(scheme, ref string) auth.Format {
+	if scheme == "file" {
+		switch strings.ToLower(filepath.Ext(ref)) {
+		case ".csv":
+			return auth.CSV
+		case ".jsonl":
+			return auth.JSONL
+		}
+	}
+	return auth.Tokens
+}
+
 // startInProcessEngine boots a local control plane on an ephemeral loopback port
 // so `tmula run` needs no separately running server. The returned stop func
 // drains in-flight work and shuts the listener down.
@@ -514,6 +598,10 @@ type cliReport struct {
 	} `json:"stats"`
 	Findings []cliFinding `json:"findings"`
 	Workers  int          `json:"workers"`
+	// Notes are non-failing, observability-only run remarks (e.g. "auth may have
+	// expired" on a cluster of 401/403s). They are surfaced to the operator but
+	// never gate the run.
+	Notes []string `json:"notes"`
 	// ServerMetrics / MetricsError mirror the report's optional Prometheus
 	// correlation (RunSpec metrics opt-in); the markdown summary tabulates them.
 	ServerMetrics []cliMetricSeries `json:"serverMetrics"`
@@ -558,6 +646,13 @@ func printReport(r cliReport) {
 		r.Stats.P50, r.Stats.P95, r.Stats.P99, r.Stats.Max)
 	if len(r.Stats.StatusCounts) > 0 {
 		fmt.Printf("  status: %s\n", formatStatusCounts(r.Stats.StatusCounts))
+	}
+
+	// Run-level notes are non-failing observability remarks (e.g. an auth-expiry
+	// hint). They print between the stats and the findings, prefixed so an operator
+	// reads them as advice, not a finding.
+	for _, n := range r.Notes {
+		fmt.Printf("  note: %s\n", n)
 	}
 
 	if len(r.Findings) == 0 {

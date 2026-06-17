@@ -59,6 +59,12 @@ func markdownReport(r cliReport) string {
 		fmt.Fprintf(&b, "Status codes: `%s`\n\n", formatStatusCounts(r.Stats.StatusCounts))
 	}
 
+	// Non-failing run notes (e.g. an auth-expiry hint) render as block quotes so
+	// they read as advisory remarks in the step summary, distinct from findings.
+	for _, n := range r.Notes {
+		fmt.Fprintf(&b, "> Note: %s\n\n", mdEscape(n))
+	}
+
 	writeMetricsSection(&b, r)
 
 	if len(r.Findings) == 0 {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -17,12 +18,53 @@ type Report struct {
 	Stats    obs.Stats           `json:"stats"`
 	Findings []domain.Finding    `json:"findings"`
 	Workers  int                 `json:"workers"`
+	// Notes are non-failing, observability-only run remarks derived purely from the
+	// run's aggregated stats at report-build time — never findings and never a
+	// re-classification of any observation. The "auth likely expired" note (a
+	// cluster of 401/403 responses, the honest tell of a static token pool that
+	// expired mid-run) lives here. Optional: omitted when there is nothing to note.
+	Notes []string `json:"notes,omitempty"`
 	// ServerMetrics carries the Prometheus series fetched over the run's window
 	// when the run opted in (RunSpec.Metrics); MetricsError notes a fetch
 	// problem. Both are live-report extras: they are not persisted, so a report
 	// rebuilt from the store omits them.
 	ServerMetrics []domain.MetricSeries `json:"serverMetrics,omitempty"`
 	MetricsError  string                `json:"metricsError,omitempty"`
+}
+
+// authRejectionCodes are the HTTP statuses that signal an auth rejection (401
+// Unauthorized, 403 Forbidden). A cluster of them across a run is the tell that a
+// static credential pool expired or was rejected mid-run.
+var authRejectionCodes = [...]int{401, 403}
+
+// notesFor builds the report's non-failing observability notes from already
+// aggregated stats. It is the single place report() and reportFromStore() derive
+// notes, so the live report and one rebuilt from the store agree. It reads only
+// the status-count tallies — it classifies nothing and raises no finding.
+func notesFor(stats obs.Stats) []string {
+	var notes []string
+	if n := authExpiryNote(stats); n != "" {
+		notes = append(notes, n)
+	}
+	return notes
+}
+
+// authExpiryNote returns the "auth may have expired" run note when the run saw any
+// auth-rejection (401/403) responses, or "" otherwise. The threshold is simple and
+// deliberate: > 0 auth rejections surfaces the note (any 401/403 is worth telling
+// an operator about — it is the honest signal a token pool expired or was rejected
+// mid-run, and the note never fails the run, so a low bar costs nothing). It is
+// computed purely from the run's observed status counts at report-build time and
+// is NOT a finding and NOT a reclassification — the obs predicates are untouched.
+func authExpiryNote(stats obs.Stats) string {
+	n := 0
+	for _, code := range authRejectionCodes {
+		n += stats.StatusCounts[code]
+	}
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("auth may have expired or been rejected (%d response(s) were 401/403)", n)
 }
 
 // report assembles the report for a run (caller must not hold rs.mu). Workers is
@@ -35,8 +77,10 @@ func (rs *runState) report() Report {
 	serverMetrics := append([]domain.MetricSeries(nil), rs.serverMetrics...)
 	metricsErr := rs.metricsErr
 	rs.mu.Unlock()
+	stats := rs.stats()
 	return Report{
-		Run: exec, Stats: rs.stats(), Findings: findings, Workers: exec.Workers,
+		Run: exec, Stats: stats, Findings: findings, Workers: exec.Workers,
+		Notes:         notesFor(stats),
 		ServerMetrics: serverMetrics, MetricsError: metricsErr,
 	}
 }
@@ -79,5 +123,5 @@ func (s *Server) reportFromStore(id domain.ID) (Report, bool) {
 	if err != nil {
 		slog.Warn("load findings from store failed", "run", id, "err", err)
 	}
-	return Report{Run: run, Stats: stats, Findings: findings, Workers: run.Workers}, true
+	return Report{Run: run, Stats: stats, Findings: findings, Workers: run.Workers, Notes: notesFor(stats)}, true
 }
