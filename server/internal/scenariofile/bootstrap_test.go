@@ -32,6 +32,59 @@ auth:
       subject: uid
 `
 
+// bootstrapAuthAutoYAML is a bootstrap-signup block with NO capture: an empty token
+// capture means tmula auto-detects the token from the signup response. It keeps a
+// subject capture so teardown can still name the account.
+const bootstrapAuthAutoYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+    headers:
+      Authorization: "Bearer {{.token}}"
+auth:
+  strategy: bootstrap-signup
+  signup:
+    flow:
+      - id: register
+        request: POST /signup
+        body: '{"i":"{{.userIndex}}"}'
+        extract:
+          uid: id
+    teardown:
+      - id: remove
+        request: DELETE /accounts/{{.subject}}
+    capture:
+      subject: uid
+`
+
+// TestExpandAuthBootstrapAutoDetect accepts a bootstrap block with no explicit
+// token capture: the expanded SignupFlow carries an empty Capture.Token
+// (auto-detect) and still validates (the teardown satisfies the gating gate).
+func TestExpandAuthBootstrapAutoDetect(t *testing.T) {
+	s, err := Parse([]byte(bootstrapAuthAutoYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	sf := spec.CredentialPool.SignupFlow
+	if sf == nil {
+		t.Fatal("expanded bootstrap spec carries no signup flow")
+	}
+	if sf.Capture.Token != "" {
+		t.Errorf("signup capture token = %q, want empty (auto-detect)", sf.Capture.Token)
+	}
+	if sf.Capture.Subject != "uid" {
+		t.Errorf("signup capture subject = %q, want uid", sf.Capture.Subject)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("bootstrap spec with auto-detect capture failed validation: %v", err)
+	}
+}
+
 // TestExpandAuthBootstrap threads a compact bootstrap-signup auth block into the
 // RunSpec: the strategy is CredBootstrapSignup, the pool carries the declarative
 // SignupFlow (signup + teardown steps + captures), and the spec validates (it has a

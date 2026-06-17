@@ -154,8 +154,9 @@ type AuthSignup struct {
 	// keepAccounts) to leave accounts in place.
 	Teardown []Step `json:"teardown,omitempty"`
 	// Capture maps the credential fields to captured variable names: token (the
-	// secret, required) and subject (the account id, optional but needed for a
-	// {{.subject}}-templated teardown).
+	// secret) and subject (the account id, needed for a {{.subject}}-templated
+	// teardown). Both are optional — an empty token means tmula auto-detects the
+	// token from the signup response.
 	Capture AuthCapture `json:"capture"`
 	// Start overrides the signup flow's start node (defaults to the first step).
 	Start string `json:"start,omitempty"`
@@ -175,7 +176,8 @@ type AuthLogin struct {
 	// never a node in it, so the simulated traffic never observes the login.
 	Flow []Step `json:"flow,omitempty"`
 	// Capture maps the credential fields to captured variable names: token (the
-	// secret, required) and subject (the principal id, optional).
+	// secret) and subject (the principal id). Both are optional — an empty token
+	// means tmula auto-detects the token from the login response.
 	Capture AuthCapture `json:"capture"`
 	// Scope is per-user (default) — one token per virtual user — or shared — one
 	// client_credentials token for every session.
@@ -187,7 +189,9 @@ type AuthLogin struct {
 // AuthCapture names the captured variables that become the minted credential.
 type AuthCapture struct {
 	// Token is the captured variable that becomes the credential's secret (the
-	// bearer token). Required.
+	// bearer token). Optional: when empty, tmula auto-detects the token from the
+	// login/signup response (the common access_token/token/jwt/session shapes), so
+	// an author need not name it explicitly.
 	Token string `json:"token"`
 	// Subject is the captured variable that becomes the non-sensitive subject.
 	// Optional.
@@ -574,9 +578,8 @@ func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpe
 	if a.Login == nil || len(a.Login.Flow) == 0 {
 		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy needs an auth.login.flow describing how to mint a token", domain.CredLogin)
 	}
-	if a.Login.Capture.Token == "" {
-		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.capture.token is required (the captured variable that becomes the token)")
-	}
+	// auth.login.capture.token is OPTIONAL: an empty token means tmula auto-detects
+	// the token from the login response, so a login block need not name a capture.
 
 	templates, err := buildTemplates(a.Login.Flow)
 	if err != nil {
@@ -638,9 +641,8 @@ func buildBootstrapCredentials(a Auth) (domain.CredentialPool, error) {
 	if a.Signup == nil || len(a.Signup.Flow) == 0 {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy needs an auth.signup.flow describing how to provision an account", domain.CredBootstrapSignup)
 	}
-	if a.Signup.Capture.Token == "" {
-		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.signup.capture.token is required (the captured variable that becomes the token)")
-	}
+	// auth.signup.capture.token is OPTIONAL: an empty token means tmula auto-detects
+	// the token from the signup response, so a signup block need not name a capture.
 
 	steps, err := buildSignupSteps(a.Signup.Flow)
 	if err != nil {

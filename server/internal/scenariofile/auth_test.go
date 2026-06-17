@@ -130,6 +130,46 @@ func TestExpandAuthLogin(t *testing.T) {
 	}
 }
 
+// loginAuthAutoYAML is a login auth block with NO capture: an empty token capture
+// means tmula auto-detects the token from the login response.
+const loginAuthAutoYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+    headers:
+      Authorization: "Bearer {{.token}}"
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: login
+        request: POST /login
+        body: '{"u":"svc"}'
+`
+
+// TestExpandAuthLoginAutoDetect accepts a login block with no explicit capture: the
+// expanded spec carries an empty TokenVar (auto-detect) and still validates.
+func TestExpandAuthLoginAutoDetect(t *testing.T) {
+	s, err := Parse([]byte(loginAuthAutoYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.LoginFlow == nil {
+		t.Fatal("expanded login spec carries no login flow")
+	}
+	if spec.LoginFlow.TokenVar != "" {
+		t.Errorf("login flow token var = %q, want empty (auto-detect)", spec.LoginFlow.TokenVar)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("login spec with auto-detect capture failed validation: %v", err)
+	}
+}
+
 // TestExpandAuthLoginScope reads the optional scope and defaults it to per-user.
 func TestExpandAuthLoginScope(t *testing.T) {
 	shared := strings.Replace(loginAuthYAML, "    capture:", "    scope: shared\n    capture:", 1)
