@@ -65,6 +65,123 @@ func TestExpandAuthPool(t *testing.T) {
 	}
 }
 
+const loginAuthYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+    headers:
+      Authorization: "Bearer {{.token}}"
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: login
+        request: POST /login
+        body: '{"u":"svc"}'
+        extract:
+          token: access_token
+          subject: user
+    capture:
+      token: token
+      subject: subject
+`
+
+// TestExpandAuthLogin threads a compact login auth block into the RunSpec: the
+// strategy is CredLogin, the pool references a login flow, and the spec carries the
+// compiled login flow (graph + templates + captures) for the orchestrator to mint
+// tokens from. The resulting spec validates.
+func TestExpandAuthLogin(t *testing.T) {
+	s, err := Parse([]byte(loginAuthYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Strategy != domain.CredLogin {
+		t.Fatalf("expected a login credential pool, got %+v", spec.CredentialPool)
+	}
+	if spec.CredentialPool.LoginFlowID == nil || *spec.CredentialPool.LoginFlowID == "" {
+		t.Errorf("login pool has no login flow id")
+	}
+	if spec.LoginFlow == nil {
+		t.Fatal("expanded login spec carries no login flow")
+	}
+	if spec.LoginFlow.TokenVar != "token" {
+		t.Errorf("login flow token var = %q, want token", spec.LoginFlow.TokenVar)
+	}
+	if spec.LoginFlow.SubjectVar != "subject" {
+		t.Errorf("login flow subject var = %q, want subject", spec.LoginFlow.SubjectVar)
+	}
+	if spec.LoginFlow.Start == "" {
+		t.Error("login flow has no start node")
+	}
+	// The login flow's template must carry the POST /login request and the captures.
+	if len(spec.LoginFlow.Templates) == 0 {
+		t.Fatal("login flow has no templates")
+	}
+	if spec.Experiment.Params.AuthStrategy != domain.CredLogin {
+		t.Errorf("experiment auth strategy = %q, want login", spec.Experiment.Params.AuthStrategy)
+	}
+	if err := spec.Validate(); err != nil {
+		t.Errorf("expanded login spec failed validation: %v", err)
+	}
+}
+
+// TestExpandAuthLoginScope reads the optional scope and defaults it to per-user.
+func TestExpandAuthLoginScope(t *testing.T) {
+	shared := strings.Replace(loginAuthYAML, "    capture:", "    scope: shared\n    capture:", 1)
+	s, err := Parse([]byte(shared))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.CredentialPool.LoginScope != domain.LoginShared {
+		t.Errorf("scope = %q, want shared", spec.CredentialPool.LoginScope)
+	}
+}
+
+// TestExpandAuthLoginRoundTrip pins the scenariofile round-trip: a login auth block
+// parses, expands, and the resulting spec marshals WITHOUT leaking any secret
+// (there is none to leak — the token is minted at run time), and re-parses.
+func TestExpandAuthLoginRoundTrip(t *testing.T) {
+	s, err := Parse([]byte(loginAuthYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// Re-marshal the parsed scenario and parse it again: the authoring block is
+	// stable across a YAML/JSON round-trip.
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal scenario: %v", err)
+	}
+	s2, err := Parse(b)
+	if err != nil {
+		t.Fatalf("re-parse: %v", err)
+	}
+	spec, err := Expand(s2)
+	if err != nil {
+		t.Fatalf("expand re-parsed: %v", err)
+	}
+	if spec.CredentialPool.Strategy != domain.CredLogin {
+		t.Fatalf("round-tripped strategy = %q, want login", spec.CredentialPool.Strategy)
+	}
+	// The expanded spec marshals with no secret-shaped field (the login mints at run
+	// time; nothing secret is authored in a login block).
+	sb, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
+	}
+	if strings.Contains(string(sb), "\"-\"") {
+		t.Errorf("spec leaked a masked field literally: %s", sb)
+	}
+}
+
 // TestExpandAuthPoolMarshalHidesSecret confirms the secret authored in the file
 // reaches the in-memory pool but never serializes out of the expanded spec, so an
 // authenticated scenario still honors the at-rest masking guarantee.

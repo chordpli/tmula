@@ -151,3 +151,71 @@ func TestValidateRejectsUnresolvedSource(t *testing.T) {
 		t.Errorf("a resolved entries pool must still validate: %v", err)
 	}
 }
+
+// loginSpec returns a minimal valid CredLogin spec: a login pool plus the
+// standalone login flow it mints from.
+func loginSpec(baseURL string) runspec.RunSpec {
+	s := minimalSpec(baseURL)
+	flowID := domain.ID("login")
+	s.CredentialPool = &domain.CredentialPool{ID: "p", Strategy: domain.CredLogin, LoginFlowID: &flowID}
+	s.LoginFlow = &runspec.LoginFlowSpec{
+		Graph:     domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "tlogin"}}},
+		Templates: map[domain.ID]domain.APITemplate{"tlogin": {Method: "POST", Path: "/login", Extract: map[string]string{"token": "access_token"}}},
+		Start:     "login",
+		TokenVar:  "token",
+	}
+	s.Experiment.Params.AuthStrategy = domain.CredLogin
+	return s
+}
+
+// TestValidateLoginPool pins the CredLogin run-path guards: a well-formed login
+// pool (with its login flow) validates; a login pool with no login flow is
+// rejected; and — invariant 8 — a login pool combined with distributed workers is
+// rejected exactly like a static pool, because a minted token is still a secret the
+// worker fan-out cannot resolve.
+func TestValidateLoginPool(t *testing.T) {
+	// A well-formed login spec validates.
+	if err := loginSpec("http://127.0.0.1:1").Validate(); err != nil {
+		t.Errorf("a well-formed login spec was rejected: %v", err)
+	}
+
+	// A login pool with no login flow is rejected.
+	noFlow := loginSpec("http://127.0.0.1:1")
+	noFlow.LoginFlow = nil
+	if err := noFlow.Validate(); err == nil {
+		t.Error("a login pool with no login flow must be rejected")
+	}
+
+	// A login pool with a malformed login flow (no token capture) is rejected.
+	badFlow := loginSpec("http://127.0.0.1:1")
+	badFlow.LoginFlow.TokenVar = ""
+	if err := badFlow.Validate(); err == nil {
+		t.Error("a login flow with no token capture var must be rejected")
+	}
+
+	// Invariant 8: login + workers is rejected (a minted token is still a secret).
+	dist := loginSpec("http://127.0.0.1:1")
+	dist.Workers = []string{"127.0.0.1:65535"}
+	if err := dist.Validate(); err == nil {
+		t.Error("a login pool with distributed workers must be rejected (the minted token is a secret the workers cannot resolve)")
+	}
+
+	// Invariant 8: login + aggregate workers is rejected too.
+	agg := loginSpec("http://127.0.0.1:1")
+	agg.Workers = []string{"127.0.0.1:65535"}
+	agg.AggregateWorkers = true
+	if err := agg.Validate(); err == nil {
+		t.Error("a login pool with aggregate workers must be rejected")
+	}
+}
+
+// TestLoginProviderBuiltAboveRunspec pins that runspec does not try to build a
+// login provider itself (it cannot — the transport lives above this leaf):
+// CredentialProvider errors for a login pool rather than silently returning an
+// unauthenticated (nil) provider, so a wiring bug fails loudly.
+func TestLoginProviderBuiltAboveRunspec(t *testing.T) {
+	s := loginSpec("http://127.0.0.1:1")
+	if _, err := s.CredentialProvider(); err == nil {
+		t.Error("runspec.CredentialProvider must not build a login provider (the orchestrator does)")
+	}
+}

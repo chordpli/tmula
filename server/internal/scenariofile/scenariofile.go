@@ -113,8 +113,9 @@ type Metrics struct {
 // reads it at expand time and resolves it into the pool's Entries, so the token
 // still never round-trips through YAML.
 type Auth struct {
-	// Strategy selects how users obtain credentials; it defaults to "pool". Only
-	// "pool" is accepted on this path (bootstrap-signup is a follow-up).
+	// Strategy selects how users obtain credentials; it defaults to "pool". "pool"
+	// (pre-supplied entries or a source) and "login" (mint a token from a login
+	// flow) are accepted; bootstrap-signup is a follow-up.
 	Strategy string `json:"strategy,omitempty"`
 	// Users is the pool of pre-supplied credentials, assigned to virtual users by
 	// index (wrapping around when there are more users than entries).
@@ -123,6 +124,41 @@ type Auth struct {
 	// Users: a file (resolved against the scenario file's directory) or an
 	// environment variable, in an explicit format. Mutually exclusive with Users.
 	Source *AuthSource `json:"source,omitempty"`
+	// Login, when set (strategy "login"), describes how to mint a token: a
+	// standalone login flow plus which response captures become the token (and
+	// subject), and an optional scope. The token is minted at run time and never
+	// authored in the file, so a login block carries no secret.
+	Login *AuthLogin `json:"login,omitempty"`
+}
+
+// AuthLogin authors a login (token-minting) credential strategy: a standalone
+// login flow (its own list of steps, exactly like the main flow), the captures
+// that become the credential, and an optional scope. It carries no secret — the
+// token comes from the live login response.
+type AuthLogin struct {
+	// Flow is the ordered login journey (usually a single POST to a login/token
+	// endpoint). Each step's extract captures response fields; capture names which
+	// of those becomes the token (and subject). It is a sibling of the main flow,
+	// never a node in it, so the simulated traffic never observes the login.
+	Flow []Step `json:"flow,omitempty"`
+	// Capture maps the credential fields to captured variable names: token (the
+	// secret, required) and subject (the principal id, optional).
+	Capture AuthCapture `json:"capture"`
+	// Scope is per-user (default) — one token per virtual user — or shared — one
+	// client_credentials token for every session.
+	Scope string `json:"scope,omitempty"`
+	// Start overrides the login flow's start node (defaults to the first step).
+	Start string `json:"start,omitempty"`
+}
+
+// AuthCapture names the captured variables that become the minted credential.
+type AuthCapture struct {
+	// Token is the captured variable that becomes the credential's secret (the
+	// bearer token). Required.
+	Token string `json:"token"`
+	// Subject is the captured variable that becomes the non-sensitive subject.
+	// Optional.
+	Subject string `json:"subject,omitempty"`
 }
 
 // AuthSource names where an external credential pool lives. Exactly one of File
@@ -340,11 +376,12 @@ func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
 	}
 
 	if s.Auth != nil {
-		pool, err := buildCredentialPool(*s.Auth, dir)
+		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir)
 		if err != nil {
 			return runspec.RunSpec{}, err
 		}
 		spec.CredentialPool = &pool
+		spec.LoginFlow = loginFlow
 		spec.Experiment.Params.AuthStrategy = pool.Strategy
 	}
 
@@ -409,13 +446,26 @@ func nodeExists(g domain.ScenarioGraph, id string) bool {
 // (Strategy=pool, Source nil), so a CLI run always carries real credentials and a
 // still-unresolved Source never reaches the run path. Either way the domain type
 // keeps the secret out of any serialization.
-func buildCredentialPool(a Auth, dir string) (domain.CredentialPool, error) {
+func buildCredentialPool(a Auth, dir string) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
 	strategy := domain.CredentialStrategy(a.Strategy)
 	if a.Strategy == "" {
 		strategy = domain.CredPool
 	}
-	if strategy != domain.CredPool {
-		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source)", strategy, domain.CredPool)
+	switch strategy {
+	case domain.CredPool:
+		pool, err := buildPoolCredentials(a, dir)
+		return pool, nil, err
+	case domain.CredLogin:
+		return buildLoginCredentials(a)
+	default:
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, or %q with a login flow)", strategy, domain.CredPool, domain.CredLogin)
+	}
+}
+
+// buildPoolCredentials maps the inline-users or source form onto a plain pool.
+func buildPoolCredentials(a Auth, dir string) (domain.CredentialPool, error) {
+	if a.Login != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
 	}
 	hasUsers, hasSource := len(a.Users) > 0, a.Source != nil
 	if hasUsers && hasSource {
@@ -442,6 +492,65 @@ func buildCredentialPool(a Auth, dir string) (domain.CredentialPool, error) {
 		}
 	}
 	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
+}
+
+// buildLoginCredentials compiles the login authoring block into a login pool plus
+// the standalone login flow the orchestrator mints tokens from. The login flow is
+// built with the SAME buildGraph/buildTemplates helpers the main flow uses, so a
+// login journey is authored exactly like any other flow, and it never carries a
+// secret (the token is minted at run time).
+func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+	if len(a.Users) > 0 || a.Source != nil {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy mints tokens from a login flow and takes no inline users or source", domain.CredLogin)
+	}
+	if a.Login == nil || len(a.Login.Flow) == 0 {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy needs an auth.login.flow describing how to mint a token", domain.CredLogin)
+	}
+	if a.Login.Capture.Token == "" {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.capture.token is required (the captured variable that becomes the token)")
+	}
+
+	templates, err := buildTemplates(a.Login.Flow)
+	if err != nil {
+		return domain.CredentialPool{}, nil, err
+	}
+	graph, err := buildGraph(a.Login.Flow)
+	if err != nil {
+		return domain.CredentialPool{}, nil, err
+	}
+	graph.ID = "login"
+	if err := scenario.Validate(graph); err != nil {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: login flow: %w", err)
+	}
+	start := a.Login.Flow[0].ID
+	if a.Login.Start != "" {
+		start = a.Login.Start
+	}
+	if !nodeExists(graph, start) {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: login flow start node %q is not in the login flow", start)
+	}
+
+	scope := domain.LoginScope(a.Login.Scope)
+	if a.Login.Scope != "" && !scope.Valid() {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.scope %q is not valid (want %q or %q)", a.Login.Scope, domain.LoginPerUser, domain.LoginShared)
+	}
+
+	flowID := domain.ID("login")
+	pool := domain.CredentialPool{
+		ID:          "cli-pool",
+		Strategy:    domain.CredLogin,
+		LoginFlowID: &flowID,
+		LoginScope:  scope,
+	}
+	loginFlow := &runspec.LoginFlowSpec{
+		Graph:      graph,
+		Templates:  templates,
+		Start:      domain.ID(start),
+		MaxSteps:   len(a.Login.Flow),
+		TokenVar:   a.Login.Capture.Token,
+		SubjectVar: a.Login.Capture.Subject,
+	}
+	return pool, loginFlow, nil
 }
 
 // credentialSourceFor builds the auth.CredentialSource an AuthSource block names.

@@ -171,6 +171,111 @@ func TestRunScenarioFileAuthInProcess(t *testing.T) {
 	}
 }
 
+// TestRunLoginAuthInProcess drives a login (token-minting) scenario end to end
+// against an httptest SUT in-process: the CLI mints a token from the login flow and
+// the protected endpoint sees the minted bearer token.
+func TestRunLoginAuthInProcess(t *testing.T) {
+	var mu sync.Mutex
+	var protectedAuths []string
+	var loginHits int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/login", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		loginHits++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "minted-tok", "user": "svc"})
+	})
+	mux.HandleFunc("/a", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		protectedAuths = append(protectedAuths, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	sut := httptest.NewServer(mux)
+	defer sut.Close()
+
+	file := filepath.Join(t.TempDir(), "login.yaml")
+	doc := "target: " + sut.URL + "\n" +
+		"users: 2\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"    headers:\n" +
+		"      Authorization: \"Bearer {{.token}}\"\n" +
+		"auth:\n" +
+		"  strategy: login\n" +
+		"  login:\n" +
+		"    flow:\n" +
+		"      - id: login\n" +
+		"        request: POST /login\n" +
+		"        extract:\n" +
+		"          token: access_token\n" +
+		"          subject: user\n" +
+		"    capture:\n" +
+		"      token: token\n" +
+		"      subject: subject\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	out := captureStdout(t, func() error { return runScenario([]string{file, "--json"}) })
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if rep.Run.Status != "completed" || rep.Stats.Total != 2 {
+		t.Fatalf("got status=%q total=%d, want completed/2", rep.Run.Status, rep.Stats.Total)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if loginHits == 0 {
+		t.Error("login endpoint was never hit; no token minted")
+	}
+	for _, a := range protectedAuths {
+		if a != "Bearer minted-tok" {
+			t.Errorf("protected endpoint saw %q, want the minted Bearer minted-tok", a)
+		}
+	}
+}
+
+// TestRunLoginRejectedAgainstRemoteEngine pins invariant 8: a login credential
+// pool is refused against a remote --engine exactly like a static pool — the minted
+// token is a json:"-" secret that cannot cross the wire, so the run must stay
+// in-process.
+func TestRunLoginRejectedAgainstRemoteEngine(t *testing.T) {
+	eng := fakeEngine("completed", "")
+	defer eng.Close()
+
+	file := filepath.Join(t.TempDir(), "login.yaml")
+	doc := "target: http://sut.invalid\n" +
+		"users: 1\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"auth:\n" +
+		"  strategy: login\n" +
+		"  login:\n" +
+		"    flow:\n" +
+		"      - id: login\n" +
+		"        request: POST /login\n" +
+		"        extract:\n" +
+		"          token: access_token\n" +
+		"    capture:\n" +
+		"      token: token\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	_, err := captureStdoutErr(t, func() error { return runScenario([]string{file, "--engine", eng.URL}) })
+	if err == nil {
+		t.Fatal("a login pool against a remote --engine must be rejected")
+	}
+	if !strings.Contains(err.Error(), "credential pool is not supported against a remote") {
+		t.Errorf("rejection = %v, want the secret-cannot-cross-the-wire message", err)
+	}
+}
+
 // TestRunFailOnFindings checks the CI gate: a SUT that always 5xxs produces
 // findings, so --fail-on-findings makes the run return errFindings; without the
 // flag the same run succeeds (findings are output, not a failure).
