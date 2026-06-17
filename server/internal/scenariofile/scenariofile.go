@@ -257,6 +257,24 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 // relative path in auth.source.file is confined to it. An empty dir falls back to
 // the process working directory.
 func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
+	return expandFrom(s, dir, false)
+}
+
+// ExpandRef is ExpandFrom that leaves an external auth SOURCE unresolved: the
+// pool carries its reference-only domain.CredentialSourceRef (file/env + format,
+// never a secret) instead of loaded entries, so the reference can cross to a
+// distributed engine whose workers resolve it locally. Inline users, login and
+// bootstrap auth expand identically to ExpandFrom — only a source pool differs.
+// It is the seam `tmula run --engine` uses to fan an authenticated run out
+// without reading (or even needing) the credential file on the CLI host.
+func ExpandRef(s Scenario, dir string) (runspec.RunSpec, error) {
+	return expandFrom(s, dir, true)
+}
+
+// expandFrom is the shared expander. keepSourceRef ships an external auth source
+// as an unresolved reference (for a distributed engine) instead of resolving it
+// into entries (the single-node default).
+func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, error) {
 	if strings.TrimSpace(s.Target) == "" {
 		return runspec.RunSpec{}, fmt.Errorf("scenariofile: target is required")
 	}
@@ -376,7 +394,7 @@ func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
 	}
 
 	if s.Auth != nil {
-		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir)
+		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir, keepSourceRef)
 		if err != nil {
 			return runspec.RunSpec{}, err
 		}
@@ -446,14 +464,14 @@ func nodeExists(g domain.ScenarioGraph, id string) bool {
 // (Strategy=pool, Source nil), so a CLI run always carries real credentials and a
 // still-unresolved Source never reaches the run path. Either way the domain type
 // keeps the secret out of any serialization.
-func buildCredentialPool(a Auth, dir string) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
 	strategy := domain.CredentialStrategy(a.Strategy)
 	if a.Strategy == "" {
 		strategy = domain.CredPool
 	}
 	switch strategy {
 	case domain.CredPool:
-		pool, err := buildPoolCredentials(a, dir)
+		pool, err := buildPoolCredentials(a, dir, keepSourceRef)
 		return pool, nil, err
 	case domain.CredLogin:
 		return buildLoginCredentials(a)
@@ -463,7 +481,11 @@ func buildCredentialPool(a Auth, dir string) (domain.CredentialPool, *runspec.Lo
 }
 
 // buildPoolCredentials maps the inline-users or source form onto a plain pool.
-func buildPoolCredentials(a Auth, dir string) (domain.CredentialPool, error) {
+// When keepSourceRef is set, an external source is carried as an unresolved
+// reference (pool.Source) instead of being loaded into entries, so the reference
+// — never the secrets, and without needing the file locally — can cross to a
+// distributed engine whose workers resolve it. Inline users are unaffected.
+func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, error) {
 	if a.Login != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
 	}
@@ -473,6 +495,16 @@ func buildPoolCredentials(a Auth, dir string) (domain.CredentialPool, error) {
 	}
 	if !hasUsers && !hasSource {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth needs inline users or a source for the %q strategy", domain.CredPool)
+	}
+
+	if hasSource && keepSourceRef {
+		// Ship the reference unresolved (distributed engine path): validate its
+		// shape but do not read it — the engine's workers load it locally.
+		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format}
+		if err := ref.Validate(); err != nil {
+			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+		}
+		return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Source: &ref}, nil
 	}
 
 	var entries []domain.Credential

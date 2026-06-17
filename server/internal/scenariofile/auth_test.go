@@ -301,6 +301,47 @@ auth:
 	}
 }
 
+// TestExpandRefKeepsSourceUnresolved pins the distributed-engine seam: ExpandRef
+// carries an external auth source as an unresolved reference-only SourceRef (file
+// + format, never a secret) and reads NO file — so the reference can cross to a
+// remote engine whose workers resolve it. The credential file deliberately does
+// not exist; ExpandRef must still succeed.
+func TestExpandRefKeepsSourceUnresolved(t *testing.T) {
+	dir := t.TempDir() // creds.csv intentionally absent
+	const fileYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  source:
+    file: creds.csv
+    format: csv
+`
+	s, err := Parse([]byte(fileYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := ExpandRef(s, dir)
+	if err != nil {
+		t.Fatalf("ExpandRef must not read the file: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Source == nil {
+		t.Fatal("ExpandRef must carry an unresolved source reference")
+	}
+	if spec.CredentialPool.Source.File != "creds.csv" || spec.CredentialPool.Source.Format != "csv" {
+		t.Errorf("source ref = %+v, want file creds.csv/csv", spec.CredentialPool.Source)
+	}
+	if len(spec.CredentialPool.Entries) != 0 {
+		t.Errorf("ExpandRef must not load entries, got %d", len(spec.CredentialPool.Entries))
+	}
+	// ExpandFrom (the single-node path) still resolves — and here that fails
+	// because the file is absent, proving the two paths differ as intended.
+	if _, err := ExpandFrom(s, dir); err == nil {
+		t.Error("ExpandFrom must still resolve (and fail on the missing file)")
+	}
+}
+
 // TestExpandAuthSourceWrapAroundDeterminism is the critic's reproduce-determinism
 // guard: a file source with N rows, driven by a pool provider over K>N users,
 // hands out exactly entries[i%N] — identical to the equivalent inline users

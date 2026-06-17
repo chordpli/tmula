@@ -421,3 +421,123 @@ func TestDoJSONReadErrorIsNetworkError(t *testing.T) {
 		t.Errorf("error = %q, want a clear read/network error (not a decode error)", err)
 	}
 }
+
+// recordingEngine is fakeEngine that also captures the raw create-experiment
+// request body, so a test can assert exactly what the CLI shipped to a remote
+// engine (e.g. a reference-only credential source, never a secret).
+func recordingEngine(t *testing.T, status string) (*httptest.Server, *[]byte) {
+	t.Helper()
+	var body []byte
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/experiments", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body = b
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "exp-1"})
+	})
+	mux.HandleFunc("/api/experiments/exp-1/run", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"runId": "run-1"})
+	})
+	mux.HandleFunc("/api/runs/run-1/report", func(w http.ResponseWriter, _ *http.Request) {
+		var rep cliReport
+		rep.Run.ID = "run-1"
+		rep.Run.Status = status
+		_ = json.NewEncoder(w).Encode(rep)
+	})
+	return httptest.NewServer(mux), &body
+}
+
+// TestRunSourcePoolShipsReferenceToEngine pins PR6: a SOURCE-backed auth pool is
+// allowed against a remote --engine and ships only its reference-only SourceRef —
+// the engine's workers resolve it locally. The create-experiment body the CLI
+// posts must carry credentialPool.source (file + format) and NO inline entries or
+// secret, and the credential file need not even be read by the CLI.
+func TestRunSourcePoolShipsReferenceToEngine(t *testing.T) {
+	eng, body := recordingEngine(t, "completed")
+	defer eng.Close()
+
+	dir := t.TempDir()
+	// Note: we deliberately do NOT create creds.csv — the CLI must ship the
+	// reference without reading the file when targeting a remote engine.
+	file := filepath.Join(dir, "scenario.yaml")
+	doc := "target: http://sut.invalid\n" +
+		"users: 4\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"auth:\n" +
+		"  source:\n" +
+		"    file: creds.csv\n" +
+		"    format: csv\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	if _, err := captureStdoutErr(t, func() error { return runScenario([]string{file, "--engine", eng.URL}) }); err != nil {
+		t.Fatalf("a source pool against --engine must be accepted, got: %v", err)
+	}
+
+	if body == nil || len(*body) == 0 {
+		t.Fatal("the CLI did not post a create-experiment body")
+	}
+	var sent struct {
+		CredentialPool *struct {
+			Strategy string `json:"strategy"`
+			Entries  []struct {
+				Subject string `json:"subject"`
+			} `json:"entries"`
+			Source *struct {
+				File   string `json:"file"`
+				Format string `json:"format"`
+			} `json:"source"`
+		} `json:"credentialPool"`
+	}
+	if err := json.Unmarshal(*body, &sent); err != nil {
+		t.Fatalf("decode shipped spec: %v", err)
+	}
+	if sent.CredentialPool == nil {
+		t.Fatal("the shipped spec carries no credential pool")
+	}
+	if sent.CredentialPool.Source == nil {
+		t.Fatal("the shipped pool must carry a reference-only source")
+	}
+	if sent.CredentialPool.Source.File != "creds.csv" || sent.CredentialPool.Source.Format != "csv" {
+		t.Errorf("source reference not shipped faithfully: %+v", sent.CredentialPool.Source)
+	}
+	if len(sent.CredentialPool.Entries) != 0 {
+		t.Error("the shipped pool must NOT carry inline entries (no secret crosses the wire)")
+	}
+	// Defense in depth: the raw body must not contain a token field at all.
+	if strings.Contains(string(*body), "\"token\"") {
+		t.Errorf("the shipped body must contain no token bytes: %s", *body)
+	}
+}
+
+// TestRunInlinePoolStillRejectedAgainstEngine pins that an INLINE-entries pool is
+// still refused against a remote --engine (its secret cannot cross the wire),
+// even though a source pool now may.
+func TestRunInlinePoolStillRejectedAgainstEngine(t *testing.T) {
+	eng := fakeEngine("completed", "")
+	defer eng.Close()
+
+	file := filepath.Join(t.TempDir(), "scenario.yaml")
+	doc := "target: http://sut.invalid\n" +
+		"users: 1\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"auth:\n" +
+		"  users:\n" +
+		"    - subject: u0\n" +
+		"      token: secret-0\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	_, err := captureStdoutErr(t, func() error { return runScenario([]string{file, "--engine", eng.URL}) })
+	if err == nil {
+		t.Fatal("an inline credential pool against a remote --engine must be rejected")
+	}
+	if !strings.Contains(err.Error(), "credential pool is not supported against a remote") {
+		t.Errorf("rejection should explain the secret cannot cross the wire, got: %v", err)
+	}
+}
