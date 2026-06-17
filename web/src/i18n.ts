@@ -216,6 +216,13 @@ const en: Record<string, string> = {
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
 
+  // Auth · imported (P7) — success banner shown when an import auto-detects auth
+  'auth.imported.login': 'Imported — your login flow is ready. Review it below, or just start the run.',
+  'auth.imported.login.secret': 'Imported your login flow — just fill in the highlighted secret below and you’re ready.',
+  'auth.imported.pool': 'Imported — your token pool is ready. Review it below, or just start the run.',
+  'auth.imported.bootstrap': 'Imported — your account-creation flow is ready. Confirm the target is non-production below, then start the run.',
+  'auth.imported.bootstrap.secret': 'Imported your account-creation flow — just fill in the highlighted secret below, confirm the target is non-production, and you’re ready.',
+
   // Auth · token pool
   'auth.pool.file': 'Upload a file',
   'auth.pool.fileHint': 'A CSV (subject,token header), JSONL ({subject,token} per line), or plain tokens (.txt).',
@@ -256,6 +263,17 @@ const en: Record<string, string> = {
     'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
   'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
 
+  // Auth · login · simple-form URL, the import "secrets to fill" panel, and Advanced toggle
+  'auth.login.url': 'Login URL',
+  'auth.login.urlHint': 'The endpoint tmula posts to in order to log in. Pick the method and give the path, e.g. POST /login.',
+  'auth.login.method': 'Login HTTP method',
+  'auth.secrets.title': 'Secrets to fill in',
+  'auth.secrets.hint': 'Almost done — the import filled in everything except the secret(s) below. Enter them and the login is ready.',
+  'auth.secrets.fieldHint': 'Filled in here in your browser and substituted at send time — the value is never stored.',
+  'auth.advanced.login': 'Advanced',
+  'auth.advanced.rawLogin': 'Edit the raw login flow (JSON)',
+  'auth.advanced.rawLoginSub': 'Switch off the simple form and author the login graph and templates as raw JSON.',
+
   // Auth · login · "log in multiple users" credential list (P8)
   'auth.login.cred.toggle': 'Log in multiple users (credential list)',
   'auth.login.cred.hint':
@@ -285,6 +303,20 @@ const en: Record<string, string> = {
   'auth.bootstrap.confirm': 'This targets a non-production system.',
   'auth.bootstrap.confirmSub':
     'Generating accounts creates and deletes REAL accounts on the target. Confirm this is not production before continuing.',
+  'auth.bootstrap.lead': 'tmula signs up a real account for each virtual user, logs in as it, then deletes it after the run. Use a disposable, non-production target only.',
+  'auth.bootstrap.signupUrl': 'Signup URL',
+  'auth.bootstrap.signupUrlHint': 'The endpoint that registers a new account. Pick the method and give the path, e.g. POST /register.',
+  'auth.bootstrap.signupMethod': 'Signup HTTP method',
+  'auth.bootstrap.body': 'Signup body',
+  'auth.bootstrap.bodyHint': 'The request body tmula sends to sign up. Use {{.userIndex}} so each account is unique, and {password} for the password.',
+  'auth.bootstrap.body.tip':
+    'The body posted to your signup URL, rendered once per account. {{.userIndex}} is the virtual-user number — put it in the email or username (e.g. test+{{.userIndex}}@example.com) so every signup is distinct. {password} fills in the password tmula reuses to log in.',
+  'auth.bootstrap.teardownUrl': 'Teardown URL',
+  'auth.bootstrap.teardownUrlHint': 'The endpoint that deletes one account after the run. {{.subject}} is the account id, e.g. DELETE /accounts/{{.subject}}.',
+  'auth.bootstrap.teardownMethod': 'Teardown HTTP method',
+  'auth.advanced.bootstrap': 'Advanced',
+  'auth.advanced.rawBootstrap': 'Edit the raw signup flow (JSON)',
+  'auth.advanced.rawBootstrapSub': 'Switch off the simple form and author the signup and teardown steps as raw JSON.',
   'auth.bootstrap.captureToken': 'Token capture (optional)',
   'auth.bootstrap.captureTokenHint': 'Leave empty to auto-detect — or name the variable that holds the new account’s token.',
   'auth.bootstrap.captureToken.tip':
@@ -307,6 +339,8 @@ const en: Record<string, string> = {
   // Auth · scenario doctor hints
   'doctor.authPoolEmpty': 'Token pool is selected but no credentials are pasted or uploaded.',
   'doctor.authPoolInvalid': 'The pasted credentials could not be parsed: {error}',
+  'doctor.authLoginUrl': 'Login is selected but the login URL is empty — tmula has nowhere to send the login request.',
+  'doctor.authBootstrapUrl': 'Account generation is selected but the signup URL is empty — tmula has nowhere to register the accounts.',
   'doctor.authLoginGraphJson': 'Login graph JSON is invalid: {error}',
   'doctor.authLoginTemplatesJson': 'Login templates JSON is invalid: {error}',
   'doctor.authLoginCredInvalid': 'The login credential list could not be parsed: {error}',
@@ -644,6 +678,13 @@ const ko: Record<string, string> = {
   'auth.mode.bootstrap': '테스트 계정 생성',
   'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다.',
 
+  // Auth · imported (P7) — 가져오기가 인증을 자동 감지했을 때 표시되는 성공 배너
+  'auth.imported.login': '가져왔습니다 — 로그인 흐름이 준비됐습니다. 아래에서 확인하거나 바로 실행하세요.',
+  'auth.imported.login.secret': '로그인 흐름을 가져왔습니다 — 아래 강조된 비밀값만 입력하면 준비가 끝납니다.',
+  'auth.imported.pool': '가져왔습니다 — 토큰 풀이 준비됐습니다. 아래에서 확인하거나 바로 실행하세요.',
+  'auth.imported.bootstrap': '가져왔습니다 — 계정 생성 흐름이 준비됐습니다. 아래에서 대상이 비프로덕션임을 확인한 뒤 실행하세요.',
+  'auth.imported.bootstrap.secret': '계정 생성 흐름을 가져왔습니다 — 아래 강조된 비밀값을 입력하고, 대상이 비프로덕션임을 확인하면 준비가 끝납니다.',
+
   // Auth · 토큰 풀
   'auth.pool.file': '파일 올리기',
   'auth.pool.fileHint': 'CSV(subject,token 헤더), JSONL(줄마다 {subject,token}), 또는 일반 토큰(.txt).',
@@ -684,6 +725,17 @@ const ko: Record<string, string> = {
     '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
   'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
 
+  // Auth · 로그인 · 간단 양식 URL, 가져오기 "비밀값 입력" 패널, 고급 토글
+  'auth.login.url': '로그인 URL',
+  'auth.login.urlHint': 'tmula가 로그인을 위해 요청을 보내는 엔드포인트입니다. 메서드를 고르고 경로를 입력하세요. 예: POST /login.',
+  'auth.login.method': '로그인 HTTP 메서드',
+  'auth.secrets.title': '입력할 비밀값',
+  'auth.secrets.hint': '거의 다 됐습니다 — 가져오기가 아래 비밀값만 남기고 모두 채웠습니다. 입력하면 로그인 준비가 끝납니다.',
+  'auth.secrets.fieldHint': '브라우저에서 입력되어 전송 시점에 본문에 채워집니다 — 값은 저장되지 않습니다.',
+  'auth.advanced.login': '고급',
+  'auth.advanced.rawLogin': '원본 로그인 흐름 편집 (JSON)',
+  'auth.advanced.rawLoginSub': '간단 양식을 끄고 로그인 그래프와 템플릿을 원본 JSON으로 직접 작성합니다.',
+
   // Auth · 로그인 · "여러 사용자 로그인" 자격 증명 목록 (P8)
   'auth.login.cred.toggle': '여러 사용자 로그인 (자격 증명 목록)',
   'auth.login.cred.hint':
@@ -713,6 +765,20 @@ const ko: Record<string, string> = {
   'auth.bootstrap.confirm': '이 대상은 비프로덕션 시스템입니다.',
   'auth.bootstrap.confirmSub':
     '계정 생성은 대상에 실제 계정을 만들고 삭제합니다. 계속하기 전에 프로덕션이 아님을 확인하세요.',
+  'auth.bootstrap.lead': 'tmula가 가상 사용자마다 실제 계정을 가입시키고 그 계정으로 로그인한 뒤, 실행이 끝나면 삭제합니다. 폐기해도 되는 비프로덕션 대상에만 사용하세요.',
+  'auth.bootstrap.signupUrl': '가입 URL',
+  'auth.bootstrap.signupUrlHint': '새 계정을 등록하는 엔드포인트입니다. 메서드를 고르고 경로를 입력하세요. 예: POST /register.',
+  'auth.bootstrap.signupMethod': '가입 HTTP 메서드',
+  'auth.bootstrap.body': '가입 본문',
+  'auth.bootstrap.bodyHint': 'tmula가 가입할 때 보내는 요청 본문입니다. 계정마다 고유하도록 {{.userIndex}}를, 비밀번호에는 {password}를 사용하세요.',
+  'auth.bootstrap.body.tip':
+    '가입 URL로 보내는 본문이며 계정마다 한 번씩 렌더링됩니다. {{.userIndex}}는 가상 사용자 번호입니다 — 이메일이나 사용자명에 넣어(예: test+{{.userIndex}}@example.com) 가입이 서로 겹치지 않게 하세요. {password}에는 tmula가 로그인에 재사용할 비밀번호가 채워집니다.',
+  'auth.bootstrap.teardownUrl': '정리 URL',
+  'auth.bootstrap.teardownUrlHint': '실행 후 계정 하나를 삭제하는 엔드포인트입니다. {{.subject}}는 계정 id입니다. 예: DELETE /accounts/{{.subject}}.',
+  'auth.bootstrap.teardownMethod': '정리 HTTP 메서드',
+  'auth.advanced.bootstrap': '고급',
+  'auth.advanced.rawBootstrap': '원본 가입 흐름 편집 (JSON)',
+  'auth.advanced.rawBootstrapSub': '간단 양식을 끄고 가입·정리 단계를 원본 JSON으로 직접 작성합니다.',
   'auth.bootstrap.captureToken': '토큰 캡처 (선택)',
   'auth.bootstrap.captureTokenHint': '비워 두면 자동 감지합니다 — 또는 새 계정의 토큰을 담은 변수 이름을 지정하세요.',
   'auth.bootstrap.captureToken.tip':
@@ -735,6 +801,8 @@ const ko: Record<string, string> = {
   // Auth · 시나리오 점검 힌트
   'doctor.authPoolEmpty': '토큰 풀이 선택되었지만 붙여넣거나 업로드한 자격 증명이 없습니다.',
   'doctor.authPoolInvalid': '붙여넣은 자격 증명을 파싱할 수 없습니다: {error}',
+  'doctor.authLoginUrl': '로그인이 선택되었지만 로그인 URL이 비어 있습니다 — tmula가 로그인 요청을 보낼 곳이 없습니다.',
+  'doctor.authBootstrapUrl': '계정 생성이 선택되었지만 가입 URL이 비어 있습니다 — tmula가 계정을 등록할 곳이 없습니다.',
   'doctor.authLoginGraphJson': '로그인 그래프 JSON이 올바르지 않습니다: {error}',
   'doctor.authLoginTemplatesJson': '로그인 템플릿 JSON이 올바르지 않습니다: {error}',
   'doctor.authLoginCredInvalid': '로그인 자격 증명 목록을 파싱할 수 없습니다: {error}',
