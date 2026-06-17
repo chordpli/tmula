@@ -44,6 +44,14 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 	if len(ops) == 0 {
 		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no usable operations")
 	}
+
+	// Derive the auth block (and how to inject the auth header) from the document's
+	// security schemes. Best-effort: a doc with no scheme yields a nil derivation,
+	// so an unsecured spec imports byte-for-byte as before. The login op (if any) is
+	// found from the same operation list, so this runs after collectOperations.
+	derived := deriveAuth(doc, ops)
+	topLevel := doc.topLevelSecurity()
+
 	flow := make([]scenariofile.Step, 0, len(ops))
 	ids := newIDSet()
 	for _, o := range ops {
@@ -52,17 +60,45 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 		if !safeRequestPath(o.path) {
 			continue
 		}
-		flow = append(flow, scenariofile.Step{
+		step := scenariofile.Step{
 			ID:      ids.unique(stepID(o.op.OperationID, o.method, o.path)),
 			Request: strings.ToUpper(o.method) + " " + o.path,
 			Body:    bodyExample(o.op),
-		})
+		}
+		// Inject the auth header on operations the security requirement covers (and
+		// never on the login endpoint itself — minting a token is unauthenticated).
+		if derived != nil && derived.secures(o.op, topLevel) && !isLoginRequest(derived, step.Request) {
+			if step.Headers == nil {
+				step.Headers = map[string]string{}
+			}
+			step.Headers[derived.header] = derived.headerValue
+		}
+		flow = append(flow, step)
 	}
 	if len(flow) == 0 {
 		return scenariofile.Scenario{}, fmt.Errorf("importer: openapi has no usable operations")
 	}
 
-	return scenariofile.Scenario{Target: openAPITarget(doc), Flow: flow}, nil
+	sc := scenariofile.Scenario{Target: openAPITarget(doc), Flow: flow}
+	if derived != nil {
+		sc.Auth = derived.auth
+	}
+	return sc, nil
+}
+
+// isLoginRequest reports whether a step's "METHOD /path" matches the derived
+// login flow's own step, so the importer does not inject a bearer header onto the
+// endpoint that mints the token (it has no token yet).
+func isLoginRequest(d *derivedAuth, request string) bool {
+	if d.auth == nil || d.auth.Login == nil {
+		return false
+	}
+	for _, st := range d.auth.Login.Flow {
+		if st.Request == request {
+			return true
+		}
+	}
+	return false
 }
 
 // apiOp is one OpenAPI operation flattened out of the path→method map.
@@ -259,6 +295,15 @@ type openAPIDoc struct {
 	BasePath string                                `json:"basePath"` // swagger 2
 	Schemes  []string                              `json:"schemes"`  // swagger 2
 	Paths    map[string]map[string]json.RawMessage `json:"paths"`
+	// Components.SecuritySchemes carries the named auth schemes (oauth2 flows, http
+	// bearer, apiKey) the importer derives an auth block from. Left raw per-scheme so
+	// a single malformed scheme is skipped rather than failing the whole parse.
+	Components struct {
+		SecuritySchemes map[string]json.RawMessage `json:"securitySchemes"`
+	} `json:"components"`
+	// Security is the top-level default security requirement applied to every
+	// operation that does not override it. Raw so a malformed value is non-fatal.
+	Security json.RawMessage `json:"security"`
 }
 
 type operation struct {
@@ -271,6 +316,10 @@ type operation struct {
 			} `json:"examples"`
 		} `json:"content"`
 	} `json:"requestBody"`
+	// Security is the per-operation security requirement. A nil pointer means the
+	// operation inherits the top-level default; a present (even empty) value
+	// overrides it — an explicit `security: []` opts the operation out of auth.
+	Security *[]securityRequirement `json:"security"`
 }
 
 type harDoc struct {
