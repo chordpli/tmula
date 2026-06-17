@@ -215,6 +215,25 @@ func TestValidateLoginPool(t *testing.T) {
 	if err := agg.Validate(); err == nil {
 		t.Error("a login pool with aggregate workers must be rejected")
 	}
+
+	// P8: a login pool carrying login-INPUT rows (entries) is valid on the in-process
+	// path — the rows are usernames/passwords each VU logs in with, not secrets that
+	// must fan out.
+	withRows := loginSpec("http://127.0.0.1:1")
+	withRows.CredentialPool.Entries = []domain.Credential{{Subject: "alice", Secret: "pw-a"}, {Subject: "bob", Secret: "pw-b"}}
+	if err := withRows.Validate(); err != nil {
+		t.Errorf("a login pool carrying login-input rows should validate in-process (P8): %v", err)
+	}
+
+	// P8: login + entries + workers stays REJECTED — the inline passwords (and the
+	// minted token) are secrets the worker fan-out cannot resolve. Distributed
+	// multi-user login is a follow-up.
+	rowsDist := loginSpec("http://127.0.0.1:1")
+	rowsDist.CredentialPool.Entries = []domain.Credential{{Subject: "alice", Secret: "pw-a"}}
+	rowsDist.Workers = []string{"127.0.0.1:65535"}
+	if err := rowsDist.Validate(); err == nil {
+		t.Error("a login pool carrying login-input rows with distributed workers must be rejected (the inline passwords cannot cross the wire)")
+	}
 }
 
 // TestLoginProviderBuiltAboveRunspec pins that runspec does not try to build a

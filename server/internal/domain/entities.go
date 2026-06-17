@@ -259,10 +259,25 @@ func (c CredentialPool) Validate() error {
 		if c.LoginScope != "" && !c.LoginScope.Valid() {
 			return fmt.Errorf("credential pool %q: invalid loginScope %q (want %q or %q)", c.ID, c.LoginScope, LoginPerUser, LoginShared)
 		}
-		// A login pool mints its tokens at run time, so it must not also carry a
-		// pre-supplied pool (inline entries or an external source).
-		if len(c.Entries) > 0 || c.Source != nil {
-			return fmt.Errorf("credential pool %q: login strategy mints tokens at run time and takes no inline entries or source", c.ID)
+		// P8: a login pool MAY carry a credential pool of login-INPUT rows — each
+		// Credential is interpreted as Subject=username, Secret=password (NOT a
+		// pre-issued token), so virtual user i logs in as a different account by
+		// templating the row (see api.NewLoginTokenFunc, which seeds {{.username}}/
+		// {{.password}}). Entries and a Source are mutually exclusive (like the pool
+		// strategy): each is a way to supply the SAME input rows. Both empty is the
+		// long-standing single-identity login — accepted, unchanged. Inline passwords
+		// are in-process secrets exactly like the token pool's inline entries; the
+		// Credential.Secret json:"-" tag keeps them out of any serialization (AD-011),
+		// and the distributed-login follow-up keeps login+workers rejected at the run
+		// path so those passwords never cross the wire.
+		hasEntries, hasSource := len(c.Entries) > 0, c.Source != nil
+		if hasEntries && hasSource {
+			return fmt.Errorf("credential pool %q: login strategy takes either inline login-input entries or a source, not both", c.ID)
+		}
+		if c.Source != nil {
+			if err := c.Source.Validate(); err != nil {
+				return fmt.Errorf("credential pool %q: %w", c.ID, err)
+			}
 		}
 	}
 	return nil
