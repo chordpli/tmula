@@ -44,7 +44,7 @@ export interface ExperimentForm {
   loginGraphJSON: string
   loginTemplatesJSON: string
   loginStart: string
-  loginTokenVar: string // captured variable that becomes the token (required)
+  loginTokenVar: string // captured variable that becomes the token (optional; empty = auto-detect)
   loginSubjectVar: string // captured variable that becomes the subject (optional)
   loginScope: LoginScope // 'per-user' (default) or 'shared' (client_credentials)
 
@@ -54,7 +54,7 @@ export interface ExperimentForm {
   // creates/deletes REAL accounts on the target.
   signupStepsJSON: string // JSON array of SignupStep objects
   signupStart: string // optional entry-step override
-  signupCaptureToken: string // captured variable that becomes the token (required)
+  signupCaptureToken: string // captured variable that becomes the token (optional; empty = auto-detect)
   signupCaptureSubject: string // captured variable that becomes the subject (optional)
   signupTeardownJSON: string // optional JSON array of teardown SignupStep objects
   signupTeardownStart: string // optional teardown entry-step override
@@ -107,23 +107,27 @@ export interface SignupStepSpec {
 
 // LoginFlowSpec is the standalone login flow a 'login' pool mints tokens from,
 // matching the backend runspec.LoginFlowSpec: its own graph + templates + start, plus
-// the captured-variable names that become the token (required) and subject (optional).
+// the captured-variable names that become the token and subject. tokenVar is
+// optional — an empty/omitted tokenVar means tmula auto-detects the token from the
+// login response (the common access_token/token/jwt/session shapes).
 export interface LoginFlowSpec {
   graph: unknown
   templates: unknown
   start: string
   maxSteps?: number
-  tokenVar: string
+  tokenVar?: string
   subjectVar?: string
 }
 
 // SignupFlowSpec is the declarative bootstrap-signup journey, matching the backend
 // domain.SignupFlow: signup steps + a capture mapping, plus an optional teardown
-// journey. The orchestrator compiles it to a graph + templates at run time.
+// journey. The orchestrator compiles it to a graph + templates at run time. The
+// capture token is optional — an omitted token means tmula auto-detects it from the
+// signup response.
 export interface SignupFlowSpec {
   steps: SignupStepSpec[]
   start?: string
-  capture: { token: string; subject?: string }
+  capture: { token?: string; subject?: string }
   teardown?: SignupStepSpec[]
   teardownStart?: string
 }
@@ -584,14 +588,15 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
     case 'login': {
       const graph = JSON.parse(form.loginGraphJSON)
       const templates = JSON.parse(form.loginTemplatesJSON)
-      const tokenVar = form.loginTokenVar.trim()
-      if (!tokenVar) throw new Error('login auth needs a token capture path (e.g. $.access_token)')
+      // An empty token capture is allowed: tmula auto-detects the token from the
+      // login response, so the field is omitted rather than rejected.
       const loginFlow: LoginFlowSpec = {
         graph,
         templates,
         start: form.loginStart,
-        tokenVar,
       }
+      const tokenVar = form.loginTokenVar.trim()
+      if (tokenVar) loginFlow.tokenVar = tokenVar
       const subjectVar = form.loginSubjectVar.trim()
       if (subjectVar) loginFlow.subjectVar = subjectVar
       // The pool references the flow by id ("login") and carries the scope; the flow
@@ -612,12 +617,14 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
         )
       }
       const steps = parseSignupSteps(form.signupStepsJSON, 'signup')
-      const token = form.signupCaptureToken.trim()
-      if (!token) throw new Error('bootstrap auth needs a token capture path (the variable that becomes the token)')
+      // An empty token capture is allowed: tmula auto-detects the token from the
+      // signup response, so the field is omitted rather than rejected.
       const signupFlow: SignupFlowSpec = {
         steps,
-        capture: { token },
+        capture: {},
       }
+      const token = form.signupCaptureToken.trim()
+      if (token) signupFlow.capture.token = token
       const start = form.signupStart.trim()
       if (start) signupFlow.start = start
       const subject = form.signupCaptureSubject.trim()

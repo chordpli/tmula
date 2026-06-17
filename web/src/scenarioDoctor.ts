@@ -104,9 +104,8 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
       }
     }
   } else if (form.authMode === 'login') {
-    if (!form.loginTokenVar.trim()) {
-      issues.push(issue('error', 'auth-login-no-token', 'doctor.authLoginNoToken'))
-    }
+    // An empty token capture is fine: tmula auto-detects the token from the login
+    // response, so no "missing capture path" warning is raised.
     const graph = parseJSON(form.loginGraphJSON)
     if (!graph.ok) {
       issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
@@ -121,9 +120,8 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     if (!form.authBootstrapConfirmed) {
       issues.push(issue('error', 'auth-bootstrap-unconfirmed', 'doctor.authBootstrapUnconfirmed'))
     }
-    if (!form.signupCaptureToken.trim()) {
-      issues.push(issue('error', 'auth-bootstrap-no-token', 'doctor.authBootstrapNoToken'))
-    }
+    // An empty token capture is fine: tmula auto-detects the token from the signup
+    // response, so no "missing capture path" warning is raised.
     try {
       parseSignupSteps(form.signupStepsJSON, 'signup')
     } catch (e) {
