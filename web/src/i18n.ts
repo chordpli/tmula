@@ -232,10 +232,11 @@ const en: Record<string, string> = {
   'auth.pool.count': '{count} credential(s) parsed',
 
   // Auth · login
-  'auth.login.tokenVar': 'Token capture',
-  'auth.login.tokenVarHint': 'The captured variable that becomes the token (required), e.g. $.access_token.',
+  'auth.tokenVar.autoPlaceholder': 'auto-detect',
+  'auth.login.tokenVar': 'Token capture (optional)',
+  'auth.login.tokenVarHint': 'Leave empty to auto-detect — or name the variable that holds the token, e.g. $.access_token.',
   'auth.login.tokenVar.tip':
-    'Name the variable your login template extracts (via its extract map) that holds the bearer token. It is captured from the live login response at run time and never stored.',
+    'Leave this empty and tmula auto-detects the token from the login response — it looks for the common fields (access_token, accessToken, token, id_token, jwt, …) and a session/jwt/auth cookie. To override, name the variable your login template extracts that holds the bearer token. Either way the token is captured from the live response at run time and never stored.',
   'auth.login.subjectVar': 'Subject capture',
   'auth.login.subjectVarHint': 'Optional captured variable that becomes the principal id.',
   'auth.login.start': 'Start node',
@@ -255,10 +256,10 @@ const en: Record<string, string> = {
   'auth.bootstrap.confirm': 'This targets a non-production system.',
   'auth.bootstrap.confirmSub':
     'Generating accounts creates and deletes REAL accounts on the target. Confirm this is not production before continuing.',
-  'auth.bootstrap.captureToken': 'Token capture',
-  'auth.bootstrap.captureTokenHint': 'The captured variable that becomes the token (required).',
+  'auth.bootstrap.captureToken': 'Token capture (optional)',
+  'auth.bootstrap.captureTokenHint': 'Leave empty to auto-detect — or name the variable that holds the new account’s token.',
   'auth.bootstrap.captureToken.tip':
-    'Name the variable a signup step extracts that holds the new account’s token. It is captured from the live signup response and never stored.',
+    'Leave this empty and tmula auto-detects the token from the signup response — it looks for the common fields (access_token, accessToken, token, id_token, jwt, …) and a session/jwt/auth cookie. To override, name the variable a signup step extracts that holds the new account’s token. Either way it is captured from the live response and never stored.',
   'auth.bootstrap.captureSubject': 'Subject capture',
   'auth.bootstrap.captureSubjectHint': 'Optional captured variable that becomes the account id (threaded into teardown).',
   'auth.bootstrap.start': 'Start step',
@@ -277,12 +278,10 @@ const en: Record<string, string> = {
   // Auth · scenario doctor hints
   'doctor.authPoolEmpty': 'Token pool is selected but no credentials are pasted or uploaded.',
   'doctor.authPoolInvalid': 'The pasted credentials could not be parsed: {error}',
-  'doctor.authLoginNoToken': 'Login auth is selected but no token capture path is set.',
   'doctor.authLoginGraphJson': 'Login graph JSON is invalid: {error}',
   'doctor.authLoginTemplatesJson': 'Login templates JSON is invalid: {error}',
   'doctor.authBootstrapUnconfirmed':
     'Generating accounts requires confirming the target is non-production before it can run.',
-  'doctor.authBootstrapNoToken': 'Account generation is selected but no token capture path is set.',
   'doctor.authBootstrapStepsJson': 'Signup steps JSON is invalid: {error}',
   'doctor.authBootstrapNoTeardown':
     'Account generation has no teardown flow and keep-accounts is off — provisioned accounts would be stranded.',
@@ -629,10 +628,11 @@ const ko: Record<string, string> = {
   'auth.pool.count': '자격 증명 {count}개 파싱됨',
 
   // Auth · 로그인
-  'auth.login.tokenVar': '토큰 캡처',
-  'auth.login.tokenVarHint': '토큰이 되는 캡처 변수입니다(필수). 예: $.access_token.',
+  'auth.tokenVar.autoPlaceholder': '자동 감지',
+  'auth.login.tokenVar': '토큰 캡처 (선택)',
+  'auth.login.tokenVarHint': '비워 두면 자동 감지합니다 — 또는 토큰을 담은 변수 이름을 지정하세요. 예: $.access_token.',
   'auth.login.tokenVar.tip':
-    '로그인 템플릿이 extract 맵으로 추출하는, 베어러 토큰을 담은 변수 이름입니다. 실행 시 실제 로그인 응답에서 캡처되며 저장되지 않습니다.',
+    '비워 두면 tmula가 로그인 응답에서 토큰을 자동 감지합니다 — 흔한 필드(access_token, accessToken, token, id_token, jwt 등)와 session/jwt/auth 쿠키를 찾습니다. 직접 지정하려면 로그인 템플릿이 extract 맵으로 추출하는, 베어러 토큰을 담은 변수 이름을 적으세요. 어느 쪽이든 실행 시 실제 응답에서 캡처되며 저장되지 않습니다.',
   'auth.login.subjectVar': 'Subject 캡처',
   'auth.login.subjectVarHint': '주체(principal) id가 되는 선택 캡처 변수입니다.',
   'auth.login.start': '시작 노드',
@@ -652,10 +652,10 @@ const ko: Record<string, string> = {
   'auth.bootstrap.confirm': '이 대상은 비프로덕션 시스템입니다.',
   'auth.bootstrap.confirmSub':
     '계정 생성은 대상에 실제 계정을 만들고 삭제합니다. 계속하기 전에 프로덕션이 아님을 확인하세요.',
-  'auth.bootstrap.captureToken': '토큰 캡처',
-  'auth.bootstrap.captureTokenHint': '토큰이 되는 캡처 변수입니다(필수).',
+  'auth.bootstrap.captureToken': '토큰 캡처 (선택)',
+  'auth.bootstrap.captureTokenHint': '비워 두면 자동 감지합니다 — 또는 새 계정의 토큰을 담은 변수 이름을 지정하세요.',
   'auth.bootstrap.captureToken.tip':
-    '가입 단계가 추출하는, 새 계정의 토큰을 담은 변수 이름입니다. 실제 가입 응답에서 캡처되며 저장되지 않습니다.',
+    '비워 두면 tmula가 가입 응답에서 토큰을 자동 감지합니다 — 흔한 필드(access_token, accessToken, token, id_token, jwt 등)와 session/jwt/auth 쿠키를 찾습니다. 직접 지정하려면 가입 단계가 추출하는, 새 계정의 토큰을 담은 변수 이름을 적으세요. 어느 쪽이든 실제 응답에서 캡처되며 저장되지 않습니다.',
   'auth.bootstrap.captureSubject': 'Subject 캡처',
   'auth.bootstrap.captureSubjectHint': '계정 id가 되는 선택 캡처 변수입니다(정리 단계로 전달됨).',
   'auth.bootstrap.start': '시작 단계',
@@ -674,12 +674,10 @@ const ko: Record<string, string> = {
   // Auth · 시나리오 점검 힌트
   'doctor.authPoolEmpty': '토큰 풀이 선택되었지만 붙여넣거나 업로드한 자격 증명이 없습니다.',
   'doctor.authPoolInvalid': '붙여넣은 자격 증명을 파싱할 수 없습니다: {error}',
-  'doctor.authLoginNoToken': '로그인 인증이 선택되었지만 토큰 캡처 경로가 설정되지 않았습니다.',
   'doctor.authLoginGraphJson': '로그인 그래프 JSON이 올바르지 않습니다: {error}',
   'doctor.authLoginTemplatesJson': '로그인 템플릿 JSON이 올바르지 않습니다: {error}',
   'doctor.authBootstrapUnconfirmed':
     '계정 생성은 실행 전에 대상이 비프로덕션임을 확인해야 합니다.',
-  'doctor.authBootstrapNoToken': '계정 생성이 선택되었지만 토큰 캡처 경로가 설정되지 않았습니다.',
   'doctor.authBootstrapStepsJson': '가입 단계 JSON이 올바르지 않습니다: {error}',
   'doctor.authBootstrapNoTeardown':
     '계정 생성에 정리 흐름이 없고 계정 유지도 꺼져 있어 생성한 계정이 방치됩니다.',

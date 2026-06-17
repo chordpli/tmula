@@ -414,17 +414,18 @@ describe('buildAuth', () => {
     expect(build!.credentialPool.loginScope).toBe('shared')
   })
 
-  it('throws when login has no token capture path', () => {
-    expect(() =>
-      buildAuth({
-        ...form,
-        authMode: 'login',
-        loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
-        loginTemplatesJSON: '{}',
-        loginStart: 'login',
-        loginTokenVar: '   ',
-      }),
-    ).toThrow(/token/)
+  it('omits tokenVar when login has no explicit capture (auto-detect)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
+      loginTemplatesJSON: '{}',
+      loginStart: 'login',
+      loginTokenVar: '   ', // blank → auto-detect
+    })
+    expect(build!.authStrategy).toBe('login')
+    // No tokenVar is sent, so the backend auto-detects the token from the response.
+    expect(build!.loginFlow?.tokenVar).toBeUndefined()
   })
 
   it('builds a bootstrap pool with a signup flow, capture, teardown and keepAccounts', () => {
@@ -451,6 +452,25 @@ describe('buildAuth', () => {
       teardown: [{ id: 'del', method: 'DELETE', path: '/accounts/{{.subject}}' }],
       teardownStart: 'del',
     })
+  })
+
+  it('omits the signup capture token when none is given (auto-detect)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'bootstrap',
+      authBootstrapConfirmed: true,
+      signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
+      signupStart: 'signup',
+      signupCaptureToken: '   ', // blank → auto-detect
+      signupCaptureSubject: 'id',
+      keepAccounts: true,
+    })
+    expect(build!.authStrategy).toBe('bootstrap-signup')
+    const sf = build!.credentialPool.signupFlow!
+    // No capture.token is sent, so the backend auto-detects it from the response;
+    // the subject is still captured (so teardown can name the account).
+    expect(sf.capture.token).toBeUndefined()
+    expect(sf.capture.subject).toBe('id')
   })
 
   it('refuses bootstrap until the non-production safety gate is confirmed', () => {

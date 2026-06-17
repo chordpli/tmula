@@ -1272,8 +1272,9 @@ function AuthPoolFields({
 }
 
 // AuthLoginFields authors the standalone login flow that mints a token: its graph +
-// templates (authored exactly like the scenario), a start node, a token capture path
-// (required), an optional subject capture, and the per-user vs shared scope toggle.
+// templates (authored exactly like the scenario), a start node, an optional token
+// capture path (empty = auto-detect), an optional subject capture, and the per-user
+// vs shared scope toggle.
 function AuthLoginFields({
   form,
   set,
@@ -1294,7 +1295,7 @@ function AuthLoginFields({
             className="input"
             value={form.loginTokenVar}
             onChange={(e) => set('loginTokenVar', e.target.value)}
-            placeholder="$.access_token"
+            placeholder={t('auth.tokenVar.autoPlaceholder')}
             spellCheck={false}
           />
         </Field>
@@ -1399,7 +1400,7 @@ function AuthBootstrapFields({
               className="input"
               value={form.signupCaptureToken}
               onChange={(e) => set('signupCaptureToken', e.target.value)}
-              placeholder="accessToken"
+              placeholder={t('auth.tokenVar.autoPlaceholder')}
               spellCheck={false}
             />
           </Field>
