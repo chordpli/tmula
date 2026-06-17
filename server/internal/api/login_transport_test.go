@@ -142,13 +142,26 @@ func TestLoginTokenFuncErrorsOnEmptyToken(t *testing.T) {
 	}
 }
 
-// TestNewLoginTokenFuncValidatesFlow rejects a flow missing a token capture var.
-func TestNewLoginTokenFuncValidatesFlow(t *testing.T) {
+// TestNewLoginTokenFuncAllowsEmptyTokenVar accepts a flow with no explicit token
+// capture: an empty TokenVar means "auto-detect", so construction must succeed (the
+// token is resolved from the response at mint time, not rejected up front).
+func TestNewLoginTokenFuncAllowsEmptyTokenVar(t *testing.T) {
 	flow := loginFlowFor()
 	flow.TokenVar = ""
 	runner := load.NewRunner(load.NewRESTAdapter(time.Second), "http://127.0.0.1:1", flow.Templates)
+	if _, err := NewLoginTokenFunc(runner, flow, 1); err != nil {
+		t.Fatalf("empty TokenVar means auto-detect and must build: %v", err)
+	}
+}
+
+// TestNewLoginTokenFuncRequiresStart still rejects a flow missing a start node —
+// the one piece auto-detection cannot supply.
+func TestNewLoginTokenFuncRequiresStart(t *testing.T) {
+	flow := loginFlowFor()
+	flow.Start = ""
+	runner := load.NewRunner(load.NewRESTAdapter(time.Second), "http://127.0.0.1:1", flow.Templates)
 	if _, err := NewLoginTokenFunc(runner, flow, 1); err == nil {
-		t.Fatal("a login flow with no token capture var should be rejected")
+		t.Fatal("a login flow with no start node should be rejected")
 	}
 }
 
