@@ -129,6 +129,39 @@ type Auth struct {
 	// subject), and an optional scope. The token is minted at run time and never
 	// authored in the file, so a login block carries no secret.
 	Login *AuthLogin `json:"login,omitempty"`
+	// Signup, when set (strategy "bootstrap-signup"), describes how to provision one
+	// real account per virtual user up front: a signup flow, which captures become
+	// the credential, and an optional teardown flow. It carries no secret — the token
+	// is captured from the live signup response.
+	Signup *AuthSignup `json:"signup,omitempty"`
+	// KeepAccounts opts a bootstrap-signup run out of teardown, leaving the
+	// provisioned accounts in place. It is the only escape from the gating-safety
+	// rule that a bootstrap pool without a teardown flow is rejected.
+	KeepAccounts bool `json:"keepAccounts,omitempty"`
+}
+
+// AuthSignup authors a bootstrap-signup credential strategy: a signup journey, an
+// optional teardown journey, and the captures that become the minted credential. It
+// carries no secret — the token comes from the live signup response.
+type AuthSignup struct {
+	// Flow is the ordered signup journey (usually a single POST to a registration
+	// endpoint). Each step's extract captures response fields; capture names which of
+	// those becomes the token (and subject).
+	Flow []Step `json:"flow,omitempty"`
+	// Teardown is the optional deprovision journey, run once per provisioned account
+	// after the run. Each step can template the account's {{.subject}} so a
+	// "DELETE /accounts/{{.subject}}" removes the exact account. Omit it (and set
+	// keepAccounts) to leave accounts in place.
+	Teardown []Step `json:"teardown,omitempty"`
+	// Capture maps the credential fields to captured variable names: token (the
+	// secret, required) and subject (the account id, optional but needed for a
+	// {{.subject}}-templated teardown).
+	Capture AuthCapture `json:"capture"`
+	// Start overrides the signup flow's start node (defaults to the first step).
+	Start string `json:"start,omitempty"`
+	// TeardownStart overrides the teardown flow's start node (defaults to the first
+	// teardown step).
+	TeardownStart string `json:"teardownStart,omitempty"`
 }
 
 // AuthLogin authors a login (token-minting) credential strategy: a standalone
@@ -475,8 +508,11 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 		return pool, nil, err
 	case domain.CredLogin:
 		return buildLoginCredentials(a)
+	case domain.CredBootstrapSignup:
+		pool, err := buildBootstrapCredentials(a)
+		return pool, nil, err
 	default:
-		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, or %q with a login flow)", strategy, domain.CredPool, domain.CredLogin)
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, %q with a login flow, or %q with a signup flow)", strategy, domain.CredPool, domain.CredLogin, domain.CredBootstrapSignup)
 	}
 }
 
@@ -583,6 +619,83 @@ func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpe
 		SubjectVar: a.Login.Capture.Subject,
 	}
 	return pool, loginFlow, nil
+}
+
+// buildBootstrapCredentials maps the signup authoring block onto a bootstrap-signup
+// pool carrying a declarative domain.SignupFlow (signup steps + a capture mapping +
+// an optional teardown journey). It carries no secret — the token is captured at run
+// time from the live signup response. The pool's full validation (a resolvable token
+// capture, well-formed steps, and the gating-safety teardown-or-keepAccounts rule)
+// runs in domain.CredentialPool.Validate / runspec.Validate; this builder only
+// translates the authored steps into the domain shape.
+func buildBootstrapCredentials(a Auth) (domain.CredentialPool, error) {
+	if len(a.Users) > 0 || a.Source != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy provisions accounts from a signup flow and takes no inline users or source", domain.CredBootstrapSignup)
+	}
+	if a.Login != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
+	}
+	if a.Signup == nil || len(a.Signup.Flow) == 0 {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy needs an auth.signup.flow describing how to provision an account", domain.CredBootstrapSignup)
+	}
+	if a.Signup.Capture.Token == "" {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.signup.capture.token is required (the captured variable that becomes the token)")
+	}
+
+	steps, err := buildSignupSteps(a.Signup.Flow)
+	if err != nil {
+		return domain.CredentialPool{}, err
+	}
+	flow := &domain.SignupFlow{
+		Steps:   steps,
+		Start:   domain.ID(a.Signup.Start),
+		Capture: domain.SignupCapture{Token: a.Signup.Capture.Token, Subject: a.Signup.Capture.Subject},
+	}
+	if len(a.Signup.Teardown) > 0 {
+		teardown, err := buildSignupSteps(a.Signup.Teardown)
+		if err != nil {
+			return domain.CredentialPool{}, err
+		}
+		flow.Teardown = teardown
+		flow.TeardownStart = domain.ID(a.Signup.TeardownStart)
+	}
+	return domain.CredentialPool{
+		ID:           "cli-pool",
+		Strategy:     domain.CredBootstrapSignup,
+		SignupFlow:   flow,
+		KeepAccounts: a.KeepAccounts,
+	}, nil
+}
+
+// buildSignupSteps translates authored flow steps ("METHOD /path" shorthand) into
+// the transport-free domain.SignupStep shape (split method/path) the orchestrator
+// compiles. A pure-state step (no request) is not meaningful in a signup/teardown
+// journey, so an empty request is an error.
+func buildSignupSteps(flow []Step) ([]domain.SignupStep, error) {
+	steps := make([]domain.SignupStep, 0, len(flow))
+	for _, st := range flow {
+		if st.ID == "" {
+			return nil, fmt.Errorf("scenariofile: every signup/teardown step needs an id")
+		}
+		if st.Request == "" {
+			return nil, fmt.Errorf("scenariofile: signup/teardown step %q needs a request", st.ID)
+		}
+		method, path, err := parseRequest(st.Request)
+		if err != nil {
+			return nil, fmt.Errorf("scenariofile: step %q: %w", st.ID, err)
+		}
+		steps = append(steps, domain.SignupStep{
+			ID:        domain.ID(st.ID),
+			Method:    method,
+			Path:      path,
+			Headers:   st.Headers,
+			Body:      st.Body,
+			Extract:   st.Extract,
+			DependsOn: domain.ID(st.DependsOn),
+			Weight:    st.Weight,
+		})
+	}
+	return steps, nil
 }
 
 // credentialSourceFor builds the auth.CredentialSource an AuthSource block names.

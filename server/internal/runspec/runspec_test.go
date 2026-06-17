@@ -226,10 +226,25 @@ func sourcePool(ref *domain.CredentialSourceRef) *domain.CredentialPool {
 	return &domain.CredentialPool{ID: "p", Strategy: domain.CredPool, Source: ref}
 }
 
-// bootstrapPool returns a bootstrap-signup pool naming a signup flow.
+// bootstrapPool returns a runnable bootstrap-signup pool: a well-formed signup
+// flow that provisions an account and a teardown that deprovisions it. It is
+// runnable in-process, so a rejection with workers proves the WORKERS gate fires
+// (not a missing-flow gate).
 func bootstrapPool() *domain.CredentialPool {
-	flowID := domain.ID("signup")
-	return &domain.CredentialPool{ID: "p", Strategy: domain.CredBootstrapSignup, BootstrapFlowID: &flowID}
+	return &domain.CredentialPool{
+		ID:       "p",
+		Strategy: domain.CredBootstrapSignup,
+		SignupFlow: &domain.SignupFlow{
+			Steps: []domain.SignupStep{{
+				ID: "register", Method: "POST", Path: "/signup",
+				Extract: map[string]string{"token": "accessToken", "uid": "id"},
+			}},
+			Start:         "register",
+			Capture:       domain.SignupCapture{Token: "token", Subject: "uid"},
+			Teardown:      []domain.SignupStep{{ID: "remove", Method: "DELETE", Path: "/accounts/{{.subject}}"}},
+			TeardownStart: "remove",
+		},
+	}
 }
 
 // TestValidateDistributedSourceAuth pins the P3 D1 reconciliation — the run

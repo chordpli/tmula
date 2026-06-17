@@ -49,6 +49,7 @@ func runScenario(args []string) error {
 		baselineFile   = fs.String("baseline-file", "", "regression gate: baseline report JSON file (a previous `tmula run --json` output)")
 		knownIssues    = fs.String("known-issues", "", "known-issues YAML; matching new findings are suppressed in the baseline gate until their expires date (YYYY-MM-DD)")
 		summary        = fs.String("summary", "", "append a markdown run summary to this file (default: $GITHUB_STEP_SUMMARY when set)")
+		keepAccounts   = fs.Bool("keep-accounts", false, "bootstrap-signup: leave the provisioned accounts in place instead of deprovisioning them (the only way to run a signup flow that declares no teardown)")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
 	)
 	fs.Usage = func() {
@@ -167,6 +168,14 @@ func runScenario(args []string) error {
 		return err
 	}
 
+	// --keep-accounts opts a bootstrap-signup run out of teardown. It is the only
+	// escape from the gating-safety rule that a signup flow with no teardown is
+	// rejected, so apply it before validation. It is meaningful only for a bootstrap
+	// pool; on any other pool it is inert (the field is ignored by other strategies).
+	if *keepAccounts && spec.CredentialPool != nil {
+		spec.CredentialPool.KeepAccounts = true
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
@@ -216,9 +225,11 @@ func runScenario(args []string) error {
 		// reference-only SourceRef (no secret), which the engine's distributed
 		// workers resolve locally and assign by global index. Any pool that would put
 		// a secret on the wire — inline entries or a minted login token — is still
-		// refused; run in-process to authenticate with those.
+		// refused; run in-process to authenticate with those. A bootstrap-signup pool
+		// provisions per-node accounts and likewise has no shared reference to fan out
+		// (distributed/remote bootstrap is a follow-up), so it too runs in-process only.
 		if spec.CredentialPool != nil && spec.CredentialPool.Source == nil {
-			return fmt.Errorf("a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate")
+			return fmt.Errorf("a credential pool is not supported against a remote --engine (the secret cannot cross the wire, and bootstrap-signup provisions per-node accounts); run in-process to authenticate")
 		}
 		report, err = driveRun(ctx, *engine, spec)
 		if err != nil {

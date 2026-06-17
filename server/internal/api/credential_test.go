@@ -239,16 +239,17 @@ func TestValidateRejectsBadCredentialPool(t *testing.T) {
 		t.Error("unknown credential strategy should be rejected")
 	}
 
-	// Bootstrap-signup: rejected with a clear not-yet-supported message.
+	// Bootstrap-signup with only a legacy flow id (no declarative SignupFlow): not
+	// runnable on this path — there is nothing to compile and walk.
 	flow := domain.ID("signup")
 	boot := base()
 	boot.CredentialPool = &domain.CredentialPool{ID: "p", Strategy: domain.CredBootstrapSignup, BootstrapFlowID: &flow}
 	err := boot.Validate()
 	if err == nil {
-		t.Fatal("bootstrap-signup should be rejected on this path")
+		t.Fatal("a bootstrap-signup pool with no signup flow should be rejected on this path")
 	}
-	if !strings.Contains(err.Error(), "not yet supported") {
-		t.Errorf("bootstrap-signup error = %q, want a not-yet-supported message", err)
+	if !strings.Contains(err.Error(), "signupFlow") {
+		t.Errorf("bootstrap-signup error = %q, want a needs-a-signupFlow message", err)
 	}
 
 	// Credential pool + distributed workers: rejected (workers synthesize their own users).
@@ -260,17 +261,15 @@ func TestValidateRejectsBadCredentialPool(t *testing.T) {
 	}
 }
 
-// TestCreateExperimentRejectsBootstrapPool confirms the Go-level submission path
-// (used by the in-process CLI) enforces the same guard as Validate: a
-// bootstrap-signup pool is rejected rather than silently run unauthenticated.
-func TestCreateExperimentRejectsBootstrapPool(t *testing.T) {
+// TestCreateExperimentRejectsBootstrapWithoutTeardown confirms the Go-level
+// submission path (used by the in-process CLI) enforces the gating-safety rule: a
+// bootstrap-signup pool with a signup flow but NO teardown (and no keep-accounts) is
+// rejected rather than silently stranding real accounts.
+func TestCreateExperimentRejectsBootstrapWithoutTeardown(t *testing.T) {
 	srv := NewServer(load.NewRESTAdapter(time.Second))
-	flow := domain.ID("signup")
-	spec := specAuth("http://127.0.0.1:1", 1, &domain.CredentialPool{
-		ID: "p", Strategy: domain.CredBootstrapSignup, BootstrapFlowID: &flow,
-	})
+	spec := specAuth("http://127.0.0.1:1", 1, signupPool(false)) // signup flow, no teardown
 	if _, err := srv.CreateExperiment(spec); err == nil {
-		t.Fatal("CreateExperiment should reject a bootstrap-signup pool")
+		t.Fatal("CreateExperiment should reject a bootstrap pool with no teardown and no --keep-accounts")
 	}
 }
 
