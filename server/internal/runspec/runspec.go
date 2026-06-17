@@ -94,6 +94,16 @@ type RunSpec struct {
 	// runspec stays a leaf and only carries the declarative domain types.
 	LoginFlow *LoginFlowSpec `json:"loginFlow,omitempty"`
 
+	// SuggestedSignup is the declarative signup flow the importer derived from a
+	// register/signup operation, offered to the UI as a "create test accounts"
+	// suggestion that is INDEPENDENT of the primary CredentialPool (a login pool can
+	// be the primary auth while a signup is suggested separately). It is advisory
+	// only: the run path never reads it (a bootstrap-signup run carries its flow on
+	// the pool's SignupFlow instead), so it is not validated and never affects a run.
+	// Nil when the imported spec named no register operation. It carries no secret —
+	// the token is captured at run time from the live signup response.
+	SuggestedSignup *domain.SignupFlow `json:"suggestedSignup,omitempty"`
+
 	// id is internal run-bookkeeping: the run identifier the control plane assigns
 	// after creation (see SetID). It is never serialized and never read back out
 	// of the spec by the run path.

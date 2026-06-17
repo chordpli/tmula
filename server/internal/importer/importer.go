@@ -83,6 +83,11 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 	if derived != nil {
 		sc.Auth = derived.auth
 	}
+	// Offer a signup suggestion when a register/signup operation exists, independent
+	// of the primary auth above (a login may be the primary auth while a signup is
+	// suggested separately). Best-effort: no register op yields no suggestion, so a
+	// spec without one imports unchanged.
+	sc.SuggestedSignup = deriveSignup(ops)
 	return sc, nil
 }
 
@@ -329,7 +334,8 @@ type openAPIDoc struct {
 }
 
 type operation struct {
-	OperationID string `json:"operationId"`
+	OperationID string   `json:"operationId"`
+	Tags        []string `json:"tags"`
 	RequestBody *struct {
 		Content map[string]struct {
 			Example  json.RawMessage `json:"example"`
