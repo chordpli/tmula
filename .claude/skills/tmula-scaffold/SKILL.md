@@ -1,6 +1,6 @@
 ---
 name: tmula-scaffold
-description: Scaffold a starting tmula scenario from an API description — an OpenAPI/Swagger doc (URL or file), a HAR capture, or an access log. Use when you have a spec or traffic log and need a tmula scenario.json to start from. Produces a RAW scaffold (linear flow, literal path params, no auth, destructive ops still present); pair with tmula-enrich to make it runnable and safe. Does NOT send traffic — that's tmula-run.
+description: Scaffold a starting tmula scenario from an API description — an OpenAPI/Swagger doc (URL or file), a HAR capture, or an access log. Use when you have a spec or traffic log and need a tmula scenario.json to start from. Produces a RAW scaffold (linear flow, literal path params, destructive ops still present; auth is auto-derived from the spec's security scheme when present — fill one secret, see tmula-auth); pair with tmula-enrich to make it runnable and safe. Does NOT send traffic — that's tmula-run.
 argument-hint: <API/server URL | OpenAPI spec URL or file | HAR | access log>
 ---
 
@@ -84,9 +84,10 @@ Artifacts produced (all under `json/`):
    either, and the rest of the suite accepts a `.yaml` scenario too.)
 
 5. **Report the scaffold honestly and hand off.** State: target, # of steps/nodes, format, and that it is a
-   **raw scaffold** — path params are literal (`{id}`), there is no auth, and destructive ops are present.
-   Then: *"Run **tmula-enrich** to substitute path params, wire auth, and filter destructive ops before
-   running."*
+   **raw scaffold** — path params are literal (`{id}`) and destructive ops are present; auth is **auto-derived
+   from the spec's security scheme when present** (a `login`/`pool` block with a `REPLACE_ME` secret to fill —
+   see **tmula-auth**), else absent. Then: *"Run **tmula-enrich** to substitute path params, fill the auth
+   secret (or wire auth by hand if none was derived), and filter destructive ops before running."*
 
 6. **Web console artifacts (only if you'll use the :8080 console).** The console's two manual-edit fields
    take separate JSON — the **Scenario graph** (`graph`) and **API templates** (`templates`) — not the
@@ -108,7 +109,9 @@ Artifacts produced (all under `json/`):
 ## Scaffold quirks to flag (so enrich/run know what to fix)
 
 - **Path params pass through literally**: `GET /pet/{petId}` — tmula would send the literal `{petId}`.
-- **Auth is not represented**: the importer ignores `securitySchemes`/`securityDefinitions`.
+- **Auth IS auto-derived** when the spec has a security scheme: the importer reads `securitySchemes`
+  (OAuth2 / bearer / apiKey) and a register op and emits a `login`/`pool` block + an advisory
+  `suggestedSignup`, leaving a `REPLACE_ME` secret to fill (see **tmula-auth**). No scheme → no auth block.
 - **Destructive ops included**: `DELETE`, mutating `POST`/`PUT` appear in the flow as-is.
 - **Step ids** come from operationIds/paths; may be cryptic or collide.
 - Many specs are flat CRUD dumps — the linear order is a starting point to reshape, not a user journey.
@@ -141,6 +144,6 @@ eval "$(./.claude/skills/tmula-scaffold/scripts/fetch-openapi.sh https://petstor
 ./bin/tmula init --from "$SPEC" --target "$TARGET" --out /tmp/scenario.yaml
 mkdir -p json
 python3 -c "import yaml,json; json.dump(yaml.safe_load(open('/tmp/scenario.yaml')), open('json/scenario.json','w'), indent=2)"
-# → json/scenario.json (19 steps, target https://petstore3.swagger.io/api/v3). RAW: {petId} literal, no auth,
-#   11 destructive ops present. Next: tmula-enrich.
+# → json/scenario.json (19 steps, target https://petstore3.swagger.io/api/v3). RAW: {petId} literal;
+#   auth auto-derived from the security scheme (fill the REPLACE_ME secret); 11 destructive ops present. Next: tmula-enrich.
 ```
