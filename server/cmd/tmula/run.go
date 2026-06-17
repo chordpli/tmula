@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -144,7 +145,15 @@ func runScenario(args []string) error {
 	if sc.Target == "" {
 		return fmt.Errorf("no target URL in the scenario; pass --target")
 	}
-	spec, err := scenariofile.Expand(sc)
+	// Resolve an external auth source (auth.source.file) against the scenario
+	// file's own directory, so a relative path is read predictably from beside the
+	// scenario and confined there. Single-endpoint mode has no file: dir is empty
+	// and ExpandFrom falls back to the working directory.
+	scenarioDir := ""
+	if file != "" {
+		scenarioDir = filepath.Dir(file)
+	}
+	spec, err := scenariofile.ExpandFrom(sc, scenarioDir)
 	if err != nil {
 		return err
 	}

@@ -2,6 +2,8 @@ package scenariofile
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -116,6 +118,146 @@ func TestExpandAuthRejects(t *testing.T) {
 	empty.Auth = &Auth{Strategy: "pool"}
 	if _, err := Expand(empty); err == nil {
 		t.Error("a pool strategy with no users should be rejected")
+	}
+}
+
+// TestExpandAuthFileSource resolves a file-backed auth source into the same
+// Entries a literal users block would produce, leaving the pool Source nil so the
+// resolved spec carries real credentials. The FileSource root is the scenario
+// file's directory, passed to ExpandFrom.
+func TestExpandAuthFileSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "creds.csv"), []byte("subject,token\nalice,tok-alice\nbob,tok-bob\n"), 0o600); err != nil {
+		t.Fatalf("write creds: %v", err)
+	}
+	const fileYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  source:
+    file: creds.csv
+    format: csv
+`
+	s, err := Parse([]byte(fileYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := ExpandFrom(s, dir)
+	if err != nil {
+		t.Fatalf("ExpandFrom: %v", err)
+	}
+	if spec.CredentialPool == nil {
+		t.Fatal("expanded spec has no credential pool")
+	}
+	pool := spec.CredentialPool
+	if pool.Source != nil {
+		t.Errorf("resolved pool should carry nil Source, got %+v", pool.Source)
+	}
+	if pool.Strategy != domain.CredPool {
+		t.Errorf("strategy = %q, want %q", pool.Strategy, domain.CredPool)
+	}
+	if len(pool.Entries) != 2 {
+		t.Fatalf("pool entries = %d, want 2", len(pool.Entries))
+	}
+	if pool.Entries[0].Subject != "alice" || pool.Entries[0].Secret != "tok-alice" {
+		t.Errorf("entry[0] = %+v, want alice/tok-alice", pool.Entries[0])
+	}
+	if pool.Entries[1].Subject != "bob" || pool.Entries[1].Secret != "tok-bob" {
+		t.Errorf("entry[1] = %+v, want bob/tok-bob", pool.Entries[1])
+	}
+	// The resolved pool matches what an equivalent literal users block produces.
+	if err := spec.Validate(); err != nil {
+		t.Errorf("resolved authenticated spec failed validation: %v", err)
+	}
+	// The secret never serializes out of the resolved spec.
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "tok-alice") || strings.Contains(string(b), "tok-bob") {
+		t.Errorf("resolved spec leaked a secret: %s", b)
+	}
+}
+
+// TestExpandAuthEnvSource resolves an env-backed auth source into Entries.
+func TestExpandAuthEnvSource(t *testing.T) {
+	t.Setenv("TMULA_TEST_AUTH", "tok-x\ntok-y\n")
+	const envYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  source:
+    env: TMULA_TEST_AUTH
+    format: tokens
+`
+	s, err := Parse([]byte(envYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	spec, err := Expand(s)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Source != nil {
+		t.Fatalf("env source did not resolve to entries: %+v", spec.CredentialPool)
+	}
+	if len(spec.CredentialPool.Entries) != 2 {
+		t.Fatalf("env entries = %d, want 2", len(spec.CredentialPool.Entries))
+	}
+	if spec.CredentialPool.Entries[0].Secret != "tok-x" || spec.CredentialPool.Entries[1].Secret != "tok-y" {
+		t.Errorf("env entries = %+v, want tok-x/tok-y", spec.CredentialPool.Entries)
+	}
+}
+
+// TestExpandAuthSourceMissingFile errors at expand time when the referenced file
+// does not exist.
+func TestExpandAuthSourceMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	const missingYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  source:
+    file: nope.csv
+    format: csv
+`
+	s, err := Parse([]byte(missingYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := ExpandFrom(s, dir); err == nil {
+		t.Error("a missing source file should error at expand time")
+	}
+}
+
+// TestExpandAuthRejectsUsersAndSource rejects an auth block that sets both inline
+// users and an external source.
+func TestExpandAuthRejectsUsersAndSource(t *testing.T) {
+	const bothYAML = `
+target: http://localhost:9000
+flow:
+  - id: a
+    request: GET /a
+auth:
+  users:
+    - subject: alice
+      token: tok
+  source:
+    env: TMULA_TEST_AUTH
+    format: tokens
+`
+	s, err := Parse([]byte(bothYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if _, err := Expand(s); err == nil {
+		t.Error("an auth block with both users and a source should be rejected")
 	}
 }
 
