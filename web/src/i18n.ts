@@ -202,6 +202,92 @@ const en: Record<string, string> = {
   'legend.dep': 'Dependency',
   'legend.terminal': 'Terminal node',
 
+  // Card: Auth (P5)
+  'card.auth': 'Auth',
+  'card.auth.hint':
+    'How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts.',
+  'auth.mode.none': 'None',
+  'auth.mode.none.desc': 'Run anonymously — no credentials are sent.',
+  'auth.mode.pool': 'Token pool',
+  'auth.mode.pool.desc': 'Paste or upload pre-issued tokens; each user gets one.',
+  'auth.mode.login': 'Login (mint a token)',
+  'auth.mode.login.desc': 'Walk a login flow once and capture the token from its response.',
+  'auth.mode.bootstrap': 'Generate test accounts',
+  'auth.mode.bootstrap.desc': 'Sign up a real account per user, then tear it down.',
+
+  // Auth · token pool
+  'auth.pool.file': 'Upload a file',
+  'auth.pool.fileHint': 'A CSV (subject,token header), JSONL ({subject,token} per line), or plain tokens (.txt).',
+  'auth.pool.format': 'Format',
+  'auth.pool.formatHint': 'How the pasted text and file are encoded.',
+  'auth.pool.format.csv': 'CSV (subject,token)',
+  'auth.pool.format.jsonl': 'JSONL ({subject,token})',
+  'auth.pool.format.tokens': 'Plain tokens (one per line)',
+  'auth.pool.paste': 'Paste credentials',
+  'auth.pool.pasteHint':
+    'Parsed in your browser into inline entries — no file path is ever sent to the server. Plain tokens carry no subject (the bearer token stands alone).',
+  'auth.pool.placeholder.csv': 'subject,token\nalice,eyJhbGci...\nbob,eyJhbGci...',
+  'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
+  'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
+  'auth.pool.count': '{count} credential(s) parsed',
+
+  // Auth · login
+  'auth.login.tokenVar': 'Token capture',
+  'auth.login.tokenVarHint': 'The captured variable that becomes the token (required), e.g. $.access_token.',
+  'auth.login.tokenVar.tip':
+    'Name the variable your login template extracts (via its extract map) that holds the bearer token. It is captured from the live login response at run time and never stored.',
+  'auth.login.subjectVar': 'Subject capture',
+  'auth.login.subjectVarHint': 'Optional captured variable that becomes the principal id.',
+  'auth.login.start': 'Start node',
+  'auth.login.startHint': 'The login flow node every mint begins at.',
+  'auth.login.scope': 'Scope',
+  'auth.login.scopeHint': 'Per-user mints one token each; shared mints one for everyone (client_credentials).',
+  'auth.login.scope.perUser': 'Per user — one token per virtual user',
+  'auth.login.scope.shared': 'Shared — one token for all (client_credentials)',
+  'auth.login.graph': 'Login graph',
+  'auth.login.graphHint': 'The login journey, authored like the scenario graph — a sibling, never a node in it.',
+  'auth.login.graph.tip':
+    'A standalone graph the login transport walks to mint a token. Its nodes bind to the login templates below; the simulated traffic never observes it.',
+  'auth.login.templates': 'Login templates',
+  'auth.login.templatesHint': 'The request the login flow sends, with an extract map that captures the token.',
+
+  // Auth · bootstrap
+  'auth.bootstrap.confirm': 'This targets a non-production system.',
+  'auth.bootstrap.confirmSub':
+    'Generating accounts creates and deletes REAL accounts on the target. Confirm this is not production before continuing.',
+  'auth.bootstrap.captureToken': 'Token capture',
+  'auth.bootstrap.captureTokenHint': 'The captured variable that becomes the token (required).',
+  'auth.bootstrap.captureToken.tip':
+    'Name the variable a signup step extracts that holds the new account’s token. It is captured from the live signup response and never stored.',
+  'auth.bootstrap.captureSubject': 'Subject capture',
+  'auth.bootstrap.captureSubjectHint': 'Optional captured variable that becomes the account id (threaded into teardown).',
+  'auth.bootstrap.start': 'Start step',
+  'auth.bootstrap.startHint': 'Optional entry step (defaults to the first).',
+  'auth.bootstrap.steps': 'Signup steps',
+  'auth.bootstrap.stepsHint': 'A JSON array of steps: id, method, path, optional body and extract.',
+  'auth.bootstrap.steps.tip':
+    'Each step is one signup request: a bare method and rooted path, an optional body, and an extract map that captures the token/subject. {{.userIndex}} is rendered per account so each signs up distinctly.',
+  'auth.bootstrap.keep': 'Keep accounts (skip teardown)',
+  'auth.bootstrap.keepSub': 'Leave the provisioned accounts in place after the run instead of deleting them.',
+  'auth.bootstrap.teardown': 'Teardown steps',
+  'auth.bootstrap.teardownHint': 'A JSON array of steps that delete each account. {{.subject}} is the account id.',
+  'auth.bootstrap.teardownStart': 'Teardown start step',
+  'auth.bootstrap.teardownStartHint': 'Optional teardown entry step (defaults to the first).',
+
+  // Auth · scenario doctor hints
+  'doctor.authPoolEmpty': 'Token pool is selected but no credentials are pasted or uploaded.',
+  'doctor.authPoolInvalid': 'The pasted credentials could not be parsed: {error}',
+  'doctor.authLoginNoToken': 'Login auth is selected but no token capture path is set.',
+  'doctor.authLoginGraphJson': 'Login graph JSON is invalid: {error}',
+  'doctor.authLoginTemplatesJson': 'Login templates JSON is invalid: {error}',
+  'doctor.authBootstrapUnconfirmed':
+    'Generating accounts requires confirming the target is non-production before it can run.',
+  'doctor.authBootstrapNoToken': 'Account generation is selected but no token capture path is set.',
+  'doctor.authBootstrapStepsJson': 'Signup steps JSON is invalid: {error}',
+  'doctor.authBootstrapNoTeardown':
+    'Account generation has no teardown flow and keep-accounts is off — provisioned accounts would be stranded.',
+  'doctor.authBootstrapTeardownJson': 'Teardown steps JSON is invalid: {error}',
+
   // Presets (Feature A)
   'presets.label': 'Start from a template',
   'presets.hint': 'One click fills the scenario below — then tweak it however you like.',
@@ -512,6 +598,92 @@ const ko: Record<string, string> = {
   'legend.back': '되돌아가기 · 이탈',
   'legend.dep': '의존',
   'legend.terminal': '터미널 노드',
+
+  // Card: Auth (P5)
+  'card.auth': '인증',
+  'card.auth.hint':
+    '시뮬레이션 트래픽이 인증하는 방식입니다. 끄면 익명으로 실행하고, 토큰 풀을 제공하거나, 로그인 흐름으로 토큰을 발급받거나, 일회용 계정을 생성할 수 있습니다.',
+  'auth.mode.none': '없음',
+  'auth.mode.none.desc': '익명으로 실행 — 자격 증명을 보내지 않습니다.',
+  'auth.mode.pool': '토큰 풀',
+  'auth.mode.pool.desc': '미리 발급한 토큰을 붙여넣거나 업로드합니다. 사용자마다 하나씩 배정됩니다.',
+  'auth.mode.login': '로그인 (토큰 발급)',
+  'auth.mode.login.desc': '로그인 흐름을 한 번 실행해 응답에서 토큰을 캡처합니다.',
+  'auth.mode.bootstrap': '테스트 계정 생성',
+  'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다.',
+
+  // Auth · 토큰 풀
+  'auth.pool.file': '파일 올리기',
+  'auth.pool.fileHint': 'CSV(subject,token 헤더), JSONL(줄마다 {subject,token}), 또는 일반 토큰(.txt).',
+  'auth.pool.format': '형식',
+  'auth.pool.formatHint': '붙여넣은 텍스트와 파일의 인코딩 방식입니다.',
+  'auth.pool.format.csv': 'CSV (subject,token)',
+  'auth.pool.format.jsonl': 'JSONL ({subject,token})',
+  'auth.pool.format.tokens': '일반 토큰 (한 줄에 하나)',
+  'auth.pool.paste': '자격 증명 붙여넣기',
+  'auth.pool.pasteHint':
+    '브라우저에서 인라인 항목으로 파싱됩니다 — 파일 경로는 서버로 전송되지 않습니다. 일반 토큰은 subject 없이 사용됩니다(베어러 토큰 단독).',
+  'auth.pool.placeholder.csv': 'subject,token\nalice,eyJhbGci...\nbob,eyJhbGci...',
+  'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
+  'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
+  'auth.pool.count': '자격 증명 {count}개 파싱됨',
+
+  // Auth · 로그인
+  'auth.login.tokenVar': '토큰 캡처',
+  'auth.login.tokenVarHint': '토큰이 되는 캡처 변수입니다(필수). 예: $.access_token.',
+  'auth.login.tokenVar.tip':
+    '로그인 템플릿이 extract 맵으로 추출하는, 베어러 토큰을 담은 변수 이름입니다. 실행 시 실제 로그인 응답에서 캡처되며 저장되지 않습니다.',
+  'auth.login.subjectVar': 'Subject 캡처',
+  'auth.login.subjectVarHint': '주체(principal) id가 되는 선택 캡처 변수입니다.',
+  'auth.login.start': '시작 노드',
+  'auth.login.startHint': '토큰 발급이 시작되는 로그인 흐름 노드입니다.',
+  'auth.login.scope': '범위',
+  'auth.login.scopeHint': '사용자별은 각자 하나씩, 공유는 전체가 하나를 공유합니다(client_credentials).',
+  'auth.login.scope.perUser': '사용자별 — 가상 사용자마다 토큰 1개',
+  'auth.login.scope.shared': '공유 — 전체가 토큰 1개 (client_credentials)',
+  'auth.login.graph': '로그인 그래프',
+  'auth.login.graphHint': '로그인 여정입니다. 시나리오 그래프처럼 작성하며, 본 그래프의 노드가 아닌 별도 그래프입니다.',
+  'auth.login.graph.tip':
+    '로그인 트랜스포트가 토큰을 발급하기 위해 따라가는 독립 그래프입니다. 노드는 아래 로그인 템플릿에 연결되며, 시뮬레이션 트래픽은 이를 관찰하지 않습니다.',
+  'auth.login.templates': '로그인 템플릿',
+  'auth.login.templatesHint': '로그인 흐름이 보내는 요청과, 토큰을 캡처하는 extract 맵입니다.',
+
+  // Auth · 부트스트랩
+  'auth.bootstrap.confirm': '이 대상은 비프로덕션 시스템입니다.',
+  'auth.bootstrap.confirmSub':
+    '계정 생성은 대상에 실제 계정을 만들고 삭제합니다. 계속하기 전에 프로덕션이 아님을 확인하세요.',
+  'auth.bootstrap.captureToken': '토큰 캡처',
+  'auth.bootstrap.captureTokenHint': '토큰이 되는 캡처 변수입니다(필수).',
+  'auth.bootstrap.captureToken.tip':
+    '가입 단계가 추출하는, 새 계정의 토큰을 담은 변수 이름입니다. 실제 가입 응답에서 캡처되며 저장되지 않습니다.',
+  'auth.bootstrap.captureSubject': 'Subject 캡처',
+  'auth.bootstrap.captureSubjectHint': '계정 id가 되는 선택 캡처 변수입니다(정리 단계로 전달됨).',
+  'auth.bootstrap.start': '시작 단계',
+  'auth.bootstrap.startHint': '선택 진입 단계입니다(기본값: 첫 단계).',
+  'auth.bootstrap.steps': '가입 단계',
+  'auth.bootstrap.stepsHint': '단계의 JSON 배열입니다: id, method, path, 선택적 body·extract.',
+  'auth.bootstrap.steps.tip':
+    '각 단계는 가입 요청 하나입니다: 메서드와 루트 경로, 선택적 body, 그리고 token/subject를 캡처하는 extract 맵. {{.userIndex}}가 계정마다 렌더링되어 서로 다르게 가입합니다.',
+  'auth.bootstrap.keep': '계정 유지 (정리 건너뜀)',
+  'auth.bootstrap.keepSub': '실행 후 생성한 계정을 삭제하지 않고 그대로 둡니다.',
+  'auth.bootstrap.teardown': '정리 단계',
+  'auth.bootstrap.teardownHint': '각 계정을 삭제하는 단계의 JSON 배열입니다. {{.subject}}는 계정 id입니다.',
+  'auth.bootstrap.teardownStart': '정리 시작 단계',
+  'auth.bootstrap.teardownStartHint': '선택 정리 진입 단계입니다(기본값: 첫 단계).',
+
+  // Auth · 시나리오 점검 힌트
+  'doctor.authPoolEmpty': '토큰 풀이 선택되었지만 붙여넣거나 업로드한 자격 증명이 없습니다.',
+  'doctor.authPoolInvalid': '붙여넣은 자격 증명을 파싱할 수 없습니다: {error}',
+  'doctor.authLoginNoToken': '로그인 인증이 선택되었지만 토큰 캡처 경로가 설정되지 않았습니다.',
+  'doctor.authLoginGraphJson': '로그인 그래프 JSON이 올바르지 않습니다: {error}',
+  'doctor.authLoginTemplatesJson': '로그인 템플릿 JSON이 올바르지 않습니다: {error}',
+  'doctor.authBootstrapUnconfirmed':
+    '계정 생성은 실행 전에 대상이 비프로덕션임을 확인해야 합니다.',
+  'doctor.authBootstrapNoToken': '계정 생성이 선택되었지만 토큰 캡처 경로가 설정되지 않았습니다.',
+  'doctor.authBootstrapStepsJson': '가입 단계 JSON이 올바르지 않습니다: {error}',
+  'doctor.authBootstrapNoTeardown':
+    '계정 생성에 정리 흐름이 없고 계정 유지도 꺼져 있어 생성한 계정이 방치됩니다.',
+  'doctor.authBootstrapTeardownJson': '정리 단계 JSON이 올바르지 않습니다: {error}',
 
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',

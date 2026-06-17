@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  AUTH_FORM_DEFAULTS,
   buildRunSpec,
   compareURL,
   createExperiment,
@@ -14,6 +15,7 @@ import {
   killRun,
   MAX_TRACE_USERS,
   parseAllowlist,
+  parseCredentials,
   probeRun,
   reportHTMLURL,
   runDisabled,
@@ -22,8 +24,11 @@ import {
   startRun,
   streamURL,
   traceable,
+  type AuthMode,
+  type CredFormat,
   type ExperimentForm,
   type ImportStats,
+  type LoginScope,
   type OutcomeSummary,
   type Report,
   type Stats,
@@ -79,7 +84,42 @@ const initialForm: ExperimentForm = {
   thinkMaxMs: 900,
   segmentsJSON: '',
   traceEnabled: true,
+  ...AUTH_FORM_DEFAULTS,
 }
+
+// loginFlowPlaceholders show the shape of a login flow (a single POST that captures a
+// token) without prefilling it, so the field reads as guidance until the operator
+// authors their own. The graph + templates are authored exactly like the scenario.
+const loginGraphPlaceholder = `{
+  "id": "login",
+  "nodes": [{ "id": "login", "apiTemplateId": "t_login" }],
+  "edges": []
+}`
+const loginTemplatesPlaceholder = `{
+  "t_login": {
+    "method": "POST",
+    "path": "/login",
+    "payloadTemplate": "{\\"user\\":\\"alice\\",\\"pass\\":\\"secret\\"}",
+    "extract": { "access_token": "$.access_token" }
+  }
+}`
+
+// signupStepsPlaceholder shows the bootstrap signup journey shape: a step list with a
+// bare method/path and an extract that captures the token. teardownPlaceholder shows
+// the matching deprovision step. Both are guidance only until the operator authors
+// their own.
+const signupStepsPlaceholder = `[
+  {
+    "id": "signup",
+    "method": "POST",
+    "path": "/signup",
+    "body": "{\\"email\\":\\"test+{{.userIndex}}@example.com\\"}",
+    "extract": { "accessToken": "$.token", "id": "$.id" }
+  }
+]`
+const signupTeardownPlaceholder = `[
+  { "id": "delete", "method": "DELETE", "path": "/accounts/{{.subject}}" }
+]`
 
 // segmentsPlaceholder shows the persona-mix shape without prefilling it, so an
 // open run stays homogeneous until the operator opts in.
@@ -671,6 +711,9 @@ function Operator() {
           </div>
         </section>
 
+        {/* ---- Auth (P5) ---- */}
+        <AuthCard form={form} set={set} />
+
         {/* ---- Run ---- */}
         <section className="card">
           <div className="actionbar">
@@ -1073,6 +1116,359 @@ function ImportPanel({
           <span>{err}</span>
         </div>
       )}
+    </div>
+  )
+}
+
+// AUTH_MODES is the ordered set of auth strategies the card offers; each maps onto a
+// radio in the segmented selector and an i18n label/description.
+const AUTH_MODES: { mode: AuthMode; labelKey: string; descKey: string }[] = [
+  { mode: 'none', labelKey: 'auth.mode.none', descKey: 'auth.mode.none.desc' },
+  { mode: 'pool', labelKey: 'auth.mode.pool', descKey: 'auth.mode.pool.desc' },
+  { mode: 'login', labelKey: 'auth.mode.login', descKey: 'auth.mode.login.desc' },
+  { mode: 'bootstrap', labelKey: 'auth.mode.bootstrap', descKey: 'auth.mode.bootstrap.desc' },
+]
+
+// AuthCard is the Auth section (P5): it picks how the simulated traffic authenticates
+// and authors the chosen strategy's material. None (the default) attaches nothing and
+// keeps the run anonymous. Token pool parses pasted/uploaded credentials in the browser
+// into inline entries (the server rejects a file source over the wire — D1). Login
+// mints a token from a standalone flow. Bootstrap provisions real accounts and is gated
+// behind an explicit non-production confirmation. It writes straight to the form via
+// the parent's set(); buildRunSpec turns the fields into the wire credentialPool.
+function AuthCard({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <section className="card" aria-labelledby="card-auth">
+      <div className="card__head">
+        <span className="card__step" aria-hidden="true">4</span>
+        <h2 className="card__title" id="card-auth">{t('card.auth')}</h2>
+      </div>
+      <p className="card__hint">{t('card.auth.hint')}</p>
+
+      <div className="stack" style={{ gap: 16 }}>
+        <div className="authmodes" role="radiogroup" aria-label={t('card.auth')}>
+          {AUTH_MODES.map(({ mode, labelKey, descKey }) => (
+            <label key={mode} className={`authmode${form.authMode === mode ? ' authmode--on' : ''}`}>
+              <input
+                className="authmode__radio"
+                type="radio"
+                name="authMode"
+                checked={form.authMode === mode}
+                onChange={() => set('authMode', mode)}
+              />
+              <span className="authmode__body">
+                <span className="authmode__label">{t(labelKey)}</span>
+                <span className="authmode__desc">{t(descKey)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
+        {form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
+        {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
+      </div>
+    </section>
+  )
+}
+
+// AuthPoolFields authors a token pool: a format selector, a file upload, and a textarea
+// of pasted credentials. The file and textarea are BOTH parsed in the browser — the
+// file's text is loaded into the textarea on pick (so the operator sees exactly what
+// will be sent), and the live parsed-count / error is computed from the textarea on
+// every keystroke. Nothing but inline { subject, token } entries ever leave the
+// browser (the server rejects a file source over the wire — D1).
+function AuthPoolFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+
+  // Live parse of the pasted text for the count / inline error. It never throws out of
+  // render: a malformed body surfaces as a short message, an empty body as nothing.
+  let count = 0
+  let parseError = ''
+  if (form.authPoolText.trim()) {
+    try {
+      count = parseCredentials(form.authPoolFormat, form.authPoolText).length
+    } catch (e) {
+      parseError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Pick the format from the extension so the strongest signal isn't lost; .csv ->
+    // csv, .jsonl -> jsonl, anything else stays on the current selection.
+    const lower = file.name.toLowerCase()
+    if (lower.endsWith('.csv')) set('authPoolFormat', 'csv')
+    else if (lower.endsWith('.jsonl')) set('authPoolFormat', 'jsonl')
+    else if (lower.endsWith('.txt') || lower.endsWith('.tokens')) set('authPoolFormat', 'tokens')
+    try {
+      // Read the file client-side so the textarea reflects exactly what will be sent;
+      // the operator can still edit it before running.
+      set('authPoolText', await file.text())
+    } catch {
+      /* ignore an unreadable file; the operator can paste instead */
+    }
+  }
+
+  return (
+    <div className="authpanel">
+      <div className="import__grid">
+        <label className="field import__file">
+          <span className="field__label">{t('auth.pool.file')}</span>
+          <input className="filepick" type="file" accept=".csv,.jsonl,.txt,.tokens" onChange={onFile} />
+          <span className="field__help">{t('auth.pool.fileHint')}</span>
+        </label>
+        <Field label={t('auth.pool.format')} help={t('auth.pool.formatHint')}>
+          <select
+            className="select"
+            value={form.authPoolFormat}
+            onChange={(e) => set('authPoolFormat', e.target.value as CredFormat)}
+          >
+            <option value="csv">{t('auth.pool.format.csv')}</option>
+            <option value="jsonl">{t('auth.pool.format.jsonl')}</option>
+            <option value="tokens">{t('auth.pool.format.tokens')}</option>
+          </select>
+        </Field>
+      </div>
+
+      <Field label={t('auth.pool.paste')} help={t('auth.pool.pasteHint')}>
+        <textarea
+          className="textarea"
+          value={form.authPoolText}
+          onChange={(e) => set('authPoolText', e.target.value)}
+          rows={6}
+          placeholder={t(`auth.pool.placeholder.${form.authPoolFormat}`)}
+          spellCheck={false}
+        />
+      </Field>
+
+      {parseError ? (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{parseError}</span>
+        </div>
+      ) : count > 0 ? (
+        <p className="authpanel__ok" role="status">
+          <CheckMini />
+          {t('auth.pool.count', { count })}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+// AuthLoginFields authors the standalone login flow that mints a token: its graph +
+// templates (authored exactly like the scenario), a start node, a token capture path
+// (required), an optional subject capture, and the per-user vs shared scope toggle.
+function AuthLoginFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <div className="authpanel">
+      <div className="field-row field-row--2">
+        <Field
+          label={t('auth.login.tokenVar')}
+          help={t('auth.login.tokenVarHint')}
+          tip={<HelpTip label={t('auth.login.tokenVar')} text={t('auth.login.tokenVar.tip')} />}
+        >
+          <input
+            className="input"
+            value={form.loginTokenVar}
+            onChange={(e) => set('loginTokenVar', e.target.value)}
+            placeholder="$.access_token"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label={t('auth.login.subjectVar')} help={t('auth.login.subjectVarHint')}>
+          <input
+            className="input"
+            value={form.loginSubjectVar}
+            onChange={(e) => set('loginSubjectVar', e.target.value)}
+            placeholder="$.user_id"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label={t('auth.login.start')} help={t('auth.login.startHint')}>
+          <input
+            className="input"
+            value={form.loginStart}
+            onChange={(e) => set('loginStart', e.target.value)}
+            placeholder="login"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label={t('auth.login.scope')} help={t('auth.login.scopeHint')}>
+          <select
+            className="select"
+            value={form.loginScope}
+            onChange={(e) => set('loginScope', e.target.value as LoginScope)}
+          >
+            <option value="per-user">{t('auth.login.scope.perUser')}</option>
+            <option value="shared">{t('auth.login.scope.shared')}</option>
+          </select>
+        </Field>
+      </div>
+
+      <Field
+        label={t('auth.login.graph')}
+        help={t('auth.login.graphHint')}
+        tip={<HelpTip label={t('auth.login.graph')} text={t('auth.login.graph.tip')} />}
+      >
+        <textarea
+          className="textarea"
+          value={form.loginGraphJSON}
+          onChange={(e) => set('loginGraphJSON', e.target.value)}
+          rows={6}
+          placeholder={loginGraphPlaceholder}
+          spellCheck={false}
+        />
+      </Field>
+      <Field label={t('auth.login.templates')} help={t('auth.login.templatesHint')}>
+        <textarea
+          className="textarea"
+          value={form.loginTemplatesJSON}
+          onChange={(e) => set('loginTemplatesJSON', e.target.value)}
+          rows={7}
+          placeholder={loginTemplatesPlaceholder}
+          spellCheck={false}
+        />
+      </Field>
+    </div>
+  )
+}
+
+// AuthBootstrapFields authors the bootstrap signup flow that provisions real accounts:
+// the signup steps + capture, an optional teardown flow, and the keep-accounts toggle.
+// Because it creates and deletes REAL accounts on the target, the whole panel is gated
+// behind an explicit non-production confirmation — until it is checked, the flow fields
+// are disabled and the run is blocked (buildAuth also re-checks it).
+function AuthBootstrapFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const confirmed = form.authBootstrapConfirmed
+  return (
+    <div className="authpanel">
+      <div className="authpanel__warn" role="alert">
+        <AlertIcon />
+        <label className="authpanel__confirm">
+          <input
+            className="check__box"
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => set('authBootstrapConfirmed', e.target.checked)}
+          />
+          <span>
+            <span className="authpanel__confirmLabel">{t('auth.bootstrap.confirm')}</span>
+            <span className="authpanel__confirmSub">{t('auth.bootstrap.confirmSub')}</span>
+          </span>
+        </label>
+      </div>
+
+      <fieldset className="authpanel__fields" disabled={!confirmed}>
+        <div className="field-row field-row--2">
+          <Field
+            label={t('auth.bootstrap.captureToken')}
+            help={t('auth.bootstrap.captureTokenHint')}
+            tip={<HelpTip label={t('auth.bootstrap.captureToken')} text={t('auth.bootstrap.captureToken.tip')} />}
+          >
+            <input
+              className="input"
+              value={form.signupCaptureToken}
+              onChange={(e) => set('signupCaptureToken', e.target.value)}
+              placeholder="accessToken"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={t('auth.bootstrap.captureSubject')} help={t('auth.bootstrap.captureSubjectHint')}>
+            <input
+              className="input"
+              value={form.signupCaptureSubject}
+              onChange={(e) => set('signupCaptureSubject', e.target.value)}
+              placeholder="id"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={t('auth.bootstrap.start')} help={t('auth.bootstrap.startHint')}>
+            <input
+              className="input"
+              value={form.signupStart}
+              onChange={(e) => set('signupStart', e.target.value)}
+              placeholder="signup"
+              spellCheck={false}
+            />
+          </Field>
+        </div>
+
+        <Field
+          label={t('auth.bootstrap.steps')}
+          help={t('auth.bootstrap.stepsHint')}
+          tip={<HelpTip label={t('auth.bootstrap.steps')} text={t('auth.bootstrap.steps.tip')} />}
+        >
+          <textarea
+            className="textarea"
+            value={form.signupStepsJSON}
+            onChange={(e) => set('signupStepsJSON', e.target.value)}
+            rows={7}
+            placeholder={signupStepsPlaceholder}
+            spellCheck={false}
+          />
+        </Field>
+
+        <Check
+          checked={form.keepAccounts}
+          onChange={(v) => set('keepAccounts', v)}
+          label={t('auth.bootstrap.keep')}
+          sub={t('auth.bootstrap.keepSub')}
+        />
+
+        {!form.keepAccounts && (
+          <>
+            <Field label={t('auth.bootstrap.teardown')} help={t('auth.bootstrap.teardownHint')}>
+              <textarea
+                className="textarea"
+                value={form.signupTeardownJSON}
+                onChange={(e) => set('signupTeardownJSON', e.target.value)}
+                rows={4}
+                placeholder={signupTeardownPlaceholder}
+                spellCheck={false}
+              />
+            </Field>
+            <Field label={t('auth.bootstrap.teardownStart')} help={t('auth.bootstrap.teardownStartHint')}>
+              <input
+                className="input"
+                value={form.signupTeardownStart}
+                onChange={(e) => set('signupTeardownStart', e.target.value)}
+                placeholder="delete"
+                spellCheck={false}
+              />
+            </Field>
+          </>
+        )}
+      </fieldset>
     </div>
   )
 }

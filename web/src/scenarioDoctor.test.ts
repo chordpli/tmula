@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ExperimentForm } from './api'
+import { AUTH_FORM_DEFAULTS, type ExperimentForm } from './api'
 import { doctorForm } from './scenarioDoctor'
 
 const form: ExperimentForm = {
@@ -35,6 +35,7 @@ const form: ExperimentForm = {
   thinkMaxMs: 0,
   segmentsJSON: '',
   traceEnabled: false,
+  ...AUTH_FORM_DEFAULTS,
 }
 
 function codes(f: ExperimentForm = form): string[] {
