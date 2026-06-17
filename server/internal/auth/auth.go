@@ -6,7 +6,10 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -16,6 +19,15 @@ import (
 // json:"-" tag (domain), so persisting a credential never leaks the secret.
 type Provider interface {
 	Acquire(ctx context.Context, userIndex int) (domain.Credential, error)
+}
+
+// TearDowner deprovisions the principals a provider provisioned. Only the
+// bootstrap-signup provider implements it (a pre-supplied pool owns no accounts);
+// the orchestrator defers Teardown after a run so the real accounts a bootstrap run
+// created do not leak. It is best-effort and idempotent — see
+// BootstrapSignupProvider.Teardown.
+type TearDowner interface {
+	Teardown(ctx context.Context) error
 }
 
 // PoolProvider hands out pre-supplied credentials, one per virtual user,
@@ -44,6 +56,12 @@ func (p *PoolProvider) Acquire(_ context.Context, userIndex int) (domain.Credent
 // so the bootstrap provider is independent of any concrete signup transport.
 type SignupFunc func(ctx context.Context, userIndex int) (domain.Credential, error)
 
+// TeardownFunc deprovisions one provisioned account, identified by the same
+// userIndex Acquire keyed it under and carrying the credential the signup captured
+// (so the teardown journey can template the account's subject). It is injected so
+// the bootstrap provider is independent of any concrete teardown transport.
+type TeardownFunc func(ctx context.Context, userIndex int, cred domain.Credential) error
+
 // signupCall tracks one in-flight signup so concurrent Acquire calls for the
 // same user share a single signup instead of all serializing on one lock.
 type signupCall struct {
@@ -56,6 +74,7 @@ type signupCall struct {
 // signup up front, caching the result so each user keeps a stable identity.
 type BootstrapSignupProvider struct {
 	signup   SignupFunc
+	teardown TeardownFunc
 	mu       sync.Mutex
 	cache    map[int]domain.Credential
 	inflight map[int]*signupCall
@@ -113,6 +132,71 @@ func (b *BootstrapSignupProvider) Prewarm(ctx context.Context, n int) error {
 		if _, err := b.Acquire(ctx, i); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// SetTeardown installs the teardown transport the provider deprovisions accounts
+// through. It is set once at build time (the orchestrator wires it from the pool's
+// teardown flow), before Teardown is ever called, so it needs no lock. A nil
+// teardown makes Teardown a cache-clearing no-op — the --keep-accounts and
+// no-teardown-wired cases.
+func (b *BootstrapSignupProvider) SetTeardown(teardown TeardownFunc) {
+	b.teardown = teardown
+}
+
+// Teardown deprovisions every account the provider provisioned, walking each cached
+// identity through the teardown transport, and then clears the cache. It is the
+// gating-safety counterpart to bootstrap provisioning: after a run, the real
+// accounts a bootstrap pool created are removed so a load test does not strand
+// thousands of them.
+//
+// It is BEST-EFFORT and NON-ABORTING: a failure tearing down one account does not
+// stop the others — every account is attempted, each orphan is logged at ERROR
+// (alertable: a real account leaked), and the failures are returned as a single
+// aggregated error for the caller to surface WITHOUT failing the run. The cache is
+// cleared regardless of partial failure, so a second Teardown is a no-op (the
+// orchestrator defers it, and a manual retry must not double-delete the accounts
+// that did succeed). It is IDEMPOTENT for the same reason: once the cache is empty
+// there is nothing left to tear down.
+//
+// Accounts are torn down in ascending index order for deterministic logs. The
+// teardown runs under the context the caller passes; the orchestrator passes a
+// FRESH context.Background() (not the run context) with a scaled timeout, so a
+// killed or timed-out run still deprovisions.
+func (b *BootstrapSignupProvider) Teardown(ctx context.Context) error {
+	b.mu.Lock()
+	indices := make([]int, 0, len(b.cache))
+	for i := range b.cache {
+		indices = append(indices, i)
+	}
+	sort.Ints(indices)
+	creds := make(map[int]domain.Credential, len(b.cache))
+	for _, i := range indices {
+		creds[i] = b.cache[i]
+	}
+	// Clear the cache up front and unconditionally: a second Teardown (the deferred
+	// one, or a manual retry) must never re-attempt the accounts handled here, even
+	// if some of them failed — re-deleting a succeeded account is its own hazard.
+	b.cache = make(map[int]domain.Credential)
+	b.mu.Unlock()
+
+	if b.teardown == nil {
+		return nil
+	}
+
+	var errs []error
+	for _, i := range indices {
+		if err := b.teardown(ctx, i, creds[i]); err != nil {
+			// An orphaned real account: log at ERROR so it is alertable, then keep
+			// going — one failure must not strand the rest.
+			slog.Error("bootstrap teardown left an orphaned account",
+				"userIndex", i, "subject", creds[i].Subject, "err", err)
+			errs = append(errs, fmt.Errorf("auth: teardown account %d (subject %q): %w", i, creds[i].Subject, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("auth: %d of %d accounts failed teardown (orphaned): %w", len(errs), len(indices), errors.Join(errs...))
 	}
 	return nil
 }
@@ -224,6 +308,11 @@ type ProviderDeps struct {
 	Signup SignupFunc
 	// Token mints a token per virtual user by running a login flow (login strategy).
 	Token TokenFunc
+	// Teardown deprovisions a provisioned account (bootstrap-signup strategy). It is
+	// optional: a nil Teardown makes the provider's Teardown a cache-clearing no-op
+	// (the --keep-accounts path). The run path requires either a teardown or an
+	// explicit keep-accounts opt-out before a bootstrap run is accepted.
+	Teardown TeardownFunc
 }
 
 // NewProvider selects a provider for a credential pool from the injected deps. A
@@ -234,7 +323,12 @@ func NewProvider(pool domain.CredentialPool, deps ProviderDeps) (Provider, error
 	case domain.CredPool:
 		return NewPoolProvider(pool.Entries)
 	case domain.CredBootstrapSignup:
-		return NewBootstrapSignupProvider(deps.Signup)
+		p, err := NewBootstrapSignupProvider(deps.Signup)
+		if err != nil {
+			return nil, err
+		}
+		p.SetTeardown(deps.Teardown)
+		return p, nil
 	case domain.CredLogin:
 		return NewLoginProvider(deps.Token)
 	default:

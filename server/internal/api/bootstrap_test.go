@@ -156,3 +156,155 @@ func TestBootstrapPrewarmRespectsConcurrencyCap(t *testing.T) {
 		t.Errorf("prewarm provisioned %d accounts, want 12", len(rec.bodies))
 	}
 }
+
+// teardownSUT records signups and deletes. /signup mints accounts; /accounts/{id}
+// DELETE records the torn-down id.
+type teardownSUT struct {
+	mu       sync.Mutex
+	signups  int
+	deleted  []string
+	failOnID string // a DELETE for this account id 500s (partial-failure test)
+}
+
+func newTeardownSUT() (*httptest.Server, *teardownSUT) {
+	rec := &teardownSUT{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/signup", func(w http.ResponseWriter, _ *http.Request) {
+		rec.mu.Lock()
+		rec.signups++
+		id := "acct-" + strconv.Itoa(rec.signups)
+		rec.mu.Unlock()
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{"accessToken": "tok-" + id, "id": id})
+	})
+	mux.HandleFunc("/accounts/", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[len("/accounts/"):]
+		rec.mu.Lock()
+		fail := id == rec.failOnID
+		if !fail {
+			rec.deleted = append(rec.deleted, id)
+		}
+		rec.mu.Unlock()
+		if fail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return httptest.NewServer(mux), rec
+}
+
+func (r *teardownSUT) deletedSet() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string]bool{}
+	for _, d := range r.deleted {
+		out[d] = true
+	}
+	return out
+}
+
+// TestTeardownDeprovisionsThroughCompiledFlow drives the full orchestrator wiring:
+// provision 3 accounts, then runTeardown walks the compiled DELETE journey for each,
+// removing exactly the provisioned subjects.
+func TestTeardownDeprovisionsThroughCompiledFlow(t *testing.T) {
+	sut, rec := newTeardownSUT()
+	defer sut.Close()
+
+	spec := bootstrapSpec(sut.URL, 3, 1000)
+	srv := &Server{adapter: load.NewRESTAdapter(2 * time.Second)}
+	boot, err := srv.bootstrapAuthFor(spec, newGuardFor(t, spec))
+	if err != nil {
+		t.Fatalf("bootstrapAuthFor: %v", err)
+	}
+	if err := boot.Prewarm(context.Background(), 3); err != nil {
+		t.Fatalf("prewarm: %v", err)
+	}
+	boot.runTeardown(spec.ID(), 3)
+
+	del := rec.deletedSet()
+	for i := 1; i <= 3; i++ {
+		if !del["acct-"+strconv.Itoa(i)] {
+			t.Errorf("account acct-%d was not deprovisioned (deleted=%v)", i, rec.deleted)
+		}
+	}
+}
+
+// TestTeardownFiresOnFreshContextAfterCancel is critic must-have (b): provision under
+// a run context, cancel it mid-flight, and assert teardown STILL fires for every
+// provisioned account because runTeardown uses a fresh context.Background(), not the
+// (now-cancelled) run context.
+func TestTeardownFiresOnFreshContextAfterCancel(t *testing.T) {
+	sut, rec := newTeardownSUT()
+	defer sut.Close()
+
+	spec := bootstrapSpec(sut.URL, 3, 1000)
+	srv := &Server{adapter: load.NewRESTAdapter(2 * time.Second)}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	boot, err := srv.bootstrapAuthFor(spec, newGuardFor(t, spec))
+	if err != nil {
+		t.Fatalf("bootstrapAuthFor: %v", err)
+	}
+	if err := boot.Prewarm(runCtx, 3); err != nil {
+		t.Fatalf("prewarm: %v", err)
+	}
+	// The run is killed mid-flight: cancel the run context BEFORE teardown.
+	cancel()
+
+	// Teardown must still deprovision every account — it runs on a fresh context.
+	boot.runTeardown(spec.ID(), 3)
+
+	del := rec.deletedSet()
+	if len(del) != 3 {
+		t.Fatalf("after a cancelled run, teardown deprovisioned %d accounts, want 3 (fresh context)", len(del))
+	}
+}
+
+// TestTeardownSurvivesPartialFailureThroughOrchestrator is critic must-have (a) at
+// the orchestrator level: account 2's DELETE 500s, but the others are still torn
+// down and runTeardown does not panic or fail (best-effort).
+func TestTeardownSurvivesPartialFailureThroughOrchestrator(t *testing.T) {
+	sut, rec := newTeardownSUT()
+	rec.failOnID = "acct-2"
+	defer sut.Close()
+
+	spec := bootstrapSpec(sut.URL, 3, 1000)
+	srv := &Server{adapter: load.NewRESTAdapter(2 * time.Second)}
+	boot, err := srv.bootstrapAuthFor(spec, newGuardFor(t, spec))
+	if err != nil {
+		t.Fatalf("bootstrapAuthFor: %v", err)
+	}
+	if err := boot.Prewarm(context.Background(), 3); err != nil {
+		t.Fatalf("prewarm: %v", err)
+	}
+	boot.runTeardown(spec.ID(), 3) // must not panic or block
+
+	del := rec.deletedSet()
+	if !del["acct-1"] || !del["acct-3"] {
+		t.Errorf("the surviving accounts were not torn down despite acct-2 failing (deleted=%v)", rec.deleted)
+	}
+}
+
+// TestKeepAccountsSkipsTeardown proves --keep-accounts builds a provider with no
+// teardown func and runTeardown is a no-op: the provisioned accounts are left alive.
+func TestKeepAccountsSkipsTeardown(t *testing.T) {
+	sut, rec := newTeardownSUT()
+	defer sut.Close()
+
+	spec := bootstrapSpec(sut.URL, 2, 1000)
+	spec.CredentialPool.KeepAccounts = true
+	srv := &Server{adapter: load.NewRESTAdapter(2 * time.Second)}
+	boot, err := srv.bootstrapAuthFor(spec, newGuardFor(t, spec))
+	if err != nil {
+		t.Fatalf("bootstrapAuthFor: %v", err)
+	}
+	if err := boot.Prewarm(context.Background(), 2); err != nil {
+		t.Fatalf("prewarm: %v", err)
+	}
+	boot.runTeardown(spec.ID(), 2)
+
+	if del := rec.deletedSet(); len(del) != 0 {
+		t.Errorf("keep-accounts run deprovisioned %d accounts, want 0 (left alive)", len(del))
+	}
+}
