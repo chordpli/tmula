@@ -332,6 +332,28 @@ func (w *WorkerServer) resolveProvider(ctx context.Context, spec ShardSpec) (aut
 	return provider, nil
 }
 
+// SourceChecksum resolves the spec's credential source on this worker and returns
+// a secret-free digest of the pool it loaded — over subjects, their order and the
+// count, never the secrets (see auth.SourceChecksum). It is the cluster-side guard
+// for the operator's "shared, identically-ordered source" assertion: every worker
+// computes it against its OWN resolved pool, and a control plane comparing the
+// digests across workers detects a divergent or differently-ordered source before
+// it silently mis-assigns principals. A source-less spec returns "" (no pool).
+func (w *WorkerServer) SourceChecksum(ctx context.Context, spec ShardSpec) (string, error) {
+	if spec.CredentialSource == nil {
+		return "", nil
+	}
+	src, err := auth.SourceFromRef(*spec.CredentialSource, w.credentialRoot)
+	if err != nil {
+		return "", fmt.Errorf("cluster: worker resolve credential source: %w", err)
+	}
+	entries, err := src.Load(ctx)
+	if err != nil {
+		return "", fmt.Errorf("cluster: worker load credential source: %w", err)
+	}
+	return auth.SourceChecksum(entries), nil
+}
+
 // authenticateUsers assigns each shard user the credential its GLOBAL index
 // selects (users[i] is global index offset+i), so the worker authenticates by
 // global index exactly as the single-process path does — the Acquire keying both
