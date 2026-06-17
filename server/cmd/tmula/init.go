@@ -88,10 +88,38 @@ func initScenario(args []string) error {
 // have nothing to add).
 func importScenario(data []byte, format, name string) (scenariofile.Scenario, string, error) {
 	sc, stats, err := importScenarioStats(data, format, name)
-	if err != nil || stats == nil {
+	if err != nil {
 		return sc, "", err
 	}
-	return sc, accessLogNote(sc, *stats), nil
+	// The access-log path reports its learner coverage; spec conversions
+	// (OpenAPI/HAR) instead report any auth they derived, so the user knows a
+	// credential placeholder is waiting to be filled.
+	if stats != nil {
+		return sc, accessLogNote(sc, *stats), nil
+	}
+	return sc, authNote(sc.Auth), nil
+}
+
+// authNote summarizes an auth block the spec importer derived, so `tmula init`
+// tells the user exactly what was wired and that the only thing left is to fill
+// the REPLACE_ME secret. It is empty when no auth was derived, keeping the
+// unsecured path silent (backward compatible).
+func authNote(a *scenariofile.Auth) string {
+	if a == nil {
+		return ""
+	}
+	switch a.Strategy {
+	case "login":
+		// A login flow mints the token; the user fills only the REPLACE_ME secret(s)
+		// in the login body (the captured token is auto-detected).
+		return "derived a login auth flow from the spec's security scheme; " +
+			"fill the REPLACE_ME_* secret(s) in auth.login.flow (or supply them via --auth-source/env), then run"
+	case "pool":
+		return "derived a credential-pool auth placeholder from the spec's security scheme; " +
+			"fill the REPLACE_ME_* token in auth.users (or supply it via --auth-source/env), then run"
+	default:
+		return ""
+	}
 }
 
 // importScenarioStats is importScenario's stats-carrying core: the access-log
