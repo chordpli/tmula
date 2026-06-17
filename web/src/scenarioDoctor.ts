@@ -105,34 +105,54 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     }
   } else if (form.authMode === 'login') {
     // An empty token capture is fine: tmula auto-detects the token from the login
-    // response, so no "missing capture path" warning is raised.
-    const graph = parseJSON(form.loginGraphJSON)
-    if (!graph.ok) {
-      issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
-    }
-    const templates = parseJSON(form.loginTemplatesJSON)
-    if (!templates.ok) {
-      issues.push(
-        issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
-      )
+    // response (E1), so no "missing capture path" warning is raised. The simple
+    // mini-form only needs a request path (buildAuth compiles the rest); the advanced
+    // mode still validates the raw graph/templates JSON.
+    if (form.loginMode === 'simple') {
+      if (!form.loginUrlPath.trim()) {
+        issues.push(issue('error', 'auth-login-url', 'doctor.authLoginUrl'))
+      }
+    } else {
+      const graph = parseJSON(form.loginGraphJSON)
+      if (!graph.ok) {
+        issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
+      }
+      const templates = parseJSON(form.loginTemplatesJSON)
+      if (!templates.ok) {
+        issues.push(
+          issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
+        )
+      }
     }
   } else if (form.authMode === 'bootstrap') {
     if (!form.authBootstrapConfirmed) {
       issues.push(issue('error', 'auth-bootstrap-unconfirmed', 'doctor.authBootstrapUnconfirmed'))
     }
     // An empty token capture is fine: tmula auto-detects the token from the signup
-    // response, so no "missing capture path" warning is raised.
-    try {
-      parseSignupSteps(form.signupStepsJSON, 'signup')
-    } catch (e) {
-      issues.push(issue('error', 'auth-bootstrap-steps-json', 'doctor.authBootstrapStepsJson', { error: messageOf(e) }))
+    // response (E1), so no "missing capture path" warning is raised. The simple
+    // mini-form only needs a signup path; advanced validates the raw steps JSON.
+    const simple = form.signupMode === 'simple'
+    if (simple) {
+      if (!form.signupUrlPath.trim()) {
+        issues.push(issue('error', 'auth-bootstrap-url', 'doctor.authBootstrapUrl'))
+      }
+    } else {
+      try {
+        parseSignupSteps(form.signupStepsJSON, 'signup')
+      } catch (e) {
+        issues.push(issue('error', 'auth-bootstrap-steps-json', 'doctor.authBootstrapStepsJson', { error: messageOf(e) }))
+      }
     }
-    // Gating safety: no teardown and not keeping accounts strands real accounts.
-    const hasTeardown = form.signupTeardownJSON.trim().length > 0
+    // Gating safety: no teardown and not keeping accounts strands real accounts. The
+    // teardown is the simple teardown URL in simple mode, the raw teardown JSON in
+    // advanced mode — either satisfies the rule.
+    const hasTeardown = simple
+      ? form.signupTeardownUrlPath.trim().length > 0
+      : form.signupTeardownJSON.trim().length > 0
     if (!form.keepAccounts && !hasTeardown) {
       issues.push(issue('warning', 'auth-bootstrap-no-teardown', 'doctor.authBootstrapNoTeardown'))
     }
-    if (!form.keepAccounts && hasTeardown) {
+    if (!simple && !form.keepAccounts && hasTeardown) {
       try {
         parseSignupSteps(form.signupTeardownJSON, 'teardown')
       } catch (e) {

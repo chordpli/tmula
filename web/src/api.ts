@@ -38,9 +38,17 @@ export interface ExperimentForm {
   authPoolText: string // raw pasted lines (csv / jsonl / plain tokens)
   authPoolFormat: CredFormat // how authPoolText (and the file) is encoded
 
-  // 'login' mode: the standalone login flow that mints a token, authored as JSON the
+  // 'login' mode: the standalone login flow that mints a token. The COMMON case is
+  // authored through the simple mini-form (a method+path, a request-body template with
+  // {username}/{password} markers, and a scope); buildAuth compiles those into the
+  // loginFlow graph/templates under the hood. Power users (and round-tripped imports)
+  // switch loginMode to 'advanced' and author the graph/templates JSON directly, the
   // same way the scenario graph/templates are. tokenVar/subjectVar name the captured
   // variables that become the credential (mirrors LoginFlowSpec.tokenVar/subjectVar).
+  loginMode: AuthAuthoringMode // 'simple' mini-form (default) or 'advanced' raw JSON
+  loginUrlMethod: string // simple: the login request method (POST by default)
+  loginUrlPath: string // simple: the login request path, e.g. /login
+  loginBodyTemplate: string // simple: the request body, with {username}/{password} or REPLACE_ME_* markers
   loginGraphJSON: string
   loginTemplatesJSON: string
   loginStart: string
@@ -49,9 +57,19 @@ export interface ExperimentForm {
   loginScope: LoginScope // 'per-user' (default) or 'shared' (client_credentials)
 
   // 'bootstrap' mode: a signup flow that provisions a real account, a capture mapping,
-  // and an optional teardown flow. keepAccounts opts out of teardown. It is gated
-  // behind an explicit non-production confirmation (authBootstrapConfirmed) because it
-  // creates/deletes REAL accounts on the target.
+  // and an optional teardown flow. The COMMON case (and an imported suggestedSignup) is
+  // authored through the simple mini-form — a signup method+path with a body template,
+  // plus an optional teardown method+path — which buildAuth compiles into the signup /
+  // teardown steps. Power users switch signupMode to 'advanced' and author the steps
+  // JSON directly. keepAccounts opts out of teardown. It is gated behind an explicit
+  // non-production confirmation (authBootstrapConfirmed) because it creates/deletes
+  // REAL accounts on the target.
+  signupMode: AuthAuthoringMode // 'simple' mini-form (default) or 'advanced' raw JSON
+  signupUrlMethod: string // simple: the signup request method (POST by default)
+  signupUrlPath: string // simple: the signup request path, e.g. /register
+  signupBodyTemplate: string // simple: the signup request body, with {{.userIndex}} / REPLACE_ME_* markers
+  signupTeardownUrlMethod: string // simple: the teardown request method (DELETE by default)
+  signupTeardownUrlPath: string // simple: the teardown path, with {{.subject}}, e.g. /accounts/{{.subject}}
   signupStepsJSON: string // JSON array of SignupStep objects
   signupStart: string // optional entry-step override
   signupCaptureToken: string // captured variable that becomes the token (optional; empty = auto-detect)
@@ -63,7 +81,20 @@ export interface ExperimentForm {
   // before the bootstrap mode can be selected/submitted, mirroring tmula's non-prod
   // safety stance (this creates/deletes real accounts on the target).
   authBootstrapConfirmed: boolean
+
+  // replaceMeValues holds the user-supplied secret(s) for any REPLACE_ME_* placeholder
+  // an import surfaced (e.g. REPLACE_ME_PASSWORD -> the real password). It is keyed by
+  // the placeholder literal; buildAuth substitutes each occurrence in the login/signup
+  // bodies right before sending, so the ONLY thing the operator must fill after an
+  // auto-detected import is the highlighted secret. Empty for hand-authored flows.
+  replaceMeValues: Record<string, string>
 }
+
+// AuthAuthoringMode picks how the login / signup material is authored: 'simple' is the
+// guided mini-form a normal developer uses (a method+path and a body template), while
+// 'advanced' exposes the raw graph/templates/steps JSON for power users and for
+// round-tripping an imported flow that is too rich for the mini-form.
+export type AuthAuthoringMode = 'simple' | 'advanced'
 
 // AuthMode is the console's selected authentication strategy. It is a UI concept:
 // 'none' attaches no credentialPool (anonymous, the default), while the other three
@@ -141,12 +172,22 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'authMode'
   | 'authPoolText'
   | 'authPoolFormat'
+  | 'loginMode'
+  | 'loginUrlMethod'
+  | 'loginUrlPath'
+  | 'loginBodyTemplate'
   | 'loginGraphJSON'
   | 'loginTemplatesJSON'
   | 'loginStart'
   | 'loginTokenVar'
   | 'loginSubjectVar'
   | 'loginScope'
+  | 'signupMode'
+  | 'signupUrlMethod'
+  | 'signupUrlPath'
+  | 'signupBodyTemplate'
+  | 'signupTeardownUrlMethod'
+  | 'signupTeardownUrlPath'
   | 'signupStepsJSON'
   | 'signupStart'
   | 'signupCaptureToken'
@@ -155,16 +196,27 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'signupTeardownStart'
   | 'keepAccounts'
   | 'authBootstrapConfirmed'
+  | 'replaceMeValues'
 > = {
   authMode: 'none',
   authPoolText: '',
   authPoolFormat: 'csv',
+  loginMode: 'simple',
+  loginUrlMethod: 'POST',
+  loginUrlPath: '',
+  loginBodyTemplate: '{"username": "{username}", "password": "{password}"}',
   loginGraphJSON: '',
   loginTemplatesJSON: '',
   loginStart: '',
   loginTokenVar: '',
   loginSubjectVar: '',
   loginScope: 'per-user',
+  signupMode: 'simple',
+  signupUrlMethod: 'POST',
+  signupUrlPath: '',
+  signupBodyTemplate: '{"email": "test+{{.userIndex}}@example.com", "password": "{password}"}',
+  signupTeardownUrlMethod: 'DELETE',
+  signupTeardownUrlPath: '',
   signupStepsJSON: '',
   signupStart: '',
   signupCaptureToken: '',
@@ -173,6 +225,7 @@ export const AUTH_FORM_DEFAULTS: Pick<
   signupTeardownStart: '',
   keepAccounts: false,
   authBootstrapConfirmed: false,
+  replaceMeValues: {},
 }
 
 // CredentialPool is the wire shape the server reads to authenticate a run, matching
@@ -549,6 +602,233 @@ export function traceable(form: ExperimentForm): boolean {
   return form.users > 0 && form.users <= MAX_TRACE_USERS
 }
 
+// LOGIN_NODE_ID / LOGIN_TEMPLATE_ID are the fixed ids the simple-login mini-form
+// stamps on the single node + template it compiles. They are inert labels (the
+// simulated traffic never observes the login graph), so a constant keeps the compiled
+// flow stable and round-trippable.
+const LOGIN_NODE_ID = 'login'
+const LOGIN_TEMPLATE_ID = 't_login'
+
+// simpleLoginFlow compiles the simple-login mini-form (a method+path and a request-body
+// template) into the single-step LoginFlowSpec graph/templates the backend mints tokens
+// from — so a normal developer never authors raw graph JSON. The body is sent verbatim
+// (its {username}/{password} or REPLACE_ME_* markers are the operator's to fill); the
+// flow carries NO explicit token capture, so tmula auto-detects the token from the
+// response (E1). tokenVar/subjectVar are attached only when the operator named them.
+// It throws on a missing path so the caller surfaces a clear reason instead of POSTing
+// an empty login.
+export function simpleLoginFlow(form: ExperimentForm): LoginFlowSpec {
+  const method = form.loginUrlMethod.trim() || 'POST'
+  const path = form.loginUrlPath.trim()
+  if (!path) throw new Error('login needs a request path (e.g. /login)')
+  const body = applyReplaceMe(form.loginBodyTemplate, form.replaceMeValues)
+  const template: Record<string, unknown> = { method, path }
+  if (body.trim()) template.payloadTemplate = body
+  const flow: LoginFlowSpec = {
+    graph: { id: LOGIN_NODE_ID, nodes: [{ id: LOGIN_NODE_ID, apiTemplateId: LOGIN_TEMPLATE_ID }], edges: [] },
+    templates: { [LOGIN_TEMPLATE_ID]: template },
+    start: LOGIN_NODE_ID,
+  }
+  const tokenVar = form.loginTokenVar.trim()
+  if (tokenVar) flow.tokenVar = tokenVar
+  const subjectVar = form.loginSubjectVar.trim()
+  if (subjectVar) flow.subjectVar = subjectVar
+  return flow
+}
+
+// simpleSignupFlow compiles the simple-signup mini-form (a signup method+path with a
+// body template, plus an optional teardown method+path) into the SignupFlowSpec the
+// bootstrap strategy provisions accounts from — so the operator never authors the raw
+// steps array. The signup body's {{.userIndex}} renders per account (distinct signups);
+// the optional teardown step's {{.subject}} is the captured account id. It mirrors
+// buildAuth's capture/keepAccounts rules: an empty token capture means auto-detect, and
+// teardown is attached only when keepAccounts is off and a teardown path is given. It
+// throws on a missing signup path so the caller surfaces a clear reason.
+export function simpleSignupFlow(form: ExperimentForm): SignupFlowSpec {
+  const method = form.signupUrlMethod.trim() || 'POST'
+  const path = form.signupUrlPath.trim()
+  if (!path) throw new Error('signup needs a request path (e.g. /register)')
+  const body = applyReplaceMe(form.signupBodyTemplate, form.replaceMeValues)
+  const signupStep: SignupStepSpec = { id: 'signup', method, path }
+  if (body.trim()) signupStep.body = body
+  const flow: SignupFlowSpec = { steps: [signupStep], capture: {} }
+  const token = form.signupCaptureToken.trim()
+  if (token) flow.capture.token = token
+  const subject = form.signupCaptureSubject.trim()
+  if (subject) flow.capture.subject = subject
+  if (!form.keepAccounts) {
+    const tdPath = form.signupTeardownUrlPath.trim()
+    if (tdPath) {
+      const tdMethod = form.signupTeardownUrlMethod.trim() || 'DELETE'
+      flow.teardown = [{ id: 'teardown', method: tdMethod, path: tdPath }]
+    }
+  }
+  return flow
+}
+
+// REPLACE_ME_RE matches the REPLACE_ME_* placeholder literals a derived login/signup
+// body carries in place of a real secret (the backend never crosses a secret — it
+// substitutes a placeholder the UI surfaces for the operator to fill). The suffix is
+// the field hint, e.g. REPLACE_ME_PASSWORD. We match a run of A-Z0-9_ so adjacent JSON
+// punctuation (quotes, commas) is never swallowed.
+const REPLACE_ME_RE = /REPLACE_ME(?:_[A-Z0-9]+)*/g
+
+// findReplaceMePlaceholders scans one or more bodies for distinct REPLACE_ME_*
+// placeholder literals, in first-seen order, de-duplicated. The console renders one
+// highlighted input per placeholder so the ONLY thing left after an auto-detected
+// import is the secret. A body with no placeholder yields an empty list.
+export function findReplaceMePlaceholders(...bodies: (string | undefined)[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const body of bodies) {
+    if (!body) continue
+    for (const match of body.match(REPLACE_ME_RE) ?? []) {
+      if (!seen.has(match)) {
+        seen.add(match)
+        out.push(match)
+      }
+    }
+  }
+  return out
+}
+
+// applyReplaceMe substitutes every REPLACE_ME_* placeholder in a body with the
+// operator-supplied value for it, leaving an unfilled placeholder untouched (so the
+// server still sees a literal it can reject rather than a silently blank secret). A
+// body with no placeholders, or an empty value map, is returned unchanged.
+export function applyReplaceMe(body: string, values: Record<string, string>): string {
+  if (!body) return body
+  return body.replace(REPLACE_ME_RE, (match) => {
+    const v = values[match]
+    return v !== undefined && v !== '' ? v : match
+  })
+}
+
+// placeholderLabel turns a REPLACE_ME_* literal into a short human label for its input:
+// REPLACE_ME_PASSWORD -> "Password", REPLACE_ME -> "Value". It title-cases the suffix
+// words so the highlighted field reads naturally without a translation per placeholder.
+export function placeholderLabel(placeholder: string): string {
+  const suffix = placeholder.replace(/^REPLACE_ME_?/, '')
+  if (!suffix) return 'Value'
+  return suffix
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w.charAt(0) + w.slice(1).toLowerCase())
+    .join(' ')
+}
+
+// authFormFromImport maps an import response's derived auth (credentialPool / loginFlow
+// / suggestedSignup) onto the form's auth fields, so a swagger/HAR import POPULATES the
+// Auth section automatically and leaves only the secret to fill. It returns an empty
+// patch when the import carries no auth (the Auth section stays as-is, defaulting to
+// None), so it is safe to spread unconditionally. Precedence, easiest-first: a derived
+// loginFlow wins (login mode), else a credentialPool (its strategy picks the mode),
+// else only a suggestedSignup (create-accounts mode). It NEVER auto-confirms the
+// bootstrap non-prod gate. Derived flows that are too rich for the simple mini-form
+// fall back to advanced (raw JSON) so nothing is lost.
+export function authFormFromImport(result: ImportResult): Partial<ExperimentForm> {
+  const { credentialPool, loginFlow, suggestedSignup } = result
+  // A derived login flow is the headline easy path: drop it into login mode.
+  if (loginFlow) {
+    const patch: Partial<ExperimentForm> = { authMode: 'login' }
+    const simple = loginFlowToSimpleForm(loginFlow)
+    if (simple) {
+      Object.assign(patch, simple, { loginMode: 'simple' })
+    } else {
+      patch.loginMode = 'advanced'
+      patch.loginGraphJSON = JSON.stringify(loginFlow.graph, null, 2)
+      patch.loginTemplatesJSON = JSON.stringify(loginFlow.templates, null, 2)
+      patch.loginStart = loginFlow.start
+    }
+    if (loginFlow.tokenVar) patch.loginTokenVar = loginFlow.tokenVar
+    if (loginFlow.subjectVar) patch.loginSubjectVar = loginFlow.subjectVar
+    if (credentialPool?.loginScope === 'shared') patch.loginScope = 'shared'
+    return patch
+  }
+  if (credentialPool) {
+    if (credentialPool.strategy === 'pool' && credentialPool.entries && credentialPool.entries.length > 0) {
+      // A HAR import can carry captured (secret-omitted) entries; surface them as
+      // pre-filled JSONL the operator completes with the bearer token.
+      return {
+        authMode: 'pool',
+        authPoolFormat: 'jsonl',
+        authPoolText: credentialPool.entries.map((e) => JSON.stringify(e)).join('\n'),
+      }
+    }
+    if (credentialPool.strategy === 'bootstrap-signup' && credentialPool.signupFlow) {
+      return signupFormPatch(credentialPool.signupFlow, credentialPool.keepAccounts === true)
+    }
+  }
+  // Only a suggested signup: offer "create test accounts" pre-filled, gate unconfirmed.
+  if (suggestedSignup) {
+    return signupFormPatch(suggestedSignup, false)
+  }
+  return {}
+}
+
+// loginFlowToSimpleForm tries to express a derived login flow as the simple mini-form
+// (a single login node hitting one template) so the import lands on the friendly fields
+// rather than raw JSON. It returns null when the flow is multi-step or otherwise too
+// rich for the mini-form, so the caller falls back to advanced mode. Best-effort and
+// forgiving: any shape surprise yields null rather than a half-filled form.
+function loginFlowToSimpleForm(flow: LoginFlowSpec): Partial<ExperimentForm> | null {
+  const graph = flow.graph as { nodes?: unknown } | null | undefined
+  const nodes = graph && Array.isArray(graph.nodes) ? (graph.nodes as { id?: unknown; apiTemplateId?: unknown }[]) : null
+  if (!nodes || nodes.length !== 1) return null
+  const templateId = nodes[0].apiTemplateId
+  if (typeof templateId !== 'string') return null
+  const templates = flow.templates as Record<string, unknown> | null | undefined
+  const tmpl = templates && typeof templates === 'object' ? (templates[templateId] as Record<string, unknown>) : null
+  if (!tmpl || typeof tmpl !== 'object') return null
+  const method = typeof tmpl.method === 'string' ? tmpl.method : ''
+  const path = typeof tmpl.path === 'string' ? tmpl.path : ''
+  if (!path) return null
+  const body = typeof tmpl.payloadTemplate === 'string' ? tmpl.payloadTemplate : ''
+  return {
+    loginUrlMethod: method || 'POST',
+    loginUrlPath: path,
+    loginBodyTemplate: body,
+  }
+}
+
+// signupFormPatch maps a SignupFlowSpec (an imported suggestedSignup or a round-tripped
+// bootstrap pool) onto the create-accounts form fields. It prefers the simple mini-form
+// when the flow is a single signup step (the common derived shape), and falls back to
+// advanced raw-steps JSON for a richer multi-step flow. It NEVER pre-confirms the
+// non-prod gate (authBootstrapConfirmed stays false) — the operator must confirm before
+// the run. keepAccounts is carried through.
+function signupFormPatch(flow: SignupFlowSpec, keepAccounts: boolean): Partial<ExperimentForm> {
+  const patch: Partial<ExperimentForm> = {
+    authMode: 'bootstrap',
+    authBootstrapConfirmed: false,
+    keepAccounts,
+  }
+  if (flow.capture?.token) patch.signupCaptureToken = flow.capture.token
+  if (flow.capture?.subject) patch.signupCaptureSubject = flow.capture.subject
+  const single = flow.steps.length === 1 ? flow.steps[0] : null
+  const teardownStep = flow.teardown && flow.teardown.length === 1 ? flow.teardown[0] : null
+  // A single signup step (with at most a single teardown step) fits the mini-form.
+  if (single && (!flow.teardown || teardownStep)) {
+    patch.signupMode = 'simple'
+    patch.signupUrlMethod = single.method || 'POST'
+    patch.signupUrlPath = single.path
+    if (single.body) patch.signupBodyTemplate = single.body
+    if (teardownStep) {
+      patch.signupTeardownUrlMethod = teardownStep.method || 'DELETE'
+      patch.signupTeardownUrlPath = teardownStep.path
+    }
+  } else {
+    patch.signupMode = 'advanced'
+    patch.signupStepsJSON = JSON.stringify(flow.steps, null, 2)
+    if (flow.start) patch.signupStart = flow.start
+    if (flow.teardown && flow.teardown.length > 0) {
+      patch.signupTeardownJSON = JSON.stringify(flow.teardown, null, 2)
+    }
+    if (flow.teardownStart) patch.signupTeardownStart = flow.teardownStart
+  }
+  return patch
+}
+
 // AuthBuild is the credential material buildAuth derives from the form: the wire
 // authStrategy the experiment params advertise, the credentialPool the server reads,
 // and (for the login strategy) the standalone loginFlow it mints tokens from. It is
@@ -586,19 +866,22 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
       }
     }
     case 'login': {
-      const graph = JSON.parse(form.loginGraphJSON)
-      const templates = JSON.parse(form.loginTemplatesJSON)
-      // An empty token capture is allowed: tmula auto-detects the token from the
-      // login response, so the field is omitted rather than rejected.
-      const loginFlow: LoginFlowSpec = {
-        graph,
-        templates,
-        start: form.loginStart,
+      // The simple mini-form is the common path: compile its method+path+body into the
+      // single-step login flow (auto-detect token). Advanced authors the raw JSON.
+      let loginFlow: LoginFlowSpec
+      if (form.loginMode === 'simple') {
+        loginFlow = simpleLoginFlow(form)
+      } else {
+        const graph = JSON.parse(form.loginGraphJSON)
+        const templates = JSON.parse(form.loginTemplatesJSON)
+        // An empty token capture is allowed: tmula auto-detects the token from the
+        // login response, so the field is omitted rather than rejected.
+        loginFlow = { graph, templates, start: form.loginStart }
+        const tokenVar = form.loginTokenVar.trim()
+        if (tokenVar) loginFlow.tokenVar = tokenVar
+        const subjectVar = form.loginSubjectVar.trim()
+        if (subjectVar) loginFlow.subjectVar = subjectVar
       }
-      const tokenVar = form.loginTokenVar.trim()
-      if (tokenVar) loginFlow.tokenVar = tokenVar
-      const subjectVar = form.loginSubjectVar.trim()
-      if (subjectVar) loginFlow.subjectVar = subjectVar
       // The pool references the flow by id ("login") and carries the scope; the flow
       // itself rides at the top level. Send the scope only when it differs from the
       // per-user default so a default-scope pool stays minimal.
@@ -616,25 +899,29 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
           'confirm this targets a non-production system before running bootstrap (it creates/deletes real accounts)',
         )
       }
-      const steps = parseSignupSteps(form.signupStepsJSON, 'signup')
-      // An empty token capture is allowed: tmula auto-detects the token from the
-      // signup response, so the field is omitted rather than rejected.
-      const signupFlow: SignupFlowSpec = {
-        steps,
-        capture: {},
-      }
-      const token = form.signupCaptureToken.trim()
-      if (token) signupFlow.capture.token = token
-      const start = form.signupStart.trim()
-      if (start) signupFlow.start = start
-      const subject = form.signupCaptureSubject.trim()
-      if (subject) signupFlow.capture.subject = subject
-      if (form.signupTeardownJSON.trim()) {
-        const teardown = parseSignupSteps(form.signupTeardownJSON, 'teardown')
-        if (teardown.length > 0) {
-          signupFlow.teardown = teardown
-          const tdStart = form.signupTeardownStart.trim()
-          if (tdStart) signupFlow.teardownStart = tdStart
+      // The simple mini-form compiles a method+path+body into the single-step signup
+      // flow (with optional teardown). Advanced authors the raw steps array.
+      let signupFlow: SignupFlowSpec
+      if (form.signupMode === 'simple') {
+        signupFlow = simpleSignupFlow(form)
+      } else {
+        const steps = parseSignupSteps(form.signupStepsJSON, 'signup')
+        // An empty token capture is allowed: tmula auto-detects the token from the
+        // signup response, so the field is omitted rather than rejected.
+        signupFlow = { steps, capture: {} }
+        const token = form.signupCaptureToken.trim()
+        if (token) signupFlow.capture.token = token
+        const start = form.signupStart.trim()
+        if (start) signupFlow.start = start
+        const subject = form.signupCaptureSubject.trim()
+        if (subject) signupFlow.capture.subject = subject
+        if (!form.keepAccounts && form.signupTeardownJSON.trim()) {
+          const teardown = parseSignupSteps(form.signupTeardownJSON, 'teardown')
+          if (teardown.length > 0) {
+            signupFlow.teardown = teardown
+            const tdStart = form.signupTeardownStart.trim()
+            if (tdStart) signupFlow.teardownStart = tdStart
+          }
         }
       }
       const credentialPool: CredentialPool = {
@@ -891,7 +1178,9 @@ export function authFormFromSpec(s: Record<string, unknown>): Partial<Experiment
     return { authMode: 'pool' }
   }
   if (strategy === 'login') {
-    const patch: Partial<ExperimentForm> = { authMode: 'login' }
+    // A round-tripped spec restores the raw flow JSON, so it lands on advanced mode
+    // (the simple mini-form cannot always re-express an arbitrary minted flow).
+    const patch: Partial<ExperimentForm> = { authMode: 'login', loginMode: 'advanced' }
     const scope = (pool as { loginScope?: unknown }).loginScope
     patch.loginScope = scope === 'shared' ? 'shared' : 'per-user'
     const flow = s.loginFlow as
@@ -913,7 +1202,11 @@ export function authFormFromSpec(s: Record<string, unknown>): Partial<Experiment
     // A bootstrap pool round-trips its flow shape, but it provisions real accounts —
     // so attach mode does NOT pre-confirm the non-prod safety gate. The operator must
     // re-confirm before submitting.
-    const patch: Partial<ExperimentForm> = { authMode: 'bootstrap', authBootstrapConfirmed: false }
+    const patch: Partial<ExperimentForm> = {
+      authMode: 'bootstrap',
+      authBootstrapConfirmed: false,
+      signupMode: 'advanced',
+    }
     const flow = s.credentialPool as { signupFlow?: unknown; keepAccounts?: unknown }
     const sf = flow.signupFlow as
       | { steps?: unknown; start?: unknown; capture?: { token?: unknown; subject?: unknown }; teardown?: unknown; teardownStart?: unknown }
@@ -1417,12 +1710,27 @@ export interface ImportStats {
 // ImportResult is what POST /api/import returns on success: a ready-to-edit
 // scenario the caller can drop straight into the Scenario card's fields, plus
 // the optional coverage stats behind the import.
+//
+// P7 (Easy-Auth): the import additionally AUTO-derives auth material the console
+// can populate the Auth section from, so a swagger/HAR import leaves only the
+// secret to fill. All three are optional — an old server, or a spec with no auth,
+// simply omits them:
+//   - credentialPool — the same shape buildRunSpec emits (strategy + material); a
+//     HAR import may carry a 'pool' with the captured (secret-omitted) entries.
+//   - loginFlow      — a derived login flow (E2 OpenAPI->login / E3 HAR->token) the
+//     UI drops straight into the login mode.
+//   - suggestedSignup — a derived signup flow (P7 OpenAPI /register->signup) the UI
+//     offers as "create test accounts". Its bodies carry REPLACE_ME_* placeholders
+//     (never real secrets) the UI surfaces as highlighted inputs.
 export interface ImportResult {
   graph: unknown
   templates: unknown
   start: string
   maxSteps: number
   stats?: ImportStats
+  credentialPool?: CredentialPool
+  loginFlow?: LoginFlowSpec
+  suggestedSignup?: SignupFlowSpec
 }
 
 // importScenario converts a raw OpenAPI / HAR / access-log document into a

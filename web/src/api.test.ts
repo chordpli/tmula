@@ -3,8 +3,14 @@ import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
   AUTH_FORM_DEFAULTS,
+  applyReplaceMe,
+  authFormFromImport,
   authFormFromSpec,
   buildAuth,
+  findReplaceMePlaceholders,
+  placeholderLabel,
+  simpleLoginFlow,
+  simpleSignupFlow,
   buildRunSpec,
   classifyEdge,
   compareURL,
@@ -379,6 +385,7 @@ describe('buildAuth', () => {
     const build = buildAuth({
       ...form,
       authMode: 'login',
+      loginMode: 'advanced',
       loginGraphJSON: '{"id":"login","nodes":[{"id":"login","apiTemplateId":"t"}],"edges":[]}',
       loginTemplatesJSON: '{"t":{"method":"POST","path":"/login","extract":{"access_token":"$.access_token"}}}',
       loginStart: 'login',
@@ -405,6 +412,7 @@ describe('buildAuth', () => {
     const build = buildAuth({
       ...form,
       authMode: 'login',
+      loginMode: 'advanced',
       loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
       loginTemplatesJSON: '{}',
       loginStart: 'login',
@@ -418,6 +426,7 @@ describe('buildAuth', () => {
     const build = buildAuth({
       ...form,
       authMode: 'login',
+      loginMode: 'advanced',
       loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
       loginTemplatesJSON: '{}',
       loginStart: 'login',
@@ -432,6 +441,7 @@ describe('buildAuth', () => {
     const build = buildAuth({
       ...form,
       authMode: 'bootstrap',
+      signupMode: 'advanced',
       authBootstrapConfirmed: true,
       signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup","extract":{"tok":"$.token"}}]',
       signupStart: 'signup',
@@ -458,6 +468,7 @@ describe('buildAuth', () => {
     const build = buildAuth({
       ...form,
       authMode: 'bootstrap',
+      signupMode: 'advanced',
       authBootstrapConfirmed: true,
       signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
       signupStart: 'signup',
@@ -477,6 +488,7 @@ describe('buildAuth', () => {
     const base = {
       ...form,
       authMode: 'bootstrap' as const,
+      signupMode: 'advanced' as const,
       signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
       signupCaptureToken: 'tok',
       keepAccounts: true,
@@ -513,6 +525,7 @@ describe('buildRunSpec auth wiring', () => {
     const spec = buildRunSpec({
       ...form,
       authMode: 'login',
+      loginMode: 'advanced',
       loginGraphJSON: '{"id":"login","nodes":[{"id":"login","apiTemplateId":"t"}],"edges":[]}',
       loginTemplatesJSON: '{"t":{"method":"POST","path":"/login","extract":{"at":"$.access_token"}}}',
       loginStart: 'login',
@@ -529,6 +542,7 @@ describe('buildRunSpec auth wiring', () => {
     const spec = buildRunSpec({
       ...form,
       authMode: 'bootstrap',
+      signupMode: 'advanced',
       authBootstrapConfirmed: true,
       signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
       signupCaptureToken: 'tok',
@@ -1575,5 +1589,144 @@ describe('formFromRunSpec', () => {
     // No workload block = the closed default, with no pool size to apply.
     expect(patch.workloadKind).toBe('closed')
     expect(patch.users).toBeUndefined()
+  })
+})
+
+describe('simpleLoginFlow / simpleSignupFlow (auth mini-forms)', () => {
+  it('compiles the login mini-form into a single-node login flow, auto-detecting the token', () => {
+    const flow = simpleLoginFlow({
+      ...form,
+      loginUrlMethod: 'POST',
+      loginUrlPath: '/oauth/token',
+      loginBodyTemplate: 'grant_type=password',
+      loginTokenVar: '',
+    })
+    const g = flow.graph as { id: string; nodes: { id: string; apiTemplateId: string }[] }
+    expect(g.nodes).toHaveLength(1)
+    expect(flow.start).toBe(g.nodes[0].id)
+    const tmpl = (flow.templates as Record<string, { method: string; path: string; payloadTemplate?: string }>)[
+      g.nodes[0].apiTemplateId
+    ]
+    expect(tmpl.method).toBe('POST')
+    expect(tmpl.path).toBe('/oauth/token')
+    expect(tmpl.payloadTemplate).toBe('grant_type=password')
+    expect(flow.tokenVar).toBeUndefined() // empty capture → backend auto-detects
+  })
+
+  it('substitutes only the filled REPLACE_ME secret into the login body', () => {
+    const flow = simpleLoginFlow({
+      ...form,
+      loginUrlPath: '/login',
+      loginBodyTemplate: 'user=REPLACE_ME_USERNAME&pass=REPLACE_ME_PASSWORD',
+      replaceMeValues: { REPLACE_ME_PASSWORD: 's3cret' },
+    })
+    const g = flow.graph as { nodes: { apiTemplateId: string }[] }
+    const tmpl = (flow.templates as Record<string, { payloadTemplate?: string }>)[g.nodes[0].apiTemplateId]
+    expect(tmpl.payloadTemplate).toBe('user=REPLACE_ME_USERNAME&pass=s3cret')
+  })
+
+  it('throws a clear reason when the login path is missing', () => {
+    expect(() => simpleLoginFlow({ ...form, loginUrlPath: '' })).toThrow(/path/i)
+  })
+
+  it('compiles the signup mini-form with a teardown when keepAccounts is off', () => {
+    const flow = simpleSignupFlow({
+      ...form,
+      signupUrlPath: '/register',
+      signupBodyTemplate: '{"email":"a"}',
+      keepAccounts: false,
+      signupTeardownUrlPath: '/accounts/{{.subject}}',
+    })
+    expect(flow.steps).toHaveLength(1)
+    expect(flow.steps[0]).toMatchObject({ method: 'POST', path: '/register', body: '{"email":"a"}' })
+    expect(flow.teardown).toEqual([{ id: 'teardown', method: 'DELETE', path: '/accounts/{{.subject}}' }])
+  })
+
+  it('omits teardown when keepAccounts is on', () => {
+    const flow = simpleSignupFlow({
+      ...form,
+      signupUrlPath: '/register',
+      keepAccounts: true,
+      signupTeardownUrlPath: '/accounts/{{.subject}}',
+    })
+    expect(flow.teardown).toBeUndefined()
+  })
+
+  it('throws a clear reason when the signup path is missing', () => {
+    expect(() => simpleSignupFlow({ ...form, signupUrlPath: '' })).toThrow(/path/i)
+  })
+})
+
+describe('REPLACE_ME placeholder helpers', () => {
+  it('finds distinct placeholders across bodies in first-seen order', () => {
+    expect(
+      findReplaceMePlaceholders('a REPLACE_ME_USERNAME b REPLACE_ME_PASSWORD', 'c REPLACE_ME_PASSWORD'),
+    ).toEqual(['REPLACE_ME_USERNAME', 'REPLACE_ME_PASSWORD'])
+  })
+
+  it('substitutes filled values and leaves unfilled placeholders intact', () => {
+    expect(applyReplaceMe('u=REPLACE_ME_USERNAME p=REPLACE_ME_PASSWORD', { REPLACE_ME_USERNAME: 'alice' })).toBe(
+      'u=alice p=REPLACE_ME_PASSWORD',
+    )
+  })
+
+  it('labels a placeholder for its highlighted input', () => {
+    expect(placeholderLabel('REPLACE_ME_PASSWORD')).toBe('Password')
+    expect(placeholderLabel('REPLACE_ME')).toBe('Value')
+  })
+})
+
+describe('authFormFromImport (import → Auth auto-fill)', () => {
+  const base = { graph: {}, templates: {}, start: '', maxSteps: 0 }
+
+  it('returns an empty patch when the import carries no auth', () => {
+    expect(authFormFromImport(base)).toEqual({})
+  })
+
+  it('maps a derived single-node login flow onto the simple login mini-form', () => {
+    const patch = authFormFromImport({
+      ...base,
+      loginFlow: {
+        graph: { id: 'login', nodes: [{ id: 'login', apiTemplateId: 't_login' }], edges: [] },
+        templates: { t_login: { method: 'POST', path: '/oauth/token', payloadTemplate: 'grant_type=password' } },
+        start: 'login',
+      },
+    })
+    expect(patch.authMode).toBe('login')
+    expect(patch.loginMode).toBe('simple')
+    expect(patch.loginUrlPath).toBe('/oauth/token')
+    expect(patch.loginBodyTemplate).toBe('grant_type=password')
+  })
+
+  it('maps secret-omitted pool entries onto pre-filled JSONL the operator completes', () => {
+    const patch = authFormFromImport({
+      ...base,
+      credentialPool: { id: 'p', strategy: 'pool', entries: [{ subject: 'alice', token: '' }] },
+    })
+    expect(patch.authMode).toBe('pool')
+    expect(patch.authPoolFormat).toBe('jsonl')
+    expect(patch.authPoolText).toContain('alice')
+  })
+
+  it('offers a suggested signup as create-accounts but never confirms the non-prod gate', () => {
+    const patch = authFormFromImport({
+      ...base,
+      suggestedSignup: { steps: [{ id: 'signup', method: 'POST', path: '/register' }], capture: {} },
+    })
+    expect(patch.authMode).toBe('bootstrap')
+    expect(patch.signupUrlPath).toBe('/register')
+    expect(patch.authBootstrapConfirmed).toBe(false)
+  })
+})
+
+describe('buildAuth simple login path', () => {
+  it('builds a login pool + flow from the simple mini-form (default loginMode)', () => {
+    const build = buildAuth({ ...form, authMode: 'login', loginUrlPath: '/login', loginTokenVar: '' })
+    expect(build!.authStrategy).toBe('login')
+    expect(build!.credentialPool.strategy).toBe('login')
+    expect(build!.credentialPool.loginFlowId).toBe('login')
+    const g = build!.loginFlow!.graph as { nodes: { id: string }[] }
+    expect(g.nodes).toHaveLength(1)
+    expect(build!.loginFlow!.tokenVar).toBeUndefined() // auto-detect
   })
 })
