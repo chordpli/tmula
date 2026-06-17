@@ -310,16 +310,20 @@ func (r RunSpec) validateCredentialPool() error {
 	return nil
 }
 
-// CredentialProvider builds the auth provider for a run from its credential pool,
-// or returns (nil, nil) when the run is unauthenticated. Validate has already
-// confirmed the pool is a usable "pool" strategy, so no signup function is needed.
+// CredentialProvider builds the auth provider for an IN-PROCESS run from its
+// credential pool, or returns (nil, nil) when the run is unauthenticated. Validate
+// has already confirmed the pool is a usable "pool" strategy with resolved entries
+// (an unresolved source is rejected without workers, and the distributed path
+// below never calls this).
 //
-// LOAD-BEARING FOR REPRODUCE FIDELITY: a distributed run always returns (nil,
-// nil) here because validateCredentialPool rejects any spec that combines a
-// credential pool with distributed workers. The reproduce path (sessionUser in
-// reproduce.go) relies on this: a nil provider means the replayed session runs
-// as the same user the evidence session ran as, keeping the reproduce verdict
-// user-consistent. See validateCredentialPool for the full invariant.
+// IN-PROCESS ONLY: the distributed path does NOT call CredentialProvider — it
+// copies the pool's reference-only source into the shard spec (shardSpecFor) and
+// each worker resolves it locally. A source pool therefore only ever reaches a
+// distributed run, so it never arrives here (Validate rejects source + no workers
+// on the in-process path). The reproduce path rebuilds a distributed-auth run's
+// provider directly from the source (sessionUser/sourceProviderFor in
+// reproduce.go), keyed by the same global index the shards used. See
+// validateCredentialPool for the full D1 split invariant.
 func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil
