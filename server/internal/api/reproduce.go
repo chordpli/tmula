@@ -309,6 +309,32 @@ func (s *Server) sessionUser(ctx context.Context, spec RunSpec, sess domain.Evid
 		return user, nil
 	}
 
+	// Bootstrap-signup replay: re-acquire the principal deterministically by
+	// re-running the signup ONCE for the same index — a refresh-FREE variant, like
+	// login. Identity is a pure function of (runID, index) via the seeded signup
+	// walk, so the replay provisions/recovers the same account the evidence session
+	// ran as. The reproduce user gets the credential on Cred and NO holder (bootstrap
+	// credentials never refresh mid-run anyway). A kept-accounts run re-acquires the
+	// still-live account; a torn-down run re-provisions a fresh one under the same
+	// deterministic identity — either way the replay runs as the same principal the
+	// run keyed by this index. No teardown is wired here: the reproduce re-acquire
+	// must not deprovision the account it (or the run, under keep-accounts) relies on.
+	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredBootstrapSignup {
+		boot, err := s.bootstrapAuthFor(spec, guard)
+		if err != nil {
+			return load.VirtualUser{}, err
+		}
+		// Reproduce only re-acquires; it must never deprovision the account it (or a
+		// keep-accounts run) depends on, so strip any teardown wired by the builder.
+		boot.provider.SetTeardown(nil)
+		cred, err := boot.provider.Acquire(ctx, idx)
+		if err != nil {
+			return load.VirtualUser{}, fmt.Errorf("api: re-acquire bootstrap account for reproduce: %w", err)
+		}
+		user.Cred = cred
+		return user, nil
+	}
+
 	// Distributed-auth (source pool) replay: the run authenticated by shipping a
 	// reference each worker resolved locally, so rebuild that SAME source-backed
 	// provider and re-acquire the principal by the session's GLOBAL index — the
