@@ -85,10 +85,61 @@ type RunSpec struct {
 	// unauthenticated, exactly as before.
 	CredentialPool *domain.CredentialPool `json:"credentialPool,omitempty"`
 
+	// LoginFlow carries the standalone login flow a CredLogin pool mints tokens
+	// from: its own graph, templates, start node and the response captures that
+	// become the token (and subject). It is a sibling of the main scenario graph —
+	// never a node in it — so the simulated traffic never observes the login. It is
+	// required when the pool's strategy is "login" and ignored otherwise. The
+	// orchestrator compiles it (above the load runner) into the login transport;
+	// runspec stays a leaf and only carries the declarative domain types.
+	LoginFlow *LoginFlowSpec `json:"loginFlow,omitempty"`
+
 	// id is internal run-bookkeeping: the run identifier the control plane assigns
 	// after creation (see SetID). It is never serialized and never read back out
 	// of the spec by the run path.
 	id domain.ID
+}
+
+// LoginFlowSpec is the declarative login flow a CredLogin pool walks to mint a
+// token. It carries only domain types (graph, templates, capture variable names),
+// so runspec stays a leaf the orchestrator compiles into a runnable login
+// transport. It holds no secret — the token is captured at run time from the live
+// login response and never round-trips through a spec.
+type LoginFlowSpec struct {
+	Graph     domain.ScenarioGraph             `json:"graph"`
+	Templates map[domain.ID]domain.APITemplate `json:"templates"`
+	Start     domain.ID                        `json:"start"`
+	MaxSteps  int                              `json:"maxSteps,omitempty"`
+	// TokenVar names the captured variable that becomes the credential's secret
+	// (required). SubjectVar, when set, names the captured variable that becomes
+	// the non-sensitive subject.
+	TokenVar   string `json:"tokenVar"`
+	SubjectVar string `json:"subjectVar,omitempty"`
+}
+
+// Validate checks the login flow is well-formed: a non-empty graph, a start node
+// present in it, and a token capture variable.
+func (f LoginFlowSpec) Validate() error {
+	if err := f.Graph.Validate(); err != nil {
+		return fmt.Errorf("login flow: %w", err)
+	}
+	if f.Start == "" {
+		return fmt.Errorf("login flow: a start node is required")
+	}
+	known := false
+	for _, n := range f.Graph.Nodes {
+		if n.ID == f.Start {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return fmt.Errorf("login flow: start node %q is not in the login graph", f.Start)
+	}
+	if f.TokenVar == "" {
+		return fmt.Errorf("login flow: a token capture variable (tokenVar) is required")
+	}
+	return nil
 }
 
 // ID returns the run identifier the control plane assigned to this spec.
@@ -209,9 +260,23 @@ func (r RunSpec) validateCredentialPool() error {
 		// run path does not yet wire. Refuse rather than run unauthenticated.
 		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
 	}
+	if r.CredentialPool.Strategy == domain.CredLogin {
+		// A login pool mints tokens by walking a standalone login flow, so the spec
+		// must carry that flow (the orchestrator compiles it into the login
+		// transport). Reject a login pool with no — or a malformed — login flow.
+		if r.LoginFlow == nil {
+			return fmt.Errorf("api: the %q strategy needs a loginFlow describing how to mint a token", domain.CredLogin)
+		}
+		if err := r.LoginFlow.Validate(); err != nil {
+			return fmt.Errorf("api: %w", err)
+		}
+	}
 	if len(r.Workers) > 0 || r.AggregateWorkers {
 		// This rejection is load-bearing for reproduce fidelity — see the doc
-		// comment above before relaxing it.
+		// comment above before relaxing it. It applies to EVERY credential strategy
+		// (pool and login alike): a minted login token is still a json:"-" secret the
+		// worker fan-out cannot resolve, so a distributed authenticated run is
+		// refused regardless of strategy.
 		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
 	}
 	return nil
@@ -231,10 +296,16 @@ func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil
 	}
-	// The run path supports only the pre-supplied "pool" strategy today (Validate
-	// has already rejected the others), so no signup/token function is wired here —
-	// an empty ProviderDeps. The login transport and its TokenFunc are assembled a
-	// layer above (the api orchestrator) and injected there.
+	// The login strategy needs a token transport (the compiled login flow) that this
+	// leaf package cannot build — runspec must not import load/api. The api
+	// orchestrator builds the login provider itself (see api.providerFor / the login
+	// transport) and never reaches here for a login pool, so a login pool arriving
+	// here is a wiring bug, not a silent unauthenticated run.
+	if r.CredentialPool.Strategy == domain.CredLogin {
+		return nil, fmt.Errorf("api: a login credential pool's provider is built by the orchestrator, not runspec (login transport lives above this leaf)")
+	}
+	// The remaining strategies (pool today) need no signup/token function — an empty
+	// ProviderDeps.
 	return auth.NewProvider(*r.CredentialPool, auth.ProviderDeps{})
 }
 

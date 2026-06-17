@@ -236,3 +236,56 @@ func TestLoginProviderNilTokenFunc(t *testing.T) {
 		t.Fatal("login provider without a token func should error")
 	}
 }
+
+func TestLoginProviderRefreshReMints(t *testing.T) {
+	var n int
+	token := func(_ context.Context, i int) (domain.Credential, error) {
+		n++
+		return domain.Credential{Subject: fmt.Sprintf("u%d", i), Secret: fmt.Sprintf("tok-%d-%d", i, n)}, nil
+	}
+	p, _ := NewLoginProvider(token)
+
+	c0, _ := p.Acquire(context.Background(), 0) // mints tok-0-1
+	if c0.Secret != "tok-0-1" {
+		t.Fatalf("first acquire = %q, want tok-0-1", c0.Secret)
+	}
+	// Acquire again is cached (no new mint).
+	again, _ := p.Acquire(context.Background(), 0)
+	if again.Secret != c0.Secret {
+		t.Fatalf("second acquire re-minted: %q vs %q", again.Secret, c0.Secret)
+	}
+	// Refresh always re-mints and updates the cache.
+	fresh, err := p.Refresh(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if fresh.Secret == c0.Secret {
+		t.Errorf("refresh did not re-mint: still %q", fresh.Secret)
+	}
+	// A subsequent Acquire serves the refreshed value.
+	post, _ := p.Acquire(context.Background(), 0)
+	if post.Secret != fresh.Secret {
+		t.Errorf("acquire after refresh = %q, want the refreshed %q", post.Secret, fresh.Secret)
+	}
+}
+
+func TestLoginProviderRefreshErrorKeepsCache(t *testing.T) {
+	var fail bool
+	token := func(context.Context, int) (domain.Credential, error) {
+		if fail {
+			return domain.Credential{}, errors.New("login down")
+		}
+		return domain.Credential{Secret: "good"}, nil
+	}
+	p, _ := NewLoginProvider(token)
+	first, _ := p.Acquire(context.Background(), 0)
+	fail = true
+	if _, err := p.Refresh(context.Background(), 0); err == nil {
+		t.Fatal("refresh should propagate the login error")
+	}
+	// The failed refresh left the cache intact.
+	got, _ := p.Acquire(context.Background(), 0)
+	if got.Secret != first.Secret {
+		t.Errorf("failed refresh corrupted the cache: %q, want %q", got.Secret, first.Secret)
+	}
+}

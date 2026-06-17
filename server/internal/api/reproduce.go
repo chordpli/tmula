@@ -155,7 +155,7 @@ func (s *Server) ReproduceFinding(ctx context.Context, runID domain.ID, req Repr
 	if err != nil {
 		return ReproduceResult{}, err
 	}
-	user, err := sessionUser(ctx, spec, sess)
+	user, err := s.sessionUser(ctx, spec, sess, guard)
 	if err != nil {
 		return ReproduceResult{}, err
 	}
@@ -250,7 +250,15 @@ func sessionJourney(spec RunSpec, sess domain.EvidenceSession) (domain.ID, int, 
 // invariant is ever relaxed, this function must be updated to re-derive the
 // per-shard user assignment. See runspec.validateCredentialPool and
 // runspec.CredentialProvider for the full invariant.
-func sessionUser(ctx context.Context, spec RunSpec, sess domain.EvidenceSession) (load.VirtualUser, error) {
+//
+// LOGIN (CredLogin) REPRODUCE IS REFRESH-FREE: a login finding is replayed under a
+// re-acquired token (one deterministic login of the same index), seeded onto Cred
+// with NO holder and NO refresh closure. The replay therefore never performs a
+// live mid-run refresh — which would make the verdict depend on token timing — so
+// the reproduce stays deterministic about WHAT the session sent, exactly like the
+// static-pool path. See login.go (loginAuthFor / loginAuth.seed wire the refresh
+// only on the RUN path, never here).
+func (s *Server) sessionUser(ctx context.Context, spec RunSpec, sess domain.EvidenceSession, guard *safety.Guard) (load.VirtualUser, error) {
 	user := load.VirtualUser{ID: sess.SessionID}
 	if spec.IsOpen() {
 		if len(spec.Users) > 0 {
@@ -261,17 +269,38 @@ func sessionUser(ctx context.Context, spec RunSpec, sess domain.EvidenceSession)
 		user.Cred = pool[sess.UserIndex].Cred
 		user.Vars = pool[sess.UserIndex].Vars
 	}
+
+	// Closed users are keyed by pool index; open arrivals are 1-based, so the
+	// scheduler keyed them by arrival-1. The same offset arithmetic both run paths
+	// use, so the replay re-acquires the SAME principal the evidence session ran as.
+	idx := int(sess.UserIndex)
+	if spec.IsOpen() && idx > 0 {
+		idx--
+	}
+
+	// Login strategy: re-acquire the token deterministically and statically — a
+	// refresh-FREE variant. The reproduce user gets the minted credential on Cred
+	// and NO holder/refresh, so the replay never performs a live mid-run refresh
+	// (which would make the verdict non-deterministic). The mint itself is a single
+	// login of the same principal, keyed by the same index the run used.
+	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredLogin {
+		login, err := s.loginAuthFor(spec, guard)
+		if err != nil {
+			return load.VirtualUser{}, err
+		}
+		cred, err := login.provider.Acquire(ctx, login.cacheKey(idx))
+		if err != nil {
+			return load.VirtualUser{}, fmt.Errorf("api: re-acquire login token for reproduce: %w", err)
+		}
+		user.Cred = cred
+		return user, nil
+	}
+
 	provider, err := spec.CredentialProvider()
 	if err != nil {
 		return load.VirtualUser{}, err
 	}
 	if provider != nil {
-		// Closed users are keyed by pool index; open arrivals are 1-based, so
-		// the scheduler keyed them by arrival-1.
-		idx := int(sess.UserIndex)
-		if spec.IsOpen() && idx > 0 {
-			idx--
-		}
 		cred, err := provider.Acquire(ctx, idx)
 		if err != nil {
 			return load.VirtualUser{}, fmt.Errorf("api: acquire credential for reproduce: %w", err)

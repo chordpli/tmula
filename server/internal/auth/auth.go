@@ -183,6 +183,28 @@ func (l *LoginProvider) Acquire(ctx context.Context, userIndex int) (domain.Cred
 	return call.cred, call.err
 }
 
+// Set replaces the cached credential for userIndex. It is how a mid-run refresh
+// records the freshly minted token so a later Acquire serves the fresh one.
+func (l *LoginProvider) Set(userIndex int, cred domain.Credential) {
+	l.mu.Lock()
+	l.cache[userIndex] = cred
+	l.mu.Unlock()
+}
+
+// Refresh re-runs the login flow for userIndex, replaces the cached credential
+// with the freshly minted one, and returns it. Unlike Acquire it does NOT serve a
+// cached value — it always mints anew — which is the mid-run 401 recovery path
+// (reactive re-acquire of the same principal). A failed refresh leaves the
+// existing cache untouched and is returned to the caller.
+func (l *LoginProvider) Refresh(ctx context.Context, userIndex int) (domain.Credential, error) {
+	cred, err := l.token(ctx, userIndex)
+	if err != nil {
+		return domain.Credential{}, fmt.Errorf("auth: refresh login user %d: %w", userIndex, err)
+	}
+	l.Set(userIndex, cred)
+	return cred, nil
+}
+
 // Prewarm mints tokens for n users ahead of the run.
 func (l *LoginProvider) Prewarm(ctx context.Context, n int) error {
 	for i := 0; i < n; i++ {
