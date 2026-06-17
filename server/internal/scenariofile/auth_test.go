@@ -222,11 +222,11 @@ auth:
 	sourceSpec := mustExpandFrom(t, sourceYAML, dir)
 	inlineSpec := mustExpandFrom(t, inlineYAML, dir)
 
-	srcProv, err := auth.NewProvider(*sourceSpec.CredentialPool, nil)
+	srcProv, err := auth.NewProvider(*sourceSpec.CredentialPool, auth.ProviderDeps{})
 	if err != nil {
 		t.Fatalf("source provider: %v", err)
 	}
-	inProv, err := auth.NewProvider(*inlineSpec.CredentialPool, nil)
+	inProv, err := auth.NewProvider(*inlineSpec.CredentialPool, auth.ProviderDeps{})
 	if err != nil {
 		t.Fatalf("inline provider: %v", err)
 	}

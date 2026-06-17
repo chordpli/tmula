@@ -231,7 +231,11 @@ func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil
 	}
-	return auth.NewProvider(*r.CredentialPool, nil)
+	// The run path supports only the pre-supplied "pool" strategy today (Validate
+	// has already rejected the others), so no signup/token function is wired here —
+	// an empty ProviderDeps. The login transport and its TokenFunc are assembled a
+	// layer above (the api orchestrator) and injected there.
+	return auth.NewProvider(*r.CredentialPool, auth.ProviderDeps{})
 }
 
 // IsOpen reports whether the spec uses the open (arrival-rate) workload model.

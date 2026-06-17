@@ -41,7 +41,7 @@ func TestSchedulerInjectsPerSessionCredentials(t *testing.T) {
 			{Subject: "u0", Secret: "tok-0"},
 			{Subject: "u1", Secret: "tok-1"},
 		},
-	}, nil)
+	}, auth.ProviderDeps{})
 	if err != nil {
 		t.Fatalf("provider: %v", err)
 	}
