@@ -54,12 +54,30 @@ const (
 	// the login flow is referenced by LoginFlowID, never inlined as a node in the
 	// main scenario graph, so the simulated traffic never observes the login.
 	CredLogin CredentialStrategy = "login"
+	// CredMint SELF-ISSUES a JWT per virtual user by signing one locally with a key
+	// the operator holds — the M1 case (a service whose tokens are self-issued JWTs,
+	// the operator controls the signing key). It SKIPS token acquisition entirely:
+	// no login, refresh or capture, each VU gets a token instantly. It is keyed by
+	// MintSpec on the pool. It does NOT help third-party/managed-IdP (Auth0/Cognito/
+	// Firebase) or opaque tokens — only self-issued JWT, because you cannot sign for
+	// a key you do not hold.
+	CredMint CredentialStrategy = "mint"
+	// CredExec runs an operator-supplied COMMAND per virtual user and uses its stdout
+	// as the credential — the universal bring-your-own-token escape hatch for services
+	// tmula cannot authenticate to declaratively (social/SDK login, third-party IdP
+	// consent flows, exotic auth). It is keyed by ExecSpec on the pool. It is
+	// SECURITY-SENSITIVE: it runs ARBITRARY local commands, so a run is rejected unless
+	// the OPERATOR explicitly opts in (a CLI flag / env at run start) — merely having
+	// strategy:"exec" in an untrusted scenario file MUST NOT run anything. The command
+	// is run via argv (NEVER a shell), under a timeout and an output cap, and its egress
+	// is NOT governed by safety.Guard — the operator owns that risk.
+	CredExec CredentialStrategy = "exec"
 )
 
 // Valid reports whether s is a known credential strategy.
 func (s CredentialStrategy) Valid() bool {
 	switch s {
-	case CredPool, CredBootstrapSignup, CredLogin:
+	case CredPool, CredBootstrapSignup, CredLogin, CredMint, CredExec:
 		return true
 	default:
 		return false

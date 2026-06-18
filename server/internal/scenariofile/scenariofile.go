@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -149,6 +150,19 @@ type Auth struct {
 	// the credential, and an optional teardown flow. It carries no secret — the token
 	// is captured from the live signup response.
 	Signup *AuthSignup `json:"signup,omitempty"`
+	// Mint, when set (strategy "mint"), describes how to self-issue a JWT per virtual
+	// user by signing one locally with a key the operator holds (the M1 case): the
+	// alg, the NON-SECRET signing-key reference, the claims template, the subject and
+	// the TTL. It carries no secret in the file — the key is a reference (env var or
+	// a file) resolved in-process at run time, never inlined.
+	Mint *AuthMint `json:"mint,omitempty"`
+	// Exec, when set (strategy "exec"), describes a COMMAND run per virtual user whose
+	// stdout becomes the token — the bring-your-own-token escape hatch for auth tmula
+	// cannot model declaratively (social/SDK login, third-party IdP consent). It carries
+	// no secret in the file: operator secrets go in Env values (which may reference host
+	// env), never serialized. A run requires an explicit operator opt-in because it
+	// executes an arbitrary local command.
+	Exec *AuthExec `json:"exec,omitempty"`
 	// KeepAccounts opts a bootstrap-signup run out of teardown, leaving the
 	// provisioned accounts in place. It is the only escape from the gating-safety
 	// rule that a bootstrap pool without a teardown flow is rejected.
@@ -202,6 +216,92 @@ type AuthLogin struct {
 	Scope string `json:"scope,omitempty"`
 	// Start overrides the login flow's start node (defaults to the first step).
 	Start string `json:"start,omitempty"`
+	// Refresh, when set, is an OPTIONAL explicit refresh-grant override. When present it
+	// WINS over tmula's auto-derivation of a grant_type=refresh_token request from the
+	// login's form grant — so even a JSON-body login (which tmula cannot auto-rewrite)
+	// gets a real refresh exchange instead of re-running the login on a mid-run 401. Omit
+	// it and tmula auto-derives (for an OAuth2 form login) or re-logins (otherwise),
+	// unchanged. It carries no secret — the refresh token is captured at run time.
+	Refresh *AuthLoginRefresh `json:"refresh,omitempty"`
+}
+
+// AuthLoginRefresh authors an explicit refresh-grant override for the login strategy:
+// the request line the refresh POSTs to and the form body it sends. It SHORT-CIRCUITS
+// tmula's auto-derivation, so a login whose token POST is not an OAuth2 form grant can
+// still refresh without re-logging-in. It carries no secret — the refresh token is
+// captured from the live login response and templated in via {{.refreshToken}}.
+type AuthLoginRefresh struct {
+	// Request is the "METHOD /path" the refresh grant POSTs to, e.g. POST /oauth/token.
+	// OPTIONAL: when omitted the refresh reuses the login token endpoint (a same-endpoint
+	// refresh needs only a body).
+	Request string `json:"request,omitempty"`
+	// Body is the refresh request body — usually a form grant such as
+	// "grant_type=refresh_token&refresh_token={{.refreshToken}}&client_id=…". The
+	// {{.refreshToken}} marker is filled with the captured refresh token at run time
+	// (and url-encoded so an opaque token stays form-safe).
+	Body string `json:"body,omitempty"`
+}
+
+// AuthMint authors the mint (local JWT signing) credential strategy: how to
+// self-issue a JWT per virtual user with a key the operator holds. It carries no
+// secret — Key is a NON-SECRET reference (an env var or a file), resolved in-process
+// at run time. Ttl/Leeway are authored as duration STRINGS ("1h", "30m", "5s") since
+// time.Duration does not round-trip through YAML/JSON as a human duration.
+type AuthMint struct {
+	// Alg is the JWS signing algorithm: HS256, RS256 or ES256.
+	Alg string `json:"alg"`
+	// SecretEncoding declares how the HS256 secret body is encoded (raw | base64 |
+	// base64url). Required for HS256, ignored for the asymmetric algs.
+	SecretEncoding string `json:"secretEncoding,omitempty"`
+	// Key is the non-secret signing-key reference: an env var or a file (resolved
+	// against the scenario file's directory). For HS256 it points at the symmetric
+	// secret; for RS256/ES256 at a PEM private key.
+	Key *AuthMintKey `json:"key,omitempty"`
+	// Subject is the per-VU sub-claim template, e.g. "user-{{.userIndex}}".
+	Subject string `json:"subject,omitempty"`
+	// Claims is a template map signed into every token; values may reference
+	// {{.userIndex}} and {{.subject}}.
+	Claims map[string]string `json:"claims,omitempty"`
+	// Ttl is the token lifetime as a duration string ("1h"); it becomes exp = now+ttl.
+	Ttl string `json:"ttl"`
+	// Leeway, when set (a duration string), shifts an otherwise-off nbf to now-leeway.
+	Leeway string `json:"leeway,omitempty"`
+}
+
+// AuthMintKey names where the signing key lives: an env var or a file. Exactly one is
+// set. It carries no secret — only the pointer to it.
+type AuthMintKey struct {
+	// File is a path to the key file, resolved against the scenario file's directory.
+	// Mutually exclusive with Env.
+	File string `json:"file,omitempty"`
+	// Env names the environment variable holding the key. Mutually exclusive with File.
+	Env string `json:"env,omitempty"`
+}
+
+// AuthExec authors the exec (bring-your-own-token) credential strategy: an operator-
+// supplied COMMAND run per virtual user whose stdout becomes the token — the universal
+// escape hatch for auth tmula cannot model declaratively. It carries no secret in the
+// file: operator secrets belong in Env values (which may reference host env), never
+// serialized as part of the run. Timeout is a duration STRING ("10s") since
+// time.Duration does not round-trip through YAML/JSON as a human duration.
+//
+// SECURITY: exec runs an arbitrary local command, so a run is gated behind an explicit
+// OPERATOR opt-in (a scenario file alone never executes anything), the command is
+// argv-only (no shell — a metacharacter in an arg is passed literally), and its egress
+// is NOT bound by the target allowlist / rate cap. See domain.ExecSpec.
+type AuthExec struct {
+	// Command is the argv to run: argv[0] is the program, the rest are its arguments,
+	// passed literally (NOT a shell string). Elements may reference {{.userIndex}}.
+	Command []string `json:"command"`
+	// Env is extra environment passed to the child (where operator secrets belong, NOT
+	// argv which is visible via ps); values may reference {{.userIndex}} and host env.
+	Env map[string]string `json:"env,omitempty"`
+	// Timeout is the per-invocation timeout as a duration string ("10s"). Optional — a
+	// sane default applies when empty; a hung command is always bounded.
+	Timeout string `json:"timeout,omitempty"`
+	// MaxOutputBytes caps the stdout read so a runaway command cannot OOM the run.
+	// Optional — a sane default applies when zero.
+	MaxOutputBytes int `json:"maxOutputBytes,omitempty"`
 }
 
 // AuthCapture names the captured variables that become the minted credential.
@@ -550,9 +650,103 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 	case domain.CredBootstrapSignup:
 		pool, err := buildBootstrapCredentials(a)
 		return pool, nil, err
+	case domain.CredMint:
+		pool, err := buildMintCredentials(a)
+		return pool, nil, err
+	case domain.CredExec:
+		pool, err := buildExecCredentials(a)
+		return pool, nil, err
 	default:
-		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, %q with a login flow, or %q with a signup flow)", strategy, domain.CredPool, domain.CredLogin, domain.CredBootstrapSignup)
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, %q with a login flow, %q with a signup flow, %q to self-issue a JWT, or %q to mint a token from a command)", strategy, domain.CredPool, domain.CredLogin, domain.CredBootstrapSignup, domain.CredMint, domain.CredExec)
 	}
+}
+
+// buildExecCredentials maps the exec authoring block onto an exec pool carrying a
+// domain.ExecSpec (the argv command, the extra env, the timeout and the output cap). It
+// carries no secret — operator secrets go in Env values (which may reference host env),
+// never serialized as part of the run. The shape is validated here so a malformed exec
+// block is rejected at expand time with a clear, scenariofile-prefixed message rather
+// than deferred to the run path. exec is mutually exclusive with the pool-shaped inputs
+// (inline users / a source) and the other strategies' blocks.
+func buildExecCredentials(a Auth) (domain.CredentialPool, error) {
+	if len(a.Users) > 0 || a.Source != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy mints its own token from a command and takes no inline users or source", domain.CredExec)
+	}
+	if a.Login != nil || a.Mint != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login and auth.mint are not valid with the %q strategy", domain.CredExec)
+	}
+	if a.Exec == nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy needs an auth.exec block (a command argv, optional env/timeout)", domain.CredExec)
+	}
+	e := a.Exec
+	spec := domain.ExecSpec{
+		Command:        e.Command,
+		Env:            e.Env,
+		MaxOutputBytes: e.MaxOutputBytes,
+	}
+	if s := strings.TrimSpace(e.Timeout); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.exec.timeout %q: %w", e.Timeout, err)
+		}
+		spec.Timeout = d
+	}
+	// Validate the shape here (a non-empty command argv, non-negative timeout/cap) so a
+	// malformed exec block is rejected at expand time with a clear, scenariofile-prefixed
+	// message — not deferred to the run path.
+	if err := spec.Validate(); err != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+	}
+	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredExec, Exec: &spec}, nil
+}
+
+// buildMintCredentials maps the mint authoring block onto a mint pool carrying a
+// domain.MintSpec (alg, the NON-SECRET signing-key reference, the claims template,
+// the subject and the TTL). It carries no secret — the signing key is a reference
+// resolved in-process at run time. The durations are authored as strings ("1h") and
+// parsed here; the full validation (signable alg, positive TTL, present key ref, HS
+// encoding) runs in domain.MintSpec.Validate via runspec.Validate, so this builder
+// only translates the authored block into the domain shape and parses the durations.
+func buildMintCredentials(a Auth) (domain.CredentialPool, error) {
+	if len(a.Users) > 0 || a.Source != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy self-issues a JWT and takes no inline users or source", domain.CredMint)
+	}
+	if a.Login != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
+	}
+	if a.Mint == nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy needs an auth.mint block (alg, key reference, ttl)", domain.CredMint)
+	}
+	m := a.Mint
+	ttl, err := time.ParseDuration(strings.TrimSpace(m.Ttl))
+	if err != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.mint.ttl %q: %w", m.Ttl, err)
+	}
+	var leeway time.Duration
+	if s := strings.TrimSpace(m.Leeway); s != "" {
+		leeway, err = time.ParseDuration(s)
+		if err != nil {
+			return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.mint.leeway %q: %w", m.Leeway, err)
+		}
+	}
+	spec := domain.MintSpec{
+		Alg:            domain.MintAlg(m.Alg),
+		SecretEncoding: domain.MintEncoding(m.SecretEncoding),
+		Subject:        m.Subject,
+		Claims:         m.Claims,
+		TTL:            ttl,
+		Leeway:         leeway,
+	}
+	if m.Key != nil {
+		spec.Key = &domain.CredentialSourceRef{File: m.Key.File, Env: m.Key.Env}
+	}
+	// Validate the shape here (signable alg, positive TTL, present key reference, HS
+	// encoding) so a malformed mint block is rejected at expand time with a clear,
+	// scenariofile-prefixed message — not deferred to the run path.
+	if err := spec.Validate(); err != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+	}
+	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredMint, Mint: &spec}, nil
 }
 
 // buildPoolCredentials maps the inline-users or source form onto a plain pool.
@@ -697,6 +891,21 @@ func buildLoginCredentials(a Auth, dir string) (domain.CredentialPool, *runspec.
 		MaxSteps:   len(a.Login.Flow),
 		TokenVar:   a.Login.Capture.Token,
 		SubjectVar: a.Login.Capture.Subject,
+	}
+	// The OPTIONAL explicit refresh override threads onto the login flow spec: when set it
+	// WINS over the orchestrator's auto-derivation (a JSON-body login still gets a real
+	// refresh exchange). The request line is normalized to "METHOD /path" so the run-path
+	// shape check and the transport agree on the form; an empty request defers to the
+	// login token endpoint. It carries no secret — the refresh token is captured at run time.
+	if a.Login.Refresh != nil {
+		if req := strings.TrimSpace(a.Login.Refresh.Request); req != "" {
+			method, path, err := parseRequest(req)
+			if err != nil {
+				return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.refresh.request: %w", err)
+			}
+			loginFlow.RefreshRequest = method + " " + path
+		}
+		loginFlow.RefreshBody = a.Login.Refresh.Body
 	}
 	return pool, loginFlow, nil
 }

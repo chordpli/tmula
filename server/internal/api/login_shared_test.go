@@ -16,7 +16,7 @@ func sharedLoginAuth(t *testing.T, shared bool, mints *int64) *loginAuth {
 	la, err := newLoginAuthFromToken(func(_ context.Context, idx int) (domain.Credential, error) {
 		n := atomic.AddInt64(mints, 1)
 		return domain.Credential{Subject: "p", Secret: "tok-" + itoa(int(n))}, nil
-	}, shared)
+	}, nil, shared)
 	if err != nil {
 		t.Fatalf("build loginAuth: %v", err)
 	}

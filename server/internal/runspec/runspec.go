@@ -5,6 +5,7 @@
 package runspec
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -126,6 +127,17 @@ type LoginFlowSpec struct {
 	// captured variable that becomes the non-sensitive subject.
 	TokenVar   string `json:"tokenVar,omitempty"`
 	SubjectVar string `json:"subjectVar,omitempty"`
+	// RefreshRequest / RefreshBody are an OPTIONAL explicit refresh-grant override the
+	// orchestrator builds the mid-run refresh transport from. When RefreshBody is set it
+	// WINS over the auto-derivation from the login's form grant — so even a login that
+	// auto-derive cannot rewrite (a JSON-body login, or a form login with no grant_type)
+	// still gets a real grant_type=refresh_token exchange. RefreshRequest is the
+	// "METHOD /path" the refresh POSTs to; it is OPTIONAL and defaults to the login token
+	// endpoint when empty. Both empty is the unchanged auto-derive / re-login behavior.
+	// Neither carries a secret — the refresh token is captured at run time from the live
+	// login response, consistent with how the access token never round-trips.
+	RefreshRequest string `json:"refreshRequest,omitempty"`
+	RefreshBody    string `json:"refreshBody,omitempty"`
 }
 
 // Validate checks the login flow is well-formed: a non-empty graph and a start node
@@ -149,7 +161,29 @@ func (f LoginFlowSpec) Validate() error {
 	if !known {
 		return fmt.Errorf("login flow: start node %q is not in the login graph", f.Start)
 	}
+	// The explicit refresh override carries no secret (the refresh token is captured at
+	// run time), so only its request line is shape-checked, and ONLY when set: an empty
+	// RefreshRequest is valid — it either defers to the login token endpoint (body-only
+	// override) or, with an empty RefreshBody too, keeps the auto-derive / re-login path.
+	if strings.TrimSpace(f.RefreshRequest) != "" {
+		if err := validateMethodPath(f.RefreshRequest); err != nil {
+			return fmt.Errorf("login flow: refresh request: %w", err)
+		}
+	}
 	return nil
+}
+
+// validateMethodPath shape-checks a "METHOD /path" request line: exactly two
+// whitespace-separated fields, with the path rooted and free of a scheme/authority/
+// control characters (reusing validateTemplatePath). It is the same shape the
+// scenariofile "METHOD /path" shorthand parses into, checked here so a malformed
+// refresh-override request line is rejected up front rather than at compile time.
+func validateMethodPath(req string) error {
+	fields := strings.Fields(req)
+	if len(fields) != 2 {
+		return fmt.Errorf("must be \"METHOD /path\"")
+	}
+	return validateTemplatePath(fields[1])
 }
 
 // ID returns the run identifier the control plane assigned to this spec.
@@ -330,6 +364,22 @@ func (r RunSpec) validateCredentialPool() error {
 			return fmt.Errorf("api: %w", err)
 		}
 	}
+	if r.CredentialPool.Strategy == domain.CredMint && hasWorkers {
+		// A mint pool self-issues a JWT per virtual user by signing locally with a key
+		// the operator holds. Distributed mint is plausible (each worker would resolve
+		// the key reference and sign deterministically by global index, like a source
+		// pool), but the key reference rides on the pool itself, not the shared Source
+		// shardSpecFor copies out — so it is kept rejected here as a scoped follow-up,
+		// alongside the other non-source pools. The mint key never serializes regardless.
+		return fmt.Errorf("api: the %q strategy is not supported with distributed workers yet (it signs per-node from a local key reference; distributed mint is a follow-up)", domain.CredMint)
+	}
+	if r.CredentialPool.Strategy == domain.CredExec && hasWorkers {
+		// An exec pool runs an arbitrary local command per virtual user. Its output is a
+		// json:"-" secret workers cannot resolve, and arbitrary command execution is never
+		// fanned out across remote workers — so distributed exec is rejected (the operator
+		// opt-in gate is single-node by construction).
+		return fmt.Errorf("api: the %q strategy is not supported with distributed workers (it runs a local command per user; remote command execution is not fanned out)", domain.CredExec)
+	}
 	if hasWorkers {
 		// Inline-secret carry (entries pool or a minted login token) cannot fan out:
 		// the secret would serialize into the wire spec / a json:"-" secret the
@@ -379,6 +429,23 @@ func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	// run.
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
 		return nil, fmt.Errorf("api: a bootstrap-signup credential pool's provider is built by the orchestrator, not runspec (signup transport lives above this leaf)")
+	}
+	// The mint strategy self-issues a JWT per virtual user; it needs NO flow (no
+	// login/signup/refresh transport), so it builds RIGHT HERE at the leaf. The signing
+	// key is resolved IN-PROCESS from the pool's non-secret key reference (env var read
+	// verbatim, or a file confined under the process working directory) and handed to
+	// the provider — only the reference ever crossed the wire, never the key (AD-011).
+	// Acquire is then a pure, deterministic function of the user index, so the open,
+	// closed and reproduce paths all build the same provider with no extra wiring.
+	if r.CredentialPool.Strategy == domain.CredMint {
+		if r.CredentialPool.Mint == nil {
+			return nil, fmt.Errorf("api: a mint credential pool has no mint spec")
+		}
+		key, err := auth.ResolveMintKey(context.Background(), *r.CredentialPool.Mint, "")
+		if err != nil {
+			return nil, fmt.Errorf("api: resolve mint signing key: %w", err)
+		}
+		return auth.NewProvider(*r.CredentialPool, auth.ProviderDeps{MintKey: key})
 	}
 	// The remaining strategies (pool today) need no signup/token function — an empty
 	// ProviderDeps.
