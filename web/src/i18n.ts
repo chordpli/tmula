@@ -215,6 +215,12 @@ const en: Record<string, string> = {
   'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
+  'auth.mode.mint': 'Sign a token locally (self-issued JWT)',
+  'auth.mode.mint.desc':
+    'For services whose tokens are self-issued JWTs you control the key for. tmula signs a fresh JWT per user — no login. Not for Auth0/Cognito/Firebase.',
+  'auth.mode.exec': 'Run a command for the token (escape hatch)',
+  'auth.mode.exec.desc':
+    'Last resort. Run your own local command per user and read the token from its stdout — for auth no other strategy can model. Gated, runs locally.',
 
   // Auth · imported (P7) — success banner shown when an import auto-detects auth
   'auth.imported.login': 'Imported — your login flow is ready. Review it below, or just start the run.',
@@ -249,6 +255,13 @@ const en: Record<string, string> = {
   'auth.login.subjectVarHint': 'Optional captured variable that becomes the principal id.',
   'auth.login.start': 'Start node',
   'auth.login.startHint': 'The login flow node every mint begins at.',
+  'auth.login.refresh': 'Refresh override',
+  'auth.login.refresh.tip':
+    'By default tmula auto-derives a grant_type=refresh_token request from an OAuth2 form login, and re-logs-in otherwise. Set an explicit override here to force a specific refresh exchange — it WINS over the auto-derivation, so even a JSON-body login refreshes its token instead of re-logging-in on a mid-run 401. Leave both fields empty to keep the automatic behavior.',
+  'auth.login.refreshRequest': 'Refresh request (optional)',
+  'auth.login.refreshRequestHint': 'The METHOD and path the refresh posts to, e.g. POST /oauth/token. Leave empty to reuse the login endpoint.',
+  'auth.login.refreshBody': 'Refresh body (optional)',
+  'auth.login.refreshBodyHint': 'The refresh request body. Reference the captured refresh token with {{.refreshToken}} — tmula fills and url-encodes it at run time.',
   'auth.login.scope': 'Scope',
   'auth.login.scopeHint': 'Per-user mints one token each; shared mints one for everyone (client_credentials).',
   'auth.login.scope.tip':
@@ -336,6 +349,62 @@ const en: Record<string, string> = {
   'auth.bootstrap.teardownStart': 'Teardown start step',
   'auth.bootstrap.teardownStartHint': 'Optional teardown entry step (defaults to the first).',
 
+  // Auth · mint (local JWT signing, M1)
+  'auth.mint.lead':
+    'tmula signs a fresh JWT for each virtual user locally — no login, no token capture. Use this ONLY when the target self-issues JWTs and you hold the signing key. It cannot sign for a key you do not control (Auth0/Cognito/Firebase) — use Login for those.',
+  'auth.mint.alg': 'Algorithm',
+  'auth.mint.algHint': 'How the JWT is signed. HS256 uses a shared secret; RS256/ES256 use a PEM private key.',
+  'auth.mint.alg.tip':
+    'HS256 signs with a symmetric secret (the same value verifies the token). RS256 (RSA) and ES256 (ECDSA P-256) sign with a PEM private key — the verifier holds the public half. Pick whatever the target’s verifier expects.',
+  'auth.mint.alg.hs256': 'HS256 — shared secret (HMAC)',
+  'auth.mint.alg.rs256': 'RS256 — RSA private key (PEM)',
+  'auth.mint.alg.es256': 'ES256 — ECDSA P-256 (PEM)',
+  'auth.mint.encoding': 'Secret encoding',
+  'auth.mint.encodingHint': 'How the HS256 secret is stored: raw bytes, base64, or base64url.',
+  'auth.mint.encoding.raw': 'Raw (verbatim bytes)',
+  'auth.mint.encoding.base64': 'Base64',
+  'auth.mint.encoding.base64url': 'Base64URL',
+  'auth.mint.keyEnv': 'Key environment variable',
+  'auth.mint.keyEnvHint': 'Name of the env var the server reads the signing key from. Use this OR a file, not both.',
+  'auth.mint.keyEnv.placeholder': 'TMULA_MINT_SECRET',
+  'auth.mint.key.tip':
+    'The signing key is a REFERENCE only — tmula reads it on the server from this env var (or the file below) and never sends the key over the wire. For HS256 it is the shared secret; for RS256/ES256 a PEM private key. Set exactly one of env or file.',
+  'auth.mint.keyFile': 'Key file (on the server)',
+  'auth.mint.keyFileHint': 'Path to the signing-key file the server reads. Use this OR an env var, not both.',
+  'auth.mint.keyFile.placeholder': 'signing-key.pem',
+  'auth.mint.subject': 'Subject (sub claim)',
+  'auth.mint.subjectHint': 'The per-user sub claim. Template {{.userIndex}} so each user is a distinct principal. Empty = no sub.',
+  'auth.mint.subject.tip':
+    'The token’s sub claim, rendered per virtual user. Reference {{.userIndex}} (the VU number) so user 0 and user 1 sign distinct principals, e.g. user-{{.userIndex}}. Leave it empty to mint a token with no sub.',
+  'auth.mint.ttl': 'Token lifetime (seconds)',
+  'auth.mint.ttlHint': 'How long each minted token is valid; it sets the exp claim to now + this many seconds.',
+  'auth.mint.claims': 'Extra claims (JSON)',
+  'auth.mint.claimsHint': 'Optional JSON object of extra claims signed into every token. Values may template {{.userIndex}}/{{.subject}}.',
+  'auth.mint.claims.tip':
+    'A JSON object of additional claims merged into every token alongside iat/exp/sub. Values are templates: reference {{.userIndex}} (the VU number) or {{.subject}} (the rendered sub). Leave it empty for just the standard claims.',
+  'auth.mint.claims.placeholder': '{"role": "tester", "tenant": "acme"}',
+  'auth.mint.claimsInvalid': 'Extra claims must be valid JSON.',
+  'auth.mint.claimsNotObject': 'Extra claims must be a JSON object (e.g. {"role":"tester"}).',
+
+  // Auth · exec (bring-your-own-token escape hatch, X1)
+  'auth.exec.lead':
+    'tmula runs your own local command once per virtual user and uses its stdout as the token — the escape hatch for auth no built-in strategy can model. Reach for this only when nothing else fits.',
+  'auth.exec.confirm': 'This runs an arbitrary local command on this machine.',
+  'auth.exec.confirmSub':
+    'The command runs on the box driving the test, and its egress is NOT bound by the target allowlist or rate cap. The run is also gated server-side by --allow-exec.',
+  'auth.exec.command': 'Command',
+  'auth.exec.commandHint':
+    'The command to run, one argv element per line. The first line is the program; the rest are arguments. Lines may template {{.userIndex}}.',
+  'auth.exec.command.tip':
+    'tmula runs this exact argv per virtual user (no shell) and reads the token from stdout. argv[0] is the program (a path or a name on PATH); each following line is one argument. Use {{.userIndex}} so user 0 and user 1 fetch distinct tokens. Keep secrets out of here — put them in the env below.',
+  'auth.exec.env': 'Extra environment (KEY=VALUE)',
+  'auth.exec.envHint':
+    'Extra environment variables for the command, one KEY=VALUE per line. Put secrets here, not in the command. Values may template {{.userIndex}}.',
+  'auth.exec.env.tip':
+    'Each line adds one environment variable to the command’s process, on top of the inherited environment. Use this for secrets (an API key, a client secret) so they never appear in the argv. Values may reference {{.userIndex}} for a per-user value.',
+  'auth.exec.timeout': 'Timeout (seconds)',
+  'auth.exec.timeoutHint': 'How long each invocation may run before tmula kills it and fails that user’s token fetch.',
+
   // Auth · scenario doctor hints
   'doctor.authPoolEmpty': 'Token pool is selected but no credentials are pasted or uploaded.',
   'doctor.authPoolInvalid': 'The pasted credentials could not be parsed: {error}',
@@ -352,6 +421,9 @@ const en: Record<string, string> = {
   'doctor.authBootstrapNoTeardown':
     'Account generation has no teardown flow and keep-accounts is off — provisioned accounts would be stranded.',
   'doctor.authBootstrapTeardownJson': 'Teardown steps JSON is invalid: {error}',
+  'doctor.authMintKey':
+    'Local signing is selected but no signing key is referenced — set a key environment variable or a key file so tmula can sign.',
+  'doctor.authMintClaims': 'Extra claims JSON is invalid: {error}',
 
   // Presets (Feature A)
   'presets.label': 'Start from a template',
@@ -677,6 +749,12 @@ const ko: Record<string, string> = {
   'auth.mode.login.desc': '로그인 흐름을 한 번 실행해 응답에서 토큰을 캡처합니다.',
   'auth.mode.bootstrap': '테스트 계정 생성',
   'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다.',
+  'auth.mode.mint': '토큰을 로컬에서 서명(자체 발급 JWT)',
+  'auth.mode.mint.desc':
+    '토큰이 자체 발급 JWT이고 서명 키를 직접 보유한 서비스용입니다. tmula가 사용자마다 JWT를 새로 서명합니다 — 로그인이 없습니다. Auth0/Cognito/Firebase에는 사용할 수 없습니다.',
+  'auth.mode.exec': '명령으로 토큰 가져오기(탈출구)',
+  'auth.mode.exec.desc':
+    '최후의 수단입니다. 사용자마다 직접 만든 로컬 명령을 실행해 stdout에서 토큰을 읽습니다 — 다른 전략으로 표현할 수 없는 인증용입니다. 게이트가 걸려 있고, 로컬에서 실행됩니다.',
 
   // Auth · imported (P7) — 가져오기가 인증을 자동 감지했을 때 표시되는 성공 배너
   'auth.imported.login': '가져왔습니다 — 로그인 흐름이 준비됐습니다. 아래에서 확인하거나 바로 실행하세요.',
@@ -711,6 +789,13 @@ const ko: Record<string, string> = {
   'auth.login.subjectVarHint': '주체(principal) id가 되는 선택 캡처 변수입니다.',
   'auth.login.start': '시작 노드',
   'auth.login.startHint': '토큰 발급이 시작되는 로그인 흐름 노드입니다.',
+  'auth.login.refresh': '갱신 재정의',
+  'auth.login.refresh.tip':
+    '기본적으로 tmula는 OAuth2 폼 로그인에서 grant_type=refresh_token 요청을 자동 도출하고, 그 외에는 다시 로그인합니다. 여기에 명시적 재정의를 설정하면 특정 갱신 교환을 강제할 수 있습니다 — 자동 도출보다 우선하므로, JSON 본문 로그인이라도 실행 중 401에서 다시 로그인하지 않고 토큰을 갱신합니다. 두 필드를 모두 비워 두면 자동 동작이 유지됩니다.',
+  'auth.login.refreshRequest': '갱신 요청 (선택)',
+  'auth.login.refreshRequestHint': '갱신이 요청을 보내는 메서드와 경로입니다. 예: POST /oauth/token. 비워 두면 로그인 엔드포인트를 재사용합니다.',
+  'auth.login.refreshBody': '갱신 본문 (선택)',
+  'auth.login.refreshBodyHint': '갱신 요청 본문입니다. 캡처된 갱신 토큰을 {{.refreshToken}}로 참조하세요 — tmula가 실행 시점에 값을 채우고 url 인코딩합니다.',
   'auth.login.scope': '범위',
   'auth.login.scopeHint': '사용자별은 각자 하나씩, 공유는 전체가 하나를 공유합니다(client_credentials).',
   'auth.login.scope.tip':
@@ -798,6 +883,62 @@ const ko: Record<string, string> = {
   'auth.bootstrap.teardownStart': '정리 시작 단계',
   'auth.bootstrap.teardownStartHint': '선택 정리 진입 단계입니다(기본값: 첫 단계).',
 
+  // Auth · mint (로컬 JWT 서명, M1)
+  'auth.mint.lead':
+    'tmula가 각 가상 사용자마다 JWT를 로컬에서 새로 서명합니다 — 로그인도, 토큰 캡처도 없습니다. 대상이 JWT를 자체 발급하고 서명 키를 직접 보유한 경우에만 사용하세요. 보유하지 않은 키(Auth0/Cognito/Firebase)로는 서명할 수 없으니 그런 경우엔 로그인을 사용하세요.',
+  'auth.mint.alg': '알고리즘',
+  'auth.mint.algHint': 'JWT 서명 방식입니다. HS256은 공유 비밀키를, RS256/ES256은 PEM 개인키를 사용합니다.',
+  'auth.mint.alg.tip':
+    'HS256은 대칭 비밀키로 서명합니다(같은 값으로 검증). RS256(RSA)과 ES256(ECDSA P-256)은 PEM 개인키로 서명하고 검증자는 공개키 절반을 보유합니다. 대상 검증자가 기대하는 방식을 고르세요.',
+  'auth.mint.alg.hs256': 'HS256 — 공유 비밀키(HMAC)',
+  'auth.mint.alg.rs256': 'RS256 — RSA 개인키(PEM)',
+  'auth.mint.alg.es256': 'ES256 — ECDSA P-256(PEM)',
+  'auth.mint.encoding': '비밀키 인코딩',
+  'auth.mint.encodingHint': 'HS256 비밀키 저장 방식입니다: 원본 바이트, base64, base64url.',
+  'auth.mint.encoding.raw': '원본(바이트 그대로)',
+  'auth.mint.encoding.base64': 'Base64',
+  'auth.mint.encoding.base64url': 'Base64URL',
+  'auth.mint.keyEnv': '키 환경 변수',
+  'auth.mint.keyEnvHint': '서버가 서명 키를 읽어올 환경 변수 이름입니다. 파일과 함께가 아니라 둘 중 하나만 사용하세요.',
+  'auth.mint.keyEnv.placeholder': 'TMULA_MINT_SECRET',
+  'auth.mint.key.tip':
+    '서명 키는 참조일 뿐입니다 — tmula가 서버에서 이 환경 변수(또는 아래 파일)로 읽으며 키 자체는 절대 전송되지 않습니다. HS256에서는 공유 비밀키, RS256/ES256에서는 PEM 개인키입니다. env 또는 file 중 정확히 하나만 설정하세요.',
+  'auth.mint.keyFile': '키 파일(서버에 위치)',
+  'auth.mint.keyFileHint': '서버가 읽을 서명 키 파일 경로입니다. 환경 변수와 함께가 아니라 둘 중 하나만 사용하세요.',
+  'auth.mint.keyFile.placeholder': 'signing-key.pem',
+  'auth.mint.subject': 'Subject(sub 클레임)',
+  'auth.mint.subjectHint': '사용자별 sub 클레임입니다. {{.userIndex}}를 템플릿으로 넣어 사용자마다 서로 다른 주체가 되게 하세요. 비우면 sub 없음.',
+  'auth.mint.subject.tip':
+    '가상 사용자마다 렌더링되는 토큰의 sub 클레임입니다. {{.userIndex}}(VU 번호)를 참조하면 사용자 0과 1이 서로 다른 주체로 서명됩니다(예: user-{{.userIndex}}). 비우면 sub 없는 토큰을 발급합니다.',
+  'auth.mint.ttl': '토큰 수명(초)',
+  'auth.mint.ttlHint': '발급된 각 토큰의 유효 시간입니다. exp 클레임을 현재 시각 + 이 초만큼으로 설정합니다.',
+  'auth.mint.claims': '추가 클레임(JSON)',
+  'auth.mint.claimsHint': '모든 토큰에 서명되는 추가 클레임 JSON 객체(선택)입니다. 값에 {{.userIndex}}/{{.subject}}를 템플릿으로 넣을 수 있습니다.',
+  'auth.mint.claims.tip':
+    'iat/exp/sub와 함께 모든 토큰에 병합되는 추가 클레임 JSON 객체입니다. 값은 템플릿입니다: {{.userIndex}}(VU 번호)나 {{.subject}}(렌더링된 sub)를 참조하세요. 비우면 표준 클레임만 사용합니다.',
+  'auth.mint.claims.placeholder': '{"role": "tester", "tenant": "acme"}',
+  'auth.mint.claimsInvalid': '추가 클레임은 올바른 JSON이어야 합니다.',
+  'auth.mint.claimsNotObject': '추가 클레임은 JSON 객체여야 합니다(예: {"role":"tester"}).',
+
+  // Auth · exec (토큰을 직접 가져오는 탈출구, X1)
+  'auth.exec.lead':
+    'tmula가 사용자마다 직접 만든 로컬 명령을 한 번씩 실행하고 그 stdout을 토큰으로 사용합니다 — 어떤 내장 전략으로도 표현할 수 없는 인증을 위한 탈출구입니다. 다른 방법이 모두 맞지 않을 때만 사용하세요.',
+  'auth.exec.confirm': '이 기기에서 임의의 로컬 명령을 실행합니다.',
+  'auth.exec.confirmSub':
+    '명령은 테스트를 구동하는 기기에서 실행되며, 그 egress(외부 통신)는 대상 허용 목록이나 속도 제한의 적용을 받지 않습니다. 실행은 서버 측 --allow-exec 플래그로도 게이트됩니다.',
+  'auth.exec.command': '명령',
+  'auth.exec.commandHint':
+    '실행할 명령입니다. argv 요소를 한 줄에 하나씩 입력하세요. 첫 줄은 프로그램, 나머지는 인자입니다. 각 줄에 {{.userIndex}}를 템플릿으로 넣을 수 있습니다.',
+  'auth.exec.command.tip':
+    'tmula가 이 argv를 사용자마다 그대로(셸 없이) 실행하고 stdout에서 토큰을 읽습니다. argv[0]은 프로그램(경로 또는 PATH의 이름)이고, 이후 각 줄이 인자 하나입니다. {{.userIndex}}를 사용해 사용자 0과 사용자 1이 서로 다른 토큰을 가져오게 하세요. 비밀값은 여기에 두지 말고 아래 환경 변수에 넣으세요.',
+  'auth.exec.env': '추가 환경 변수(KEY=VALUE)',
+  'auth.exec.envHint':
+    '명령에 전달할 추가 환경 변수입니다. KEY=VALUE를 한 줄에 하나씩 입력하세요. 비밀값은 명령이 아니라 여기에 넣으세요. 값에 {{.userIndex}}를 템플릿으로 넣을 수 있습니다.',
+  'auth.exec.env.tip':
+    '각 줄이 상속된 환경에 더해 명령 프로세스에 환경 변수 하나를 추가합니다. 비밀값(API 키, 클라이언트 시크릿)을 여기에 넣어 argv에 노출되지 않게 하세요. 값에 {{.userIndex}}를 참조해 사용자별 값을 만들 수 있습니다.',
+  'auth.exec.timeout': '제한 시간(초)',
+  'auth.exec.timeoutHint': '각 호출이 실행될 수 있는 최대 시간입니다. 이 시간을 넘기면 tmula가 해당 호출을 종료하고 그 사용자의 토큰 가져오기를 실패 처리합니다.',
+
   // Auth · 시나리오 점검 힌트
   'doctor.authPoolEmpty': '토큰 풀이 선택되었지만 붙여넣거나 업로드한 자격 증명이 없습니다.',
   'doctor.authPoolInvalid': '붙여넣은 자격 증명을 파싱할 수 없습니다: {error}',
@@ -814,6 +955,9 @@ const ko: Record<string, string> = {
   'doctor.authBootstrapNoTeardown':
     '계정 생성에 정리 흐름이 없고 계정 유지도 꺼져 있어 생성한 계정이 방치됩니다.',
   'doctor.authBootstrapTeardownJson': '정리 단계 JSON이 올바르지 않습니다: {error}',
+  'doctor.authMintKey':
+    '로컬 서명이 선택되었지만 서명 키가 참조되지 않았습니다 — tmula가 서명할 수 있도록 키 환경 변수나 키 파일을 설정하세요.',
+  'doctor.authMintClaims': '추가 클레임 JSON이 올바르지 않습니다: {error}',
 
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',

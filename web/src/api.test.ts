@@ -519,6 +519,56 @@ describe('buildAuth', () => {
     expect(build!.credentialPool.entries).toBeUndefined()
   })
 
+  it('threads an explicit refresh override (advanced) onto the login flow', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login","apiTemplateId":"t"}],"edges":[]}',
+      loginTemplatesJSON: '{"t":{"method":"POST","path":"/login","payloadTemplate":"{\\"u\\":\\"svc\\"}"}}',
+      loginStart: 'login',
+      // A JSON-body login that would NOT auto-derive — the override is the only way it
+      // gets a real refresh transport. The override wins on the backend.
+      loginRefreshRequest: 'POST /oauth/token',
+      loginRefreshBody: 'grant_type=refresh_token&refresh_token={{.refreshToken}}&client_id=c',
+    })
+    expect(build!.loginFlow?.refreshRequest).toBe('POST /oauth/token')
+    expect(build!.loginFlow?.refreshBody).toBe(
+      'grant_type=refresh_token&refresh_token={{.refreshToken}}&client_id=c',
+    )
+  })
+
+  it('omits the refresh override when its fields are blank (auto-derive / re-login)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
+      loginTemplatesJSON: '{}',
+      loginStart: 'login',
+      loginRefreshRequest: '   ',
+      loginRefreshBody: '   ',
+    })
+    // No override is sent, so the backend keeps the auto-derive / re-login behavior.
+    expect(build!.loginFlow?.refreshRequest).toBeUndefined()
+    expect(build!.loginFlow?.refreshBody).toBeUndefined()
+  })
+
+  it('accepts a body-only refresh override (request line optional)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
+      loginTemplatesJSON: '{}',
+      loginStart: 'login',
+      loginRefreshBody: 'grant_type=refresh_token&refresh_token={{.refreshToken}}',
+    })
+    // The request line is optional — the backend defaults it to the login token endpoint.
+    expect(build!.loginFlow?.refreshRequest).toBeUndefined()
+    expect(build!.loginFlow?.refreshBody).toBe('grant_type=refresh_token&refresh_token={{.refreshToken}}')
+  })
+
   it('propagates a malformed login credential list as a throw (fail-fast)', () => {
     expect(() =>
       buildAuth({
@@ -594,6 +644,205 @@ describe('buildAuth', () => {
   })
 })
 
+describe('buildAuth · mint (local JWT signing, M1)', () => {
+  it('builds an HS256 mint pool from the form fields (key ref, encoding, claims, ttl)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'mint',
+      mintAlg: 'HS256',
+      mintSecretEncoding: 'base64',
+      mintKeyEnv: 'TMULA_MINT_SECRET',
+      mintSubject: 'user-{{.userIndex}}',
+      mintClaimsJSON: '{"role":"tester","tenant":"acme"}',
+      mintTtlSeconds: 3600,
+    })
+    expect(build).not.toBeNull()
+    expect(build!.authStrategy).toBe('mint')
+    const pool = build!.credentialPool
+    expect(pool.strategy).toBe('mint')
+    expect(pool.mint).toEqual({
+      alg: 'HS256',
+      secretEncoding: 'base64',
+      key: { env: 'TMULA_MINT_SECRET' },
+      subject: 'user-{{.userIndex}}',
+      claims: { role: 'tester', tenant: 'acme' },
+      ttl: '1h0m0s',
+    })
+    // The mint pool carries no entries / loginFlow.
+    expect(pool.entries).toBeUndefined()
+    expect(build!.loginFlow).toBeUndefined()
+  })
+
+  it('builds an RS256 mint pool from a file key reference (no encoding field)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'mint',
+      mintAlg: 'RS256',
+      mintKeyFile: 'signing-key.pem',
+      mintSubject: 'u{{.userIndex}}',
+      mintTtlSeconds: 1800,
+    })
+    const mint = build!.credentialPool.mint!
+    expect(mint.alg).toBe('RS256')
+    expect(mint.key).toEqual({ file: 'signing-key.pem' })
+    // An asymmetric alg sends no secretEncoding (it is HS-only).
+    expect(mint.secretEncoding).toBeUndefined()
+    expect(mint.ttl).toBe('30m0s')
+  })
+
+  it('omits empty claims and an empty subject so a minimal mint stays minimal', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'mint',
+      mintAlg: 'HS256',
+      mintSecretEncoding: 'raw',
+      mintKeyEnv: 'K',
+      mintSubject: '',
+      mintClaimsJSON: '',
+      mintTtlSeconds: 600,
+    })
+    const mint = build!.credentialPool.mint!
+    expect(mint.claims).toBeUndefined()
+    expect(mint.subject).toBeUndefined()
+  })
+
+  it('requires a key reference (env or file)', () => {
+    expect(() =>
+      buildAuth({ ...form, authMode: 'mint', mintAlg: 'HS256', mintSecretEncoding: 'raw', mintTtlSeconds: 600 }),
+    ).toThrow(/key/i)
+  })
+
+  it('rejects a non-positive ttl', () => {
+    expect(() =>
+      buildAuth({ ...form, authMode: 'mint', mintAlg: 'HS256', mintSecretEncoding: 'raw', mintKeyEnv: 'K', mintTtlSeconds: 0 }),
+    ).toThrow(/ttl|lifetime/i)
+  })
+
+  it('rejects malformed claims JSON with a clear error', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'mint',
+        mintAlg: 'HS256',
+        mintSecretEncoding: 'raw',
+        mintKeyEnv: 'K',
+        mintTtlSeconds: 600,
+        mintClaimsJSON: '{not json}',
+      }),
+    ).toThrow(/claims/i)
+  })
+})
+
+describe('buildAuth · exec (bring-your-own-token escape hatch)', () => {
+  it('builds an exec pool from the form fields (argv command, env pairs, timeout)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'exec',
+      execConfirmed: true,
+      execCommandText: '/usr/local/bin/get-token\n--user\n{{.userIndex}}',
+      execEnvText: 'ID_TOKEN_AUDIENCE=my-api\nUSER_INDEX={{.userIndex}}',
+      execTimeoutSeconds: 10,
+    })
+    expect(build).not.toBeNull()
+    expect(build!.authStrategy).toBe('exec')
+    const pool = build!.credentialPool
+    expect(pool.strategy).toBe('exec')
+    expect(pool.exec).toEqual({
+      command: ['/usr/local/bin/get-token', '--user', '{{.userIndex}}'],
+      env: { ID_TOKEN_AUDIENCE: 'my-api', USER_INDEX: '{{.userIndex}}' },
+      timeout: '10s',
+    })
+    // No login flow / entries ride along — exec mints its token from the command.
+    expect(pool.entries).toBeUndefined()
+    expect(build!.loginFlow).toBeUndefined()
+  })
+
+  it('omits empty env so a minimal exec stays minimal', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'exec',
+      execConfirmed: true,
+      execCommandText: '/bin/get-token',
+      execEnvText: '',
+      execTimeoutSeconds: 30,
+    })
+    expect(build!.credentialPool.exec!.env).toBeUndefined()
+    expect(build!.credentialPool.exec!.command).toEqual(['/bin/get-token'])
+  })
+
+  it('requires the operator to confirm exec runs a local command (the opt-in)', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'exec',
+        execConfirmed: false,
+        execCommandText: '/bin/get-token',
+        execTimeoutSeconds: 30,
+      }),
+    ).toThrow(/confirm|local command|allow/i)
+  })
+
+  it('requires a non-empty command', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'exec',
+        execConfirmed: true,
+        execCommandText: '   \n  ',
+        execTimeoutSeconds: 30,
+      }),
+    ).toThrow(/command/i)
+  })
+
+  it('rejects a non-positive timeout', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'exec',
+        execConfirmed: true,
+        execCommandText: '/bin/get-token',
+        execTimeoutSeconds: 0,
+      }),
+    ).toThrow(/timeout/i)
+  })
+
+  it('rejects a malformed env line that is not KEY=VALUE', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'exec',
+        execConfirmed: true,
+        execCommandText: '/bin/get-token',
+        execEnvText: 'NOT_A_PAIR',
+        execTimeoutSeconds: 30,
+      }),
+    ).toThrow(/env|KEY=VALUE/i)
+  })
+})
+
+describe('authFormFromSpec · exec', () => {
+  it('restores the exec command/env/timeout but never pre-confirms the opt-in', () => {
+    const patch = authFormFromSpec({
+      credentialPool: {
+        id: 'p',
+        strategy: 'exec',
+        exec: {
+          command: ['/usr/local/bin/get-token', '--user', '{{.userIndex}}'],
+          env: { AUD: 'my-api' },
+          timeout: '10s',
+          maxOutputBytes: 65536,
+        },
+      },
+    })
+    expect(patch.authMode).toBe('exec')
+    // The operator must re-acknowledge that exec runs a local command, like bootstrap.
+    expect(patch.execConfirmed).toBe(false)
+    expect(patch.execCommandText).toBe('/usr/local/bin/get-token\n--user\n{{.userIndex}}')
+    expect(patch.execEnvText).toBe('AUD=my-api')
+    expect(patch.execTimeoutSeconds).toBe(10)
+  })
+})
+
 describe('buildRunSpec auth wiring', () => {
   it('keeps the None path byte-identical (no credentialPool, authStrategy pool)', () => {
     const spec = buildRunSpec(form)
@@ -662,6 +911,24 @@ describe('buildRunSpec auth wiring', () => {
     expect(expAuthStrategy(spec)).toBe('bootstrap-signup')
     expect(spec.credentialPool?.strategy).toBe('bootstrap-signup')
     expect(spec.credentialPool?.keepAccounts).toBe(true)
+    expect(spec.loginFlow).toBeUndefined()
+  })
+
+  it('attaches a mint credentialPool and the mint authStrategy', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'mint',
+      mintAlg: 'HS256',
+      mintSecretEncoding: 'raw',
+      mintKeyEnv: 'TMULA_MINT_SECRET',
+      mintSubject: 'u{{.userIndex}}',
+      mintTtlSeconds: 3600,
+    })
+    expect(expAuthStrategy(spec)).toBe('mint')
+    expect(spec.credentialPool?.strategy).toBe('mint')
+    expect(spec.credentialPool?.mint?.alg).toBe('HS256')
+    expect(spec.credentialPool?.mint?.key).toEqual({ env: 'TMULA_MINT_SECRET' })
+    // Mint needs no standalone login flow.
     expect(spec.loginFlow).toBeUndefined()
   })
 
