@@ -124,3 +124,69 @@ func TestLoginExplicitCaptureWinsOverAutoDetect(t *testing.T) {
 		t.Errorf("secret = %q, want the explicitly captured token (%q)", cred.Secret, "explicit-tok")
 	}
 }
+
+// TestLoginCapturesRefreshAndExpiry confirms a login response carrying an OAuth2
+// refresh_token + expires_in folds both into the minted credential alongside the
+// access token — the data foundation a later real-refresh transport reads.
+func TestLoginCapturesRefreshAndExpiry(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "acc-tok",
+			"refresh_token": "ref-tok",
+			"expires_in":    3600,
+			"username":      "alice",
+		})
+	}))
+	defer srv.Close()
+
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, loginFlowNoCapture().Templates)
+	tokenFunc, err := NewLoginTokenFunc(runner, loginFlowNoCapture(), 1)
+	if err != nil {
+		t.Fatalf("build token func: %v", err)
+	}
+	cred, err := tokenFunc(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if cred.Secret != "acc-tok" {
+		t.Errorf("secret = %q, want %q", cred.Secret, "acc-tok")
+	}
+	if cred.Refresh != "ref-tok" {
+		t.Errorf("refresh = %q, want %q", cred.Refresh, "ref-tok")
+	}
+	if cred.ExpiresIn != 3600*time.Second {
+		t.Errorf("expiresIn = %v, want %v", cred.ExpiresIn, 3600*time.Second)
+	}
+}
+
+// TestLoginNoRefreshUnchanged is the no-behavior-change invariant: a login
+// response with NO refresh_token / expires_in mints exactly the credential it did
+// before this slice — the access token and subject are captured, and the new
+// Refresh / ExpiresIn fields stay zero.
+func TestLoginNoRefreshUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "acc-tok", "username": "alice"})
+	}))
+	defer srv.Close()
+
+	runner := load.NewRunner(load.NewRESTAdapter(2*time.Second), srv.URL, loginFlowNoCapture().Templates)
+	tokenFunc, err := NewLoginTokenFunc(runner, loginFlowNoCapture(), 1)
+	if err != nil {
+		t.Fatalf("build token func: %v", err)
+	}
+	cred, err := tokenFunc(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if cred.Secret != "acc-tok" || cred.Subject != "alice" {
+		t.Errorf("credential = %+v, want secret=acc-tok subject=alice (unchanged)", cred)
+	}
+	if cred.Refresh != "" {
+		t.Errorf("refresh = %q, want empty when the response carries none", cred.Refresh)
+	}
+	if cred.ExpiresIn != 0 {
+		t.Errorf("expiresIn = %v, want 0 when the response carries none", cred.ExpiresIn)
+	}
+}

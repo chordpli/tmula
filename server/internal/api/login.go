@@ -3,10 +3,15 @@ package api
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
+	"github.com/chordpli/tmula/server/internal/engine"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/safety"
 )
@@ -65,6 +70,10 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		// expand time (like the pool strategy), so a login pool only ever arrives here
 		// with inline entries, never an unresolved Source.
 		Entries: spec.CredentialPool.Entries,
+		// The OPTIONAL explicit refresh override (empty ⇒ auto-derive / re-login). It is
+		// threaded down so refreshTemplateFor can short-circuit the auto-derive gate.
+		RefreshRequest: spec.LoginFlow.RefreshRequest,
+		RefreshBody:    spec.LoginFlow.RefreshBody,
 	}
 	// A dedicated runner for the login flow: same adapter and base URL as the run,
 	// guarded so the login endpoint is allowlist-checked and rate-capped. It carries
@@ -75,17 +84,31 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 	if err != nil {
 		return nil, fmt.Errorf("api: compile login flow: %w", err)
 	}
-	return newLoginAuthFromToken(tokenFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared)
+	// Build the mid-run refresh transport from the login flow. An explicit override on
+	// the flow wins (refreshTemplateFor checks it first); else a real grant_type=
+	// refresh_token transport is auto-derived when the token POST is an OAuth2 form
+	// grant. When neither yields a template (a non-form login with no override),
+	// refreshFunc stays nil and Refresh falls back to re-running the login — the safe
+	// default. The refresh exchange runs through the SAME guarded runner as the login,
+	// so it obeys the same allowlist and rate cap.
+	var refreshFunc auth.RefreshTokenFunc
+	if refreshTmpl, ok := refreshTemplateFor(flow); ok {
+		refreshRunner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, map[domain.ID]domain.APITemplate{refreshTmpl.ID: refreshTmpl}, load.WithGuard(guard))
+		refreshFunc = NewRefreshTokenFunc(refreshRunner, refreshTmpl, spec.Seed)
+	}
+	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared)
 }
 
-// newLoginAuthFromToken builds a loginAuth over a token func and scope. It is the
-// single construction point for the provider, so the run path and tests build the
-// same seam.
-func newLoginAuthFromToken(token auth.TokenFunc, shared bool) (*loginAuth, error) {
+// newLoginAuthFromToken builds a loginAuth over a token func, an OPTIONAL
+// refresh-token func, and scope. It is the single construction point for the
+// provider, so the run path and tests build the same seam. A nil refresh func keeps
+// the provider's Refresh on the re-login fallback path.
+func newLoginAuthFromToken(token auth.TokenFunc, refresh auth.RefreshTokenFunc, shared bool) (*loginAuth, error) {
 	provider, err := auth.NewLoginProvider(token)
 	if err != nil {
 		return nil, fmt.Errorf("api: build login provider: %w", err)
 	}
+	provider.SetRefreshToken(refresh) // nil-safe
 	return &loginAuth{provider: provider, shared: shared}, nil
 }
 
@@ -166,4 +189,230 @@ func (l *loginAuth) Prewarm(ctx context.Context, n int) error {
 		return err
 	}
 	return l.provider.Prewarm(ctx, n)
+}
+
+// refreshTemplateFor resolves the mid-run refresh transport's request template for a
+// login flow, in precedence order:
+//
+//  1. An EXPLICIT override (flow.RefreshBody set) wins and SHORT-CIRCUITS the auto-
+//     derive gate, so even a login deriveRefreshTemplate refuses (a JSON-body login,
+//     or a form login with no grant_type) gets a real grant_type=refresh_token
+//     exchange from the operator's authored body (see buildOverrideRefreshTemplate).
+//  2. Else auto-derivation from an OAuth2 form grant (deriveRefreshTemplate).
+//  3. Else (_, false): no refresh transport — Refresh falls back to re-running the
+//     login, the safe long-standing default.
+//
+// It is the single construction point loginAuthFor reads, so the override and the
+// auto-derived template feed the SAME template→RefreshTokenFunc wiring below it.
+func refreshTemplateFor(flow LoginFlow) (domain.APITemplate, bool) {
+	if strings.TrimSpace(flow.RefreshBody) != "" || strings.TrimSpace(flow.RefreshRequest) != "" {
+		return buildOverrideRefreshTemplate(flow)
+	}
+	return deriveRefreshTemplate(flow)
+}
+
+// buildOverrideRefreshTemplate builds the refresh template from an EXPLICIT override:
+// the method/path come from flow.RefreshRequest ("METHOD /path") when set, else from
+// the login token node's endpoint (a same-endpoint refresh needs only a body); the
+// body is flow.RefreshBody. It SHORT-CIRCUITS the auto-derive gate — a JSON-body or
+// no-grant_type login still gets a refresh transport when the operator authors one.
+//
+// The override is, by convention, an OAuth2 form (x-www-form-urlencoded) refresh
+// grant, so the template is stamped with a form Content-Type regardless of the login
+// node's headers (a JSON login's headers would otherwise mis-encode the form body).
+// A bare {{.refreshToken}} in the body is routed through urlquery — the SAME convention
+// as the auto-derived body — so an opaque/base64 token stays form-safe at render time.
+// It returns (_, false) only when there is no body to send (a request-only override is
+// not enough to POST a refresh grant).
+func buildOverrideRefreshTemplate(flow LoginFlow) (domain.APITemplate, bool) {
+	body := strings.TrimSpace(flow.RefreshBody)
+	if body == "" {
+		return domain.APITemplate{}, false
+	}
+
+	// Resolve method/path: an explicit RefreshRequest wins; else default to the login
+	// token node's endpoint so a same-endpoint refresh needs only the body.
+	method, path := "", ""
+	if req := strings.TrimSpace(flow.RefreshRequest); req != "" {
+		fields := strings.Fields(req)
+		if len(fields) != 2 {
+			return domain.APITemplate{}, false // malformed — Validate rejects this earlier
+		}
+		method, path = strings.ToUpper(fields[0]), fields[1]
+	} else {
+		tokenTmpl, ok := loginTokenTemplate(flow)
+		if !ok {
+			return domain.APITemplate{}, false
+		}
+		method, path = tokenTmpl.Method, tokenTmpl.Path
+	}
+
+	return domain.APITemplate{
+		ID:       refreshNodeID,
+		Protocol: domain.ProtocolREST,
+		Method:   method,
+		Path:     path,
+		// An OAuth2 refresh grant is a form body; stamp the form Content-Type so a JSON
+		// login's headers do not mis-encode it.
+		Headers:         map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		PayloadTemplate: urlqueryRefreshToken(body),
+		Extract:         nil, // the refresh transport auto-detects; no explicit extract
+	}, true
+}
+
+// refreshTokenPlaceholderRE matches a bare {{.refreshToken}} placeholder — tolerating
+// internal whitespace ({{ .refreshToken }}) — that is NOT already piped through a
+// builtin. urlqueryRefreshToken rewrites those to {{.refreshToken | urlquery}} so an
+// override body the operator authored gets the same form-safe encoding the auto-derived
+// body uses; an already-piped {{.refreshToken | urlquery}} is left untouched.
+var refreshTokenPlaceholderRE = regexp.MustCompile(`\{\{\s*\.refreshToken\s*\}\}`)
+
+// urlqueryRefreshToken routes a bare {{.refreshToken}} in an override body through
+// text/template's urlquery builtin, matching how the auto-derived body encodes the
+// captured refresh token (url.QueryEscape at render time). It keeps an opaque/
+// standard-base64 token containing +, /, = or a space form-safe so the token endpoint's
+// url.ParseQuery decode recovers the exact original token. A body that already pipes
+// the placeholder (or does not reference it) is returned unchanged.
+func urlqueryRefreshToken(body string) string {
+	return refreshTokenPlaceholderRE.ReplaceAllString(body, "{{.refreshToken | urlquery}}")
+}
+
+// deriveRefreshTemplate derives a grant_type=refresh_token request template from a
+// login flow's token-POST template, so a mid-run refresh can exchange the captured
+// refresh token instead of re-running the (often human-consent) login. It returns
+// (_, false) — no refresh transport, Refresh re-logins — unless the token node's body
+// is application/x-www-form-urlencoded AND carries a grant_type field, the shape an
+// OAuth2 refresh grant is expressed over.
+//
+// The derived template reuses the token node's URL/method/headers, and rewrites the
+// form body: DROP grant_type/username/password/code (the password/authorization-code
+// grant inputs), KEEP client_id/client_secret/scope/audience and any other fields,
+// and PREPEND grant_type=refresh_token & refresh_token={{.refreshToken | urlquery}}
+// (the refresh transport seeds {{.refreshToken}} from the current credential; urlquery
+// keeps an opaque/base64 token form-safe).
+//
+// An explicit auth.login.refresh override (flow.RefreshBody) is threaded in AHEAD of
+// this auto-derivation by refreshTemplateFor — the override short-circuits the gate, so
+// a JSON-body or no-grant_type login can still get a refresh transport. This function
+// is the auto path: it stays the behavior when no override is authored.
+func deriveRefreshTemplate(flow LoginFlow) (domain.APITemplate, bool) {
+	tokenTmpl, ok := loginTokenTemplate(flow)
+	if !ok {
+		return domain.APITemplate{}, false
+	}
+	// GATE: only an x-www-form-urlencoded body carrying grant_type is an OAuth2 grant
+	// we can rewrite into a refresh grant.
+	if !isFormURLEncoded(tokenTmpl.Headers) {
+		return domain.APITemplate{}, false
+	}
+	form, err := url.ParseQuery(tokenTmpl.PayloadTemplate)
+	if err != nil {
+		return domain.APITemplate{}, false
+	}
+	if form.Get("grant_type") == "" {
+		return domain.APITemplate{}, false
+	}
+
+	body := rewriteToRefreshGrant(form)
+	refreshTmpl := tokenTmpl
+	refreshTmpl.ID = refreshNodeID
+	refreshTmpl.Extract = nil // the refresh transport auto-detects; no explicit extract
+	refreshTmpl.PayloadTemplate = body
+	return refreshTmpl, true
+}
+
+// loginTokenTemplate returns the login flow's token-POST template: for the common
+// single-request OAuth2 login it is the one request template; for a multi-step login
+// it is the LAST request-bearing node on the deterministic walk from flow.Start (the
+// node that actually exchanges credentials for a token). It returns (_, false) when
+// the walk reaches no request-bearing node.
+func loginTokenTemplate(flow LoginFlow) (domain.APITemplate, bool) {
+	maxSteps := flow.MaxSteps
+	if maxSteps <= 0 {
+		maxSteps = loginMaxStepsDefault
+	}
+	// A fixed seed makes the derivation deterministic; it only identifies the token
+	// node structurally and sends no traffic.
+	walker, err := engine.NewWalker(flow.Graph, 0)
+	if err != nil {
+		return domain.APITemplate{}, false
+	}
+	path, err := walker.Walk(flow.Start, maxSteps)
+	if err != nil {
+		return domain.APITemplate{}, false
+	}
+	tmplByNode := make(map[domain.ID]domain.ID, len(flow.Graph.Nodes))
+	for _, n := range flow.Graph.Nodes {
+		tmplByNode[n.ID] = n.APITemplateID
+	}
+	var found domain.APITemplate
+	var ok bool
+	for _, nodeID := range path {
+		tmplID := tmplByNode[nodeID]
+		if tmplID == "" {
+			continue // pure-state node: no request
+		}
+		if tmpl, present := flow.Templates[tmplID]; present {
+			found, ok = tmpl, true // keep walking: the LAST request-bearing node wins
+		}
+	}
+	return found, ok
+}
+
+// isFormURLEncoded reports whether the template's Content-Type header marks an
+// application/x-www-form-urlencoded body (case-insensitive on header name and value,
+// tolerating a charset parameter).
+func isFormURLEncoded(headers map[string]string) bool {
+	for k, v := range headers {
+		if strings.EqualFold(k, "Content-Type") {
+			return strings.Contains(strings.ToLower(v), "application/x-www-form-urlencoded")
+		}
+	}
+	return false
+}
+
+// refreshGrantDrop is the set of form fields a refresh grant must not carry: the
+// grant selector itself (rewritten to refresh_token) and the password/
+// authorization-code grant inputs that a refresh exchange does not use.
+var refreshGrantDrop = map[string]bool{
+	"grant_type": true,
+	"username":   true,
+	"password":   true,
+	"code":       true,
+}
+
+// rewriteToRefreshGrant rewrites a parsed login form into a refresh-grant body: it
+// PREPENDS grant_type=refresh_token & refresh_token={{.refreshToken | urlquery}}, then
+// appends every kept field (client_id/client_secret/scope/audience and any others),
+// dropping the grant selector and the password/code inputs.
+//
+// The grant_type field is emitted literally (refresh_token is already form-safe). The
+// refresh_token placeholder is routed through text/template's urlquery builtin so the
+// CAPTURED refresh token is url-encoded at render time: an opaque / standard-base64
+// token containing +, /, = or a space (which Render substitutes RAW) would otherwise
+// corrupt the x-www-form-urlencoded body. urlquery calls url.QueryEscape, matching how
+// the kept values below are encoded, so the token endpoint's url.ParseQuery decode
+// recovers the exact original token. (Scoped to the refresh body this slice; the
+// login {{.password}}/{{.username}} path is a separate follow-up.)
+func rewriteToRefreshGrant(form url.Values) string {
+	var b strings.Builder
+	b.WriteString("grant_type=refresh_token&refresh_token={{.refreshToken | urlquery}}")
+	// Deterministic order: sort the kept keys so the derived body is stable.
+	keys := make([]string, 0, len(form))
+	for k := range form {
+		if refreshGrantDrop[k] {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range form[k] {
+			b.WriteByte('&')
+			b.WriteString(url.QueryEscape(k))
+			b.WriteByte('=')
+			b.WriteString(url.QueryEscape(v))
+		}
+	}
+	return b.String()
 }
