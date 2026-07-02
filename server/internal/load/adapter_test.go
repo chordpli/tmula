@@ -2,6 +2,7 @@ package load
 
 import (
 	"context"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,6 +41,33 @@ func TestRenderMissingVariableErrors(t *testing.T) {
 	tmpl := domain.APITemplate{Method: "GET", Path: "/x/{{.missing}}"}
 	if _, err := Render(tmpl, "http://x", domain.Credential{}, nil); err == nil {
 		t.Fatal("expected error for missing template variable")
+	}
+}
+
+func TestRenderBasicAuthFunc(t *testing.T) {
+	// {{basicAuth .subject .token}} is the http-basic route: the credential row is
+	// username (subject) + password (token), encoded per RFC 7617.
+	tmpl := domain.APITemplate{
+		Method:  "GET",
+		Path:    "/private",
+		Headers: map[string]string{"Authorization": "Basic {{basicAuth .subject .token}}"},
+	}
+	cred := domain.Credential{Subject: "alice", Secret: "s3cr3t:with/odd=chars"}
+	req, err := Render(tmpl, "http://sut.local", cred, nil)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice:s3cr3t:with/odd=chars"))
+	if req.Headers["Authorization"] != want {
+		t.Errorf("Authorization = %q, want %q", req.Headers["Authorization"], want)
+	}
+}
+
+func TestTemplateFuncsCoversBasicAuth(t *testing.T) {
+	// TemplateFuncs is exported so template lint/guard helpers (e.g. the importer's
+	// assertTemplateSafe) parse with the same function set the run path renders with.
+	if _, ok := TemplateFuncs()["basicAuth"]; !ok {
+		t.Fatal("TemplateFuncs() must include basicAuth")
 	}
 }
 
