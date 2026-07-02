@@ -252,7 +252,7 @@ const en: Record<string, string> = {
     'A username,password header plus one account per row \u2014 each virtual user logs in as the next row.',
   'auth.oauth2.refreshToken': 'Refresh token',
   'auth.oauth2.refreshTokenHint':
-    'Copy it ONCE from the logged-in app or the browser devtools (Application \u2192 Storage, or the token response). tmula exchanges it for fresh access tokens for the whole run.',
+    'Copy it ONCE from the logged-in app or the browser devtools (Application \u2192 Storage, or the token response). tmula exchanges it for fresh access tokens for the whole run. It is stored in the run\u2019s spec on this control plane (like any login body).',
   'auth.oauth2.accessToken': 'Access token',
   'auth.oauth2.accessTokenHint':
     'Becomes a one-entry token pool. Access tokens expire \u2014 a long run may start failing when it does; prefer a refresh token if you have one.',
@@ -260,7 +260,7 @@ const en: Record<string, string> = {
   'auth.oauth2.clientId': 'Client ID',
   'auth.oauth2.clientIdHint': 'Sent as client_id when your IdP requires it (optional otherwise).',
   'auth.oauth2.clientSecret': 'Client secret',
-  'auth.oauth2.clientSecretHint': 'Sent as client_secret \u2014 required for server-to-server, sometimes for refresh.',
+  'auth.oauth2.clientSecretHint': 'Sent as client_secret \u2014 required for server-to-server, sometimes for refresh. Stored in the run\u2019s spec on this control plane (like any login body); prefer a throwaway test client.',
   'auth.oauth2.scope': 'Scope (optional)',
   'auth.oauth2.scopeHint': 'Space-separated scopes, sent as scope when set.',
   'auth.oauth2.advanced': 'Generated login flow (JSON)',
@@ -838,7 +838,7 @@ const ko: Record<string, string> = {
   'auth.oauth2.usersHint': 'username,password 헤더와 행마다 계정 하나 \u2014 가상 사용자마다 다음 행으로 로그인합니다.',
   'auth.oauth2.refreshToken': 'Refresh token',
   'auth.oauth2.refreshTokenHint':
-    '로그인된 앱이나 브라우저 개발자도구(Application \u2192 Storage, 또는 토큰 응답)에서 한 번만 복사하세요. tmula가 실행 내내 새 access token으로 교환합니다.',
+    '로그인된 앱이나 브라우저 개발자도구(Application \u2192 Storage, 또는 토큰 응답)에서 한 번만 복사하세요. tmula가 실행 내내 새 access token으로 교환합니다. 다른 로그인 본문과 마찬가지로 이 컨트롤 플레인의 실행 spec에 저장됩니다.',
   'auth.oauth2.accessToken': 'Access token',
   'auth.oauth2.accessTokenHint':
     '항목 1개짜리 토큰 풀이 됩니다. access token은 만료됩니다 \u2014 긴 실행은 만료 시점부터 실패할 수 있으니, refresh token이 있다면 그쪽을 쓰세요.',
@@ -846,7 +846,7 @@ const ko: Record<string, string> = {
   'auth.oauth2.clientId': 'Client ID',
   'auth.oauth2.clientIdHint': 'IdP가 요구하면 client_id로 전송됩니다(그 외에는 선택).',
   'auth.oauth2.clientSecret': 'Client secret',
-  'auth.oauth2.clientSecretHint': 'client_secret으로 전송됩니다 \u2014 서버 간 통신에는 필수, refresh에도 필요할 수 있습니다.',
+  'auth.oauth2.clientSecretHint': 'client_secret으로 전송됩니다 \u2014 서버 간 통신에는 필수, refresh에도 필요할 수 있습니다. 다른 로그인 본문과 마찬가지로 이 컨트롤 플레인의 실행 spec에 저장되니, 일회용 테스트 클라이언트를 권장합니다.',
   'auth.oauth2.scope': 'Scope (선택)',
   'auth.oauth2.scopeHint': '공백으로 구분한 scope 목록입니다. 입력하면 scope로 전송됩니다.',
   'auth.oauth2.advanced': '생성된 로그인 흐름 (JSON)',
