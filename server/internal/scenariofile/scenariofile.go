@@ -88,6 +88,10 @@ type Scenario struct {
 	// (a domain.SignupFlow) without making it the run's auth. It carries no secret —
 	// the token is captured from the live signup response. Omit it for no suggestion.
 	SuggestedSignup *AuthSignup `json:"suggestedSignup,omitempty"`
+	// AuthAdvisories are import-time hints about the document's auth the importer
+	// could not act on (managed-IdP mint footgun, openIdConnect discovery pointer).
+	// Expand carries them onto the spec verbatim; the run path never reads them.
+	AuthAdvisories []domain.AuthAdvisory `json:"authAdvisories,omitempty"`
 	// Metrics, when set, correlates the run with server-side Prometheus series:
 	// each named query is fetched over the run's window and shown in the report
 	// beside the client-side stats. The Prometheus host must be allowlisted.
@@ -573,6 +577,12 @@ func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, er
 			return runspec.RunSpec{}, err
 		}
 		spec.SuggestedSignup = flow
+	}
+
+	// Auth advisories are advisory-only import hints; carry them verbatim so the
+	// /import response can surface them.
+	if len(s.AuthAdvisories) > 0 {
+		spec.AuthAdvisories = append([]domain.AuthAdvisory(nil), s.AuthAdvisories...)
 	}
 
 	if s.Metrics != nil {

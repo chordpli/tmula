@@ -5,6 +5,7 @@ import (
 	"testing"
 	"text/template"
 
+	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
@@ -502,4 +503,104 @@ paths:
 	if get != nil {
 		assertTemplateSafe(t, "cookie apiKey header", get.Headers["Cookie"])
 	}
+}
+
+// TestSecurityOpenIDConnectAdvisory: an openIdConnect scheme yields no derivable
+// auth (the importer stays offline — no discovery fetch), but the import carries
+// advisories pointing the operator at the OAuth2 route (the discovery URL names
+// the token_endpoint) and warning that mint cannot sign for a managed IdP.
+func TestSecurityOpenIDConnectAdvisory(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://idp.example.com/.well-known/openid-configuration
+security:
+  - oidc: []
+paths:
+  /items:
+    get:
+      operationId: listItems
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	if s.Auth != nil {
+		t.Errorf("openIdConnect must not derive auth offline, got %+v", s.Auth)
+	}
+	if !hasAdvisory(s.AuthAdvisories, "openidconnect-discovery", "https://idp.example.com/.well-known/openid-configuration") {
+		t.Errorf("advisories = %+v, want openidconnect-discovery with the discovery URL", s.AuthAdvisories)
+	}
+	if !hasAdvisory(s.AuthAdvisories, "mint-managed-idp", "idp.example.com") {
+		t.Errorf("advisories = %+v, want mint-managed-idp with the IdP host", s.AuthAdvisories)
+	}
+}
+
+// TestSecurityMintManagedIdPAdvisory: an oauth2 tokenUrl pointing at a managed
+// identity provider (whose signing key the operator does not hold) emits the
+// mint-managed-idp advisory; a relative or self-hosted tokenUrl does not.
+func TestSecurityMintManagedIdPAdvisory(t *testing.T) {
+	cases := []struct {
+		name     string
+		tokenURL string
+		host     string // "" = no advisory expected
+	}{
+		{"auth0", "https://tenant.auth0.com/oauth/token", "tenant.auth0.com"},
+		{"cognito", "https://cognito-idp.us-east-1.amazonaws.com/token", "cognito-idp.us-east-1.amazonaws.com"},
+		{"firebase", "https://securetoken.google.com/v1/token", "securetoken.google.com"},
+		{"okta", "https://dev-1.okta.com/oauth2/v1/token", "dev-1.okta.com"},
+		{"relative", "/oauth/token", ""},
+		{"self-hosted", "https://auth.mycompany.com/oauth/token", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+components:
+  securitySchemes:
+    oauth:
+      type: oauth2
+      flows:
+        password:
+          tokenUrl: ` + tc.tokenURL + `
+security:
+  - oauth: []
+paths:
+  /items:
+    get:
+      operationId: listItems
+`
+			s, err := FromOpenAPI([]byte(doc))
+			if err != nil {
+				t.Fatalf("FromOpenAPI: %v", err)
+			}
+			got := ""
+			for _, a := range s.AuthAdvisories {
+				if a.Code == "mint-managed-idp" {
+					got = a.Detail
+				}
+			}
+			if got != tc.host {
+				t.Errorf("mint-managed-idp detail = %q, want %q (advisories %+v)", got, tc.host, s.AuthAdvisories)
+			}
+		})
+	}
+}
+
+// hasAdvisory reports whether the list carries an advisory with the given code
+// and detail.
+func hasAdvisory(advisories []domain.AuthAdvisory, code, detail string) bool {
+	for _, a := range advisories {
+		if a.Code == code && a.Detail == detail {
+			return true
+		}
+	}
+	return false
 }

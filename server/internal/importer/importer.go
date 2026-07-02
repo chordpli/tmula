@@ -92,6 +92,10 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 	if derived != nil {
 		sc.Auth = derived.auth
 	}
+	// Advisories cover auth the importer cannot act on (managed-IdP mint footgun,
+	// openIdConnect discovery pointer) across ALL declared schemes, independent of
+	// which one (if any) was derivable above.
+	sc.AuthAdvisories = deriveAuthAdvisories(doc.parseSecuritySchemes())
 	// Offer a signup suggestion when a register/signup operation exists, independent
 	// of the primary auth above (a login may be the primary auth while a signup is
 	// suggested separately). Best-effort: no register op yields no suggestion, so a

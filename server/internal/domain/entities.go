@@ -164,6 +164,19 @@ func (c Credential) String() string {
 	return b.String()
 }
 
+// AuthAdvisory is an import-time hint about the document's auth that the
+// importer could not (or must not) act on itself — e.g. "mint-managed-idp"
+// (the security scheme points at a managed IdP whose signing key the operator
+// does not hold, so the mint strategy cannot work) or "openidconnect-discovery"
+// (the scheme is openIdConnect; the discovery URL names the token_endpoint for
+// the OAuth2 route). Code is a stable machine key the UI translates; Detail is
+// the code-specific parameter (the IdP host, the discovery URL). Advisory only:
+// the run path never reads it.
+type AuthAdvisory struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // CredentialSourceRef is a non-secret pointer to an external credential pool: a
 // file path (relative to the scenario document) or an environment variable, plus
 // the format its body is encoded in. It carries no secret field by design, so a

@@ -232,3 +232,42 @@ func TestHandleImportNeverLeaksSecret(t *testing.T) {
 		t.Errorf("import response dropped the non-sensitive subject; the pool should still surface: %s", body)
 	}
 }
+
+// TestHandleImportReturnsAuthAdvisories asserts the /import response surfaces
+// the importer's auth advisories (managed-IdP mint footgun, openIdConnect
+// discovery pointer) so the UI can warn before the operator picks a strategy
+// that cannot work.
+func TestHandleImportReturnsAuthAdvisories(t *testing.T) {
+	spec := loginPoolSpec()
+	spec.AuthAdvisories = []domain.AuthAdvisory{
+		{Code: "mint-managed-idp", Detail: "tenant.auth0.com"},
+		{Code: "openidconnect-discovery", Detail: "https://idp/.well-known/openid-configuration"},
+	}
+	stub := func([]byte, string) (RunSpec, error) { return spec, nil }
+	ts := httptest.NewServer(NewServer(load.NewRESTAdapter(time.Second), WithImporter(stub)).Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/import", "text/plain", strings.NewReader(`{"openapi":"3.0.0"}`))
+	if err != nil {
+		t.Fatalf("POST /import: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body %s", resp.StatusCode, body)
+	}
+	var got struct {
+		AuthAdvisories []struct {
+			Code   string `json:"code"`
+			Detail string `json:"detail"`
+		} `json:"authAdvisories"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got.AuthAdvisories) != 2 ||
+		got.AuthAdvisories[0].Code != "mint-managed-idp" ||
+		got.AuthAdvisories[0].Detail != "tenant.auth0.com" {
+		t.Errorf("authAdvisories = %+v, want the spec's two advisories", got.AuthAdvisories)
+	}
+}

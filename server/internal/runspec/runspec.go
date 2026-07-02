@@ -105,6 +105,12 @@ type RunSpec struct {
 	// the token is captured at run time from the live signup response.
 	SuggestedSignup *domain.SignupFlow `json:"suggestedSignup,omitempty"`
 
+	// AuthAdvisories are import-time hints about the document's auth the importer
+	// could not act on (managed-IdP mint footgun, openIdConnect discovery pointer),
+	// surfaced by the /import response so the UI can warn before the operator picks
+	// a strategy that cannot work. Advisory only: the run path never reads them.
+	AuthAdvisories []domain.AuthAdvisory `json:"authAdvisories,omitempty"`
+
 	// id is internal run-bookkeeping: the run identifier the control plane assigns
 	// after creation (see SetID). It is never serialized and never read back out
 	// of the spec by the run path.
