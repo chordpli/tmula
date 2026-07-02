@@ -271,3 +271,65 @@ func TestMintProviderRS256VerifiesWithPublicKey(t *testing.T) {
 		t.Errorf("sub = %v, want u7", claims["sub"])
 	}
 }
+
+// TestMintProviderReservedClaimOverridesAreNumbers pins the JSON type of an
+// operator-overridden reserved time claim: RFC 7519 NumericDate claims (exp, nbf,
+// iat) authored as custom claim templates must serialize as JSON numbers — a
+// string "1735689600" would be rejected by real verifiers. Non-reserved custom
+// claims stay strings.
+func TestMintProviderReservedClaimOverridesAreNumbers(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	spec := domain.MintSpec{
+		Alg:            domain.MintHS256,
+		SecretEncoding: domain.MintEncodingRaw,
+		Subject:        "user-{{.userIndex}}",
+		Claims: map[string]string{
+			"exp":  "1735689600",
+			"nbf":  "1735689000",
+			"iat":  "1735689300",
+			"role": "tester",
+		},
+		TTL: time.Hour,
+	}
+	p, err := NewMintProvider(spec, []byte("symmetric-secret"), func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("NewMintProvider: %v", err)
+	}
+	cred, err := p.Acquire(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	claims := decodeClaims(t, cred.Secret)
+	for name, want := range map[string]int64{"exp": 1735689600, "nbf": 1735689000, "iat": 1735689300} {
+		got, ok := claims[name].(float64)
+		if !ok {
+			t.Errorf("%s claim = %v (%T), want a JSON number", name, claims[name], claims[name])
+			continue
+		}
+		if int64(got) != want {
+			t.Errorf("%s = %d, want %d", name, int64(got), want)
+		}
+	}
+	if claims["role"] != "tester" {
+		t.Errorf("role claim = %v, want the string \"tester\" (non-reserved claims stay strings)", claims["role"])
+	}
+}
+
+// TestMintProviderReservedClaimNotANumberErrors: a reserved time claim that does
+// not render to a whole number fails loudly instead of signing a token real
+// verifiers will reject.
+func TestMintProviderReservedClaimNotANumberErrors(t *testing.T) {
+	spec := domain.MintSpec{
+		Alg:            domain.MintHS256,
+		SecretEncoding: domain.MintEncodingRaw,
+		Claims:         map[string]string{"exp": "tomorrow"},
+		TTL:            time.Hour,
+	}
+	p, err := NewMintProvider(spec, []byte("symmetric-secret"), nil)
+	if err != nil {
+		t.Fatalf("NewMintProvider: %v", err)
+	}
+	if _, err := p.Acquire(context.Background(), 0); err == nil || !strings.Contains(err.Error(), "exp") {
+		t.Fatalf("Acquire = %v, want an error naming the exp claim", err)
+	}
+}
