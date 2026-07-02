@@ -12,6 +12,7 @@ import (
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
+	"github.com/chordpli/tmula/server/internal/runspec"
 	"github.com/chordpli/tmula/server/internal/safety"
 )
 
@@ -362,5 +363,97 @@ func TestLoginTokenFuncGuardRejects(t *testing.T) {
 	_, err = tf(context.Background(), 0)
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "allow") {
 		t.Fatalf("off-allowlist login should be refused by the guard, got %v", err)
+	}
+}
+
+// TestURLQueryLoginFormTemplates pins the rewrite rule: a form-urlencoded login
+// template's bare credential-row placeholders ({{.username}}/{{.password}} and
+// the {{.subject}}/{{.secret}} aliases) are piped through urlquery so a password
+// carrying &, =, + or a space stays form-safe; an already-piped placeholder and a
+// non-form (JSON) template are left byte-identical.
+func TestURLQueryLoginFormTemplates(t *testing.T) {
+	form := domain.APITemplate{
+		ID:              "t",
+		Method:          "POST",
+		Path:            "/oauth/token",
+		Headers:         map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+		PayloadTemplate: "grant_type=password&username={{.username}}&password={{ .password }}&client_secret={{.password | urlquery}}",
+	}
+	jsonTmpl := domain.APITemplate{
+		ID:              "j",
+		Method:          "POST",
+		Path:            "/login",
+		PayloadTemplate: `{"u":"{{.username}}","p":"{{.password}}"}`,
+	}
+	got := urlqueryFormLoginTemplates(map[domain.ID]domain.APITemplate{"t": form, "j": jsonTmpl})
+	want := "grant_type=password&username={{.username | urlquery}}&password={{.password | urlquery}}&client_secret={{.password | urlquery}}"
+	if got["t"].PayloadTemplate != want {
+		t.Errorf("form body = %q, want %q", got["t"].PayloadTemplate, want)
+	}
+	if got["j"].PayloadTemplate != jsonTmpl.PayloadTemplate {
+		t.Errorf("JSON body must stay byte-identical, got %q", got["j"].PayloadTemplate)
+	}
+	// The input map must not be mutated (the spec's templates are shared).
+	if form.PayloadTemplate != "grant_type=password&username={{.username}}&password={{ .password }}&client_secret={{.password | urlquery}}" {
+		t.Errorf("input template mutated: %q", form.PayloadTemplate)
+	}
+}
+
+// TestLoginAuthFormBodyEncodesSpecialCharPassword drives the real login path:
+// a credential row whose password carries &, =, + and a space must arrive at the
+// IdP byte-exact after the form decode — the run-path proof that loginAuthFor
+// pipes bare row placeholders through urlquery for form bodies.
+func TestLoginAuthFormBodyEncodesSpecialCharPassword(t *testing.T) {
+	const rawPassword = "p@ss&word=1+2 3"
+	var gotUser, gotPass string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotUser = r.PostFormValue("username")
+		gotPass = r.PostFormValue("password")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "tok-1"})
+	}))
+	defer srv.Close()
+
+	flowID := domain.ID("login")
+	spec := RunSpec{
+		TargetEnv: domain.TargetEnv{BaseURL: srv.URL},
+		Seed:      1,
+		CredentialPool: &domain.CredentialPool{
+			ID:          "p",
+			Strategy:    domain.CredLogin,
+			LoginFlowID: &flowID,
+			Entries:     []domain.Credential{{Subject: "alice", Secret: rawPassword}},
+		},
+		LoginFlow: &runspec.LoginFlowSpec{
+			Graph: domain.ScenarioGraph{ID: "login", Nodes: []domain.Node{{ID: "login", APITemplateID: "t"}}},
+			Templates: map[domain.ID]domain.APITemplate{"t": {
+				ID:              "t",
+				Method:          "POST",
+				Path:            "/oauth/token",
+				Headers:         map[string]string{"Content-Type": "application/x-www-form-urlencoded"},
+				PayloadTemplate: "grant_type=password&username={{.username}}&password={{.password}}",
+			}},
+			Start:    "login",
+			MaxSteps: 2,
+		},
+	}
+	s := NewServer(load.NewRESTAdapter(2 * time.Second))
+	la, err := s.loginAuthFor(spec, guardFor(t, srv.URL))
+	if err != nil {
+		t.Fatalf("loginAuthFor: %v", err)
+	}
+	cred, err := la.provider.Acquire(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if cred.Secret != "tok-1" {
+		t.Errorf("minted secret = %q, want tok-1", cred.Secret)
+	}
+	if gotUser != "alice" {
+		t.Errorf("IdP saw username %q, want alice", gotUser)
+	}
+	if gotPass != rawPassword {
+		t.Errorf("IdP saw password %q, want %q byte-exact (urlquery must round-trip specials)", gotPass, rawPassword)
 	}
 }

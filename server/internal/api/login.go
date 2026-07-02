@@ -55,8 +55,13 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		return nil, fmt.Errorf("api: login run has no login flow to mint tokens from")
 	}
 	flow := LoginFlow{
-		Graph:      spec.LoginFlow.Graph,
-		Templates:  spec.LoginFlow.Templates,
+		Graph: spec.LoginFlow.Graph,
+		// Form-urlencoded login bodies get their bare credential-row placeholders
+		// ({{.username}}/{{.password}} and aliases) piped through urlquery, so a
+		// password carrying &, =, + or a space survives the form decode byte-exact.
+		// Same convention as the refresh body (urlqueryRefreshToken); JSON bodies
+		// are untouched (raw substitution is correct there).
+		Templates:  urlqueryFormLoginTemplates(spec.LoginFlow.Templates),
 		Start:      spec.LoginFlow.Start,
 		MaxSteps:   spec.LoginFlow.MaxSteps,
 		TokenVar:   spec.LoginFlow.TokenVar,
@@ -275,6 +280,29 @@ var refreshTokenPlaceholderRE = regexp.MustCompile(`\{\{\s*\.refreshToken\s*\}\}
 // the placeholder (or does not reference it) is returned unchanged.
 func urlqueryRefreshToken(body string) string {
 	return refreshTokenPlaceholderRE.ReplaceAllString(body, "{{.refreshToken | urlquery}}")
+}
+
+// loginRowPlaceholderRE matches a bare credential-row placeholder — {{.username}},
+// {{.password}}, or the {{.subject}}/{{.secret}} aliases, tolerating internal
+// whitespace — that is NOT already piped through a builtin. The capture group is
+// the variable name, re-emitted with the urlquery pipe.
+var loginRowPlaceholderRE = regexp.MustCompile(`\{\{\s*\.(username|password|subject|secret)\s*\}\}`)
+
+// urlqueryFormLoginTemplates returns a copy of a login flow's templates with every
+// form-urlencoded body's bare credential-row placeholders piped through urlquery —
+// the same convention urlqueryRefreshToken applies to the refresh body — so a
+// password carrying &, =, + or a space survives the form decode byte-exact.
+// Non-form (JSON) templates are left byte-identical: raw substitution is correct
+// there. The input map is never mutated (the spec's templates are shared).
+func urlqueryFormLoginTemplates(templates map[domain.ID]domain.APITemplate) map[domain.ID]domain.APITemplate {
+	out := make(map[domain.ID]domain.APITemplate, len(templates))
+	for id, tmpl := range templates {
+		if isFormURLEncoded(tmpl.Headers) && tmpl.PayloadTemplate != "" {
+			tmpl.PayloadTemplate = loginRowPlaceholderRE.ReplaceAllString(tmpl.PayloadTemplate, "{{.$1 | urlquery}}")
+		}
+		out[id] = tmpl
+	}
+	return out
 }
 
 // deriveRefreshTemplate derives a grant_type=refresh_token request template from a
