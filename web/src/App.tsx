@@ -43,6 +43,12 @@ import {
   type Report,
   type Stats,
 } from './api'
+import {
+  ADVANCED_AUTH_MODES,
+  isAdvancedAuthMode,
+  PRIMARY_AUTH_MODES,
+  type AuthEntryOption,
+} from './authEntryModel'
 import GraphEditor from './GraphEditor'
 import { parseEditableGraph } from './graphEditorModel'
 import HelpTip from './HelpTip'
@@ -1172,20 +1178,39 @@ function ImportPanel({
   )
 }
 
-// AUTH_MODES is the ordered set of auth strategies the card offers, REORDERED by effort
-// (easiest first) so a normal developer reaches for the simplest viable option: None
-// (anonymous) → Account list (paste one bearer token or a small pool — the easiest real
-// auth) → Login (auto/simple — mint a token from a login form) → Create accounts (the
-// advanced, gated path that provisions real accounts). Each maps onto a radio in the
-// segmented selector and an i18n label/description.
-const AUTH_MODES: { mode: AuthMode; labelKey: string; descKey: string }[] = [
-  { mode: 'none', labelKey: 'auth.mode.none', descKey: 'auth.mode.none.desc' },
-  { mode: 'pool', labelKey: 'auth.mode.pool', descKey: 'auth.mode.pool.desc' },
-  { mode: 'login', labelKey: 'auth.mode.login', descKey: 'auth.mode.login.desc' },
-  { mode: 'bootstrap', labelKey: 'auth.mode.bootstrap', descKey: 'auth.mode.bootstrap.desc' },
-  { mode: 'mint', labelKey: 'auth.mode.mint', descKey: 'auth.mode.mint.desc' },
-  { mode: 'exec', labelKey: 'auth.mode.exec', descKey: 'auth.mode.exec.desc' },
-]
+// AuthModeRadios renders one radio group's worth of auth strategy options. The
+// grouping itself (which modes are entry points, which fold behind Advanced)
+// lives in authEntryModel — presentation only, the wire values are untouched.
+function AuthModeRadios({
+  options,
+  form,
+  set,
+}: {
+  options: AuthEntryOption[]
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <div className="authmodes" role="radiogroup" aria-label={t('card.auth')}>
+      {options.map(({ mode, labelKey, descKey }) => (
+        <label key={mode} className={`authmode${form.authMode === mode ? ' authmode--on' : ''}`}>
+          <input
+            className="authmode__radio"
+            type="radio"
+            name="authMode"
+            checked={form.authMode === mode}
+            onChange={() => set('authMode', mode)}
+          />
+          <span className="authmode__body">
+            <span className="authmode__label">{t(labelKey)}</span>
+            <span className="authmode__desc">{t(descKey)}</span>
+          </span>
+        </label>
+      ))}
+    </div>
+  )
+}
 
 // AuthCard is the Auth section (P5 / P7): it picks how the simulated traffic
 // authenticates and authors the chosen strategy's material. None (the default) attaches
@@ -1249,23 +1274,21 @@ function AuthCard({
           </div>
         )}
 
-        <div className="authmodes" role="radiogroup" aria-label={t('card.auth')}>
-          {AUTH_MODES.map(({ mode, labelKey, descKey }) => (
-            <label key={mode} className={`authmode${form.authMode === mode ? ' authmode--on' : ''}`}>
-              <input
-                className="authmode__radio"
-                type="radio"
-                name="authMode"
-                checked={form.authMode === mode}
-                onChange={() => set('authMode', mode)}
-              />
-              <span className="authmode__body">
-                <span className="authmode__label">{t(labelKey)}</span>
-                <span className="authmode__desc">{t(descKey)}</span>
-              </span>
-            </label>
-          ))}
-        </div>
+        <AuthModeRadios options={PRIMARY_AUTH_MODES} form={form} set={set} />
+
+        {/* Expert strategies fold behind Advanced (auto-open when one is selected,
+            e.g. a round-tripped exec/mint spec): a normal operator never needs mint
+            or exec, and surfacing them beside the entry points invited the
+            managed-IdP mint footgun. */}
+        <details className="advanced" open={isAdvancedAuthMode(form.authMode)}>
+          <summary className="advanced__summary">
+            {t('auth.advanced.modes')}
+            <span className="field__badge">{t('badge.advanced')}</span>
+          </summary>
+          <div className="stack advanced__body" style={{ gap: 16 }}>
+            <AuthModeRadios options={ADVANCED_AUTH_MODES} form={form} set={set} />
+          </div>
+        </details>
 
         {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
 

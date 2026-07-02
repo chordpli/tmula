@@ -209,9 +209,9 @@ const en: Record<string, string> = {
     'How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts.',
   'auth.mode.none': 'None',
   'auth.mode.none.desc': 'Run anonymously — no credentials are sent.',
-  'auth.mode.pool': 'Paste a token / account list',
-  'auth.mode.pool.desc': 'Easiest. Paste one bearer token, or a list of pre-issued tokens — one per user.',
-  'auth.mode.login': 'Login (auto / simple)',
+  'auth.mode.pool': 'I already have tokens',
+  'auth.mode.pool.desc': 'Easiest. Paste one bearer token or API key, or a list of pre-issued tokens — one per user.',
+  'auth.mode.login': 'Log in to get tokens',
   'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
@@ -221,6 +221,9 @@ const en: Record<string, string> = {
   'auth.mode.exec': 'Run a command for the token (escape hatch)',
   'auth.mode.exec.desc':
     'Last resort. Run your own local command per user and read the token from its stdout — for auth no other strategy can model. Gated, runs locally.',
+
+  // Auth · the Advanced fold hiding the expert strategies (mint / exec)
+  'auth.advanced.modes': 'More ways to authenticate (expert)',
 
   // Auth · imported (P7) — success banner shown when an import auto-detects auth
   'auth.imported.login': 'Imported — your login flow is ready. Review it below, or just start the run.',
@@ -749,18 +752,21 @@ const ko: Record<string, string> = {
     '시뮬레이션 트래픽이 인증하는 방식입니다. 끄면 익명으로 실행하고, 토큰 풀을 제공하거나, 로그인 흐름으로 토큰을 발급받거나, 일회용 계정을 생성할 수 있습니다.',
   'auth.mode.none': '없음',
   'auth.mode.none.desc': '익명으로 실행 — 자격 증명을 보내지 않습니다.',
-  'auth.mode.pool': '토큰 풀',
-  'auth.mode.pool.desc': '미리 발급한 토큰을 붙여넣거나 업로드합니다. 사용자마다 하나씩 배정됩니다.',
-  'auth.mode.login': '로그인 (토큰 발급)',
-  'auth.mode.login.desc': '로그인 흐름을 한 번 실행해 응답에서 토큰을 캡처합니다.',
-  'auth.mode.bootstrap': '테스트 계정 생성',
-  'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다.',
+  'auth.mode.pool': '이미 토큰이 있어요',
+  'auth.mode.pool.desc': '가장 쉬운 길. bearer 토큰이나 API 키 하나, 또는 미리 발급한 토큰 목록을 붙여넣거나 업로드합니다 — 사용자마다 하나씩 배정됩니다.',
+  'auth.mode.login': '로그인해서 토큰을 받아요',
+  'auth.mode.login.desc': '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다.',
+  'auth.mode.bootstrap': '계정을 만들어서 테스트해요',
+  'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다. 비프로덕션 전용, 확인 게이트가 있습니다.',
   'auth.mode.mint': '토큰을 로컬에서 서명(자체 발급 JWT)',
   'auth.mode.mint.desc':
     '토큰이 자체 발급 JWT이고 서명 키를 직접 보유한 서비스용입니다. tmula가 사용자마다 JWT를 새로 서명합니다 — 로그인이 없습니다. Auth0/Cognito/Firebase에는 사용할 수 없습니다.',
   'auth.mode.exec': '명령으로 토큰 가져오기(탈출구)',
   'auth.mode.exec.desc':
     '최후의 수단입니다. 사용자마다 직접 만든 로컬 명령을 실행해 stdout에서 토큰을 읽습니다 — 다른 전략으로 표현할 수 없는 인증용입니다. 게이트가 걸려 있고, 로컬에서 실행됩니다.',
+
+  // Auth · 전문가 전략(mint / exec)을 감추는 Advanced 접힘
+  'auth.advanced.modes': '다른 인증 방법 (전문가)',
 
   // Auth · imported (P7) — 가져오기가 인증을 자동 감지했을 때 표시되는 성공 배너
   'auth.imported.login': '가져왔습니다 — 로그인 흐름이 준비됐습니다. 아래에서 확인하거나 바로 실행하세요.',
