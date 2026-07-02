@@ -349,6 +349,12 @@ const en: Record<string, string> = {
   'auth.bootstrap.teardownStart': 'Teardown start step',
   'auth.bootstrap.teardownStartHint': 'Optional teardown entry step (defaults to the first).',
 
+  // Auth · mint advisory (import detected a managed IdP — mint cannot work there)
+  'auth.advisory.mintManagedIdp':
+    'This service\u2019s tokens are issued by {host}, a managed identity provider that holds the signing key \u2014 a locally minted (self-issued) token will be rejected. Use the OAuth2 mode instead.',
+  'auth.advisory.mintManagedIdp.generic':
+    'This service\u2019s tokens are issued by a managed identity provider that holds the signing key \u2014 a locally minted (self-issued) token will be rejected. Use the OAuth2 mode instead.',
+
   // Auth · mint (local JWT signing, M1)
   'auth.mint.lead':
     'tmula signs a fresh JWT for each virtual user locally — no login, no token capture. Use this ONLY when the target self-issues JWTs and you hold the signing key. It cannot sign for a key you do not control (Auth0/Cognito/Firebase) — use Login for those.',
@@ -882,6 +888,12 @@ const ko: Record<string, string> = {
   'auth.bootstrap.teardownHint': '각 계정을 삭제하는 단계의 JSON 배열입니다. {{.subject}}는 계정 id입니다.',
   'auth.bootstrap.teardownStart': '정리 시작 단계',
   'auth.bootstrap.teardownStartHint': '선택 정리 진입 단계입니다(기본값: 첫 단계).',
+
+  // Auth · mint 경고 (임포트가 관리형 IdP를 감지 — mint가 동작할 수 없는 대상)
+  'auth.advisory.mintManagedIdp':
+    '이 서비스의 토큰은 서명 키를 보유한 관리형 IdP({host})가 발급합니다 \u2014 로컬에서 서명(mint)한 토큰은 거부됩니다. OAuth2 모드를 사용하세요.',
+  'auth.advisory.mintManagedIdp.generic':
+    '이 서비스의 토큰은 서명 키를 보유한 관리형 IdP가 발급합니다 \u2014 로컬에서 서명(mint)한 토큰은 거부됩니다. OAuth2 모드를 사용하세요.',
 
   // Auth · mint (로컬 JWT 서명, M1)
   'auth.mint.lead':

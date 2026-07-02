@@ -16,6 +16,7 @@ import {
   importScenario,
   killRun,
   MAX_TRACE_USERS,
+  mintManagedIdPAdvisory,
   parseAllowlist,
   parseCredentials,
   parseLoginCredentials,
@@ -28,6 +29,7 @@ import {
   startRun,
   streamURL,
   traceable,
+  type AuthAdvisory,
   type AuthMode,
   type CredFormat,
   type ExperimentForm,
@@ -183,6 +185,11 @@ function Operator() {
   // derived auth. The value is the mode that was auto-filled, so the banner copy can
   // name it; '' means nothing was auto-detected.
   const [authImported, setAuthImported] = useState<'' | AuthMode>('')
+  // authAdvisories carries the last import's auth hints (managed-IdP mint footgun,
+  // openIdConnect discovery pointer). Unlike authImported it survives a manual mode
+  // change: the warning is about the TARGET service, not about what was auto-filled,
+  // so it stays relevant until another import replaces it.
+  const [authAdvisories, setAuthAdvisories] = useState<AuthAdvisory[]>([])
   // history is the ids of completed runs, in order, so a finished run can be
   // compared against the one before it.
   const [history, setHistory] = useState<string[]>([])
@@ -325,6 +332,7 @@ function Operator() {
   // it off), so create-accounts still requires an explicit confirmation before a run.
   function applyImport(result: ImportResult) {
     applyScenario(result)
+    setAuthAdvisories(result.authAdvisories ?? [])
     const authPatch = authFormFromImport(result)
     if (authPatch.authMode && authPatch.authMode !== 'none') {
       setForm((f) => ({ ...f, ...authPatch }))
@@ -762,7 +770,7 @@ function Operator() {
         </section>
 
         {/* ---- Auth (P5 / P7) ---- */}
-        <AuthCard form={form} set={set} imported={authImported} />
+        <AuthCard form={form} set={set} imported={authImported} advisories={authAdvisories} />
 
         {/* ---- Run ---- */}
         <section className="card">
@@ -1195,12 +1203,18 @@ function AuthCard({
   form,
   set,
   imported,
+  advisories,
 }: {
   form: ExperimentForm
   set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
   imported: '' | AuthMode
+  advisories: AuthAdvisory[]
 }) {
   const { t } = useI18n()
+  // The managed-IdP mint footgun: when the imported spec's token issuer holds the
+  // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
+  // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
+  const mintAdvisory = mintManagedIdPAdvisory(advisories)
   // Surface every REPLACE_ME_* placeholder the active flow's body still carries as a
   // highlighted input the operator must fill — so after an auto-detected import the ONLY
   // thing left is the secret. Only the relevant mode's body is scanned.
@@ -1258,7 +1272,21 @@ function AuthCard({
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
         {form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
         {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
-        {form.authMode === 'mint' && <AuthMintFields form={form} set={set} />}
+        {form.authMode === 'mint' && (
+          <>
+            {mintAdvisory && (
+              <div className="authpanel__warn" role="alert">
+                <AlertIcon />
+                <span>
+                  {mintAdvisory.detail
+                    ? t('auth.advisory.mintManagedIdp', { host: mintAdvisory.detail })
+                    : t('auth.advisory.mintManagedIdp.generic')}
+                </span>
+              </div>
+            )}
+            <AuthMintFields form={form} set={set} />
+          </>
+        )}
         {form.authMode === 'exec' && <AuthExecFields form={form} set={set} />}
       </div>
     </section>

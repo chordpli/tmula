@@ -27,6 +27,7 @@ import {
   heatWidth,
   hostFromBaseUrl,
   importScenario,
+  mintManagedIdPAdvisory,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
   latencyCellColor,
@@ -2106,5 +2107,21 @@ describe('buildAuth simple login path', () => {
     const g = build!.loginFlow!.graph as { nodes: { id: string }[] }
     expect(g.nodes).toHaveLength(1)
     expect(build!.loginFlow!.tokenVar).toBeUndefined() // auto-detect
+  })
+})
+
+describe('mintManagedIdPAdvisory', () => {
+  it('returns the mint-managed-idp advisory when the import carries one', () => {
+    const adv = mintManagedIdPAdvisory([
+      { code: 'openidconnect-discovery', detail: 'https://idp/.well-known/openid-configuration' },
+      { code: 'mint-managed-idp', detail: 'tenant.auth0.com' },
+    ])
+    expect(adv).toEqual({ code: 'mint-managed-idp', detail: 'tenant.auth0.com' })
+  })
+
+  it('returns null for no advisories, an empty list, or other codes', () => {
+    expect(mintManagedIdPAdvisory(undefined)).toBeNull()
+    expect(mintManagedIdPAdvisory([])).toBeNull()
+    expect(mintManagedIdPAdvisory([{ code: 'openidconnect-discovery' }])).toBeNull()
   })
 })

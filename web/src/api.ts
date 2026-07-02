@@ -2196,6 +2196,26 @@ export interface ImportResult {
   credentialPool?: CredentialPool
   loginFlow?: LoginFlowSpec
   suggestedSignup?: SignupFlowSpec
+  authAdvisories?: AuthAdvisory[]
+}
+
+// AuthAdvisory is an import-time hint about auth the importer could not act on:
+// code is a stable machine key ('mint-managed-idp', 'openidconnect-discovery')
+// and detail its code-specific parameter (the IdP host, the discovery URL).
+export interface AuthAdvisory {
+  code: string
+  detail?: string
+}
+
+// mintManagedIdPAdvisory picks the managed-IdP mint footgun advisory out of an
+// import's advisories, or null. When present, the Auth card warns on the mint
+// mode: the token issuer holds the signing key, so a self-issued (mint) token
+// would be rejected — the OAuth2 route is the answer for that service.
+export function mintManagedIdPAdvisory(advisories: AuthAdvisory[] | undefined): AuthAdvisory | null {
+  for (const a of advisories ?? []) {
+    if (a.code === 'mint-managed-idp') return a
+  }
+  return null
 }
 
 // importScenario converts a raw OpenAPI / HAR / access-log document into a
