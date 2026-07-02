@@ -2345,6 +2345,16 @@ export function mintManagedIdPAdvisory(advisories: AuthAdvisory[] | undefined): 
   return null
 }
 
+// openIdConnectDiscoveryUrl picks the openIdConnect discovery-document URL out of
+// an import's advisories, or ''. The OAuth2 guide surfaces it next to the token
+// URL: the document's token_endpoint is exactly what belongs in that field.
+export function openIdConnectDiscoveryUrl(advisories: AuthAdvisory[] | undefined): string {
+  for (const a of advisories ?? []) {
+    if (a.code === 'openidconnect-discovery' && a.detail) return a.detail
+  }
+  return ''
+}
+
 // importScenario converts a raw OpenAPI / HAR / access-log document into a
 // scenario via the backend. `format` is 'auto' (let the server sniff it),
 // 'openapi', 'har', or 'accesslog'. The body is the raw text, posted as-is. On a

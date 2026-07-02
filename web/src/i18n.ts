@@ -231,6 +231,8 @@ const en: Record<string, string> = {
   'auth.oauth2.tokenUrl': 'Token URL',
   'auth.oauth2.tokenUrlHint':
     'The endpoint that issues tokens (e.g. https://idp.example.com/oauth/token). For an openIdConnect service, use the token_endpoint from its discovery document.',
+  'auth.oauth2.discovery':
+    'This service publishes an OpenID Connect discovery document at {url} \u2014 open it and copy its token_endpoint into the Token URL above.',
   'auth.oauth2.grant': 'How do you log in?',
   'auth.oauth2.grantHint': 'Pick the answer that matches what you have \u2014 tmula picks the grant.',
   'auth.oauth2.grant.password': 'With a username and password',
@@ -816,6 +818,8 @@ const ko: Record<string, string> = {
   'auth.oauth2.tokenUrl': '토큰 URL',
   'auth.oauth2.tokenUrlHint':
     '토큰을 발급하는 엔드포인트입니다(예: https://idp.example.com/oauth/token). openIdConnect 서비스라면 discovery 문서의 token_endpoint를 넣으세요.',
+  'auth.oauth2.discovery':
+    '이 서비스는 {url} 에 OpenID Connect discovery 문서를 게시합니다 \u2014 열어서 token_endpoint 값을 위의 토큰 URL에 붙여넣으세요.',
   'auth.oauth2.grant': '어떻게 로그인하나요?',
   'auth.oauth2.grantHint': '가진 것에 맞는 답을 고르면 tmula가 grant를 알아서 고릅니다.',
   'auth.oauth2.grant.password': '아이디/비밀번호로',

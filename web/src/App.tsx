@@ -19,6 +19,7 @@ import {
   MAX_TRACE_USERS,
   mintManagedIdPAdvisory,
   OAUTH2_GUIDE_DEFAULTS,
+  openIdConnectDiscoveryUrl,
   parseAllowlist,
   parseCredentials,
   parseLoginCredentials,
@@ -1310,7 +1311,9 @@ function AuthCard({
         {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
 
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
-        {selected === 'oauth2' && <AuthOAuth2GuideFields form={form} set={set} />}
+        {selected === 'oauth2' && (
+          <AuthOAuth2GuideFields form={form} set={set} discoveryUrl={openIdConnectDiscoveryUrl(advisories)} />
+        )}
         {selected !== 'oauth2' && form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
         {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
         {form.authMode === 'mint' && (
@@ -1830,9 +1833,14 @@ const OAUTH2_GRANTS: { grant: OAuth2Grant; labelKey: string; descKey: string }[]
 function AuthOAuth2GuideFields({
   form,
   set,
+  discoveryUrl,
 }: {
   form: ExperimentForm
   set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  // discoveryUrl is the imported spec's openIdConnect discovery document (from the
+  // openidconnect-discovery advisory): its token_endpoint is what belongs in the
+  // token URL field, so the guide points the operator straight at it.
+  discoveryUrl: string
 }) {
   const { t } = useI18n()
   const [guide, setGuide] = useState<OAuth2GuideForm>(OAUTH2_GUIDE_DEFAULTS)
@@ -1865,6 +1873,12 @@ function AuthOAuth2GuideFields({
           spellCheck={false}
         />
       </Field>
+      {discoveryUrl && (
+        <p className="authpanel__ok" role="status">
+          <CheckMini />
+          {t('auth.oauth2.discovery', { url: discoveryUrl })}
+        </p>
+      )}
 
       <Field label={t('auth.oauth2.grant')} help={t('auth.oauth2.grantHint')}>
         <div className="authmodes" role="radiogroup" aria-label={t('auth.oauth2.grant')}>
