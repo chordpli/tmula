@@ -37,6 +37,15 @@ import "github.com/chordpli/tmula/server/internal/domain"
 //   - Login && workers → REJECTED. A minted login token is a json:"-" secret the
 //     worker fan-out cannot resolve. (Domain Validate forbids a Source on a login
 //     pool, so login never reaches the carve-out.)
+//   - Mint && workers → ALLOWED (P4). A mint pool self-issues a JWT per virtual
+//     user by signing locally; the pool carries only the NON-SECRET key REFERENCE
+//     (MintSpec.Key; the resolved key is json:"-"), so shipping the MintSpec fans
+//     out without a secret on the wire. Each worker resolves the SAME key reference
+//     locally and signs deterministically by global index (MintProvider.Acquire is
+//     pure per index), exactly like a source pool. Operator contract: the same key
+//     must be deployed on every worker; a worker that cannot resolve it fails its
+//     shard with a clear runtime error. reproduce rebuilds the mint provider on the
+//     master (which also holds the key) via the generic CredentialProvider path.
 //
 // LOAD-BEARING FOR REPRODUCE FIDELITY: every distributed authenticated run is
 // either rejected here or carries a source the workers (and reproduce) resolve by
@@ -48,15 +57,20 @@ import "github.com/chordpli/tmula/server/internal/domain"
 // in reproduce.go, and shardSpecFor in orchestrator.go.
 
 // authCapability describes, per credential strategy, how the run-path validation
-// treats it. Today the only distributable authenticated pool is a source-backed
+// treats a distributed (workers) run. Two strategies fan out today: a source-backed
 // CredPool (the carve-out handled directly in validateCredentialPool, since a
-// Source only ever rides a CredPool); every other strategy is rejected with
-// workers and carries its own rejection message.
+// Source only ever rides a CredPool) and CredMint (it ships only a key reference).
+// Every other strategy is rejected with workers and carries its own rejection
+// message.
 type authCapability struct {
+	// AllowsWorkers is true when a pool of this strategy MAY run with distributed
+	// workers because it fans out only a non-secret reference the worker resolves
+	// locally (mint's key reference; a source pool is handled by the earlier
+	// carve-out). When true, WorkerRejection is unused.
+	AllowsWorkers bool
 	// WorkerRejection is the error message emitted when a pool of this strategy runs
-	// with distributed workers and carries no distributable source reference. It is
-	// the exact string the characterization test freezes. An empty string would mean
-	// "this strategy may distribute without a source" — no strategy does today.
+	// with distributed workers and carries no distributable reference. It is the
+	// exact string the characterization test freezes. Unused when AllowsWorkers.
 	WorkerRejection string
 }
 
@@ -64,8 +78,8 @@ type authCapability struct {
 // CredPool's message covers the inline-entries case (a source-backed pool takes
 // the carve-out before this table is consulted). login shares the same generic
 // inline message — a minted token is an inline secret the fan-out cannot resolve.
-// bootstrap/mint/exec carry strategy-specific messages naming why each cannot
-// distribute yet.
+// mint ALLOWS workers (it ships only a key reference; P4). bootstrap/exec carry
+// strategy-specific messages naming why each cannot distribute.
 var authMatrix = map[domain.CredentialStrategy]authCapability{
 	domain.CredPool: {
 		WorkerRejection: "api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)",
@@ -77,11 +91,18 @@ var authMatrix = map[domain.CredentialStrategy]authCapability{
 		WorkerRejection: "api: the \"bootstrap-signup\" strategy is not supported with distributed workers (a bootstrap pool provisions per-node accounts and has no shared reference to fan out; distributed bootstrap is a follow-up)",
 	},
 	domain.CredMint: {
-		WorkerRejection: "api: the \"mint\" strategy is not supported with distributed workers yet (it signs per-node from a local key reference; distributed mint is a follow-up)",
+		AllowsWorkers: true,
 	},
 	domain.CredExec: {
 		WorkerRejection: "api: the \"exec\" strategy is not supported with distributed workers (it runs a local command per user; remote command execution is not fanned out)",
 	},
+}
+
+// allowsWorkers reports whether a strategy may run with distributed workers on the
+// strength of a non-secret reference the worker resolves locally.
+func allowsWorkers(strategy domain.CredentialStrategy) bool {
+	c, ok := authMatrix[strategy]
+	return ok && c.AllowsWorkers
 }
 
 // workerRejectionFor returns the rejection message for a strategy that cannot run

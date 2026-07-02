@@ -138,10 +138,12 @@ func TestCredentialPoolCharacterization(t *testing.T) {
 			want: wantOK,
 		},
 		{
-			name:    "mint pool + workers rejected",
+			// P4: mint fans out by shipping only its key REFERENCE (the worker resolves
+			// the key locally and signs per global index), so mint+workers is ALLOWED.
+			name:    "mint pool + workers allowed (ships only the key reference)",
 			pool:    &domain.CredentialPool{ID: "p", Strategy: domain.CredMint, Mint: mintSpec()},
 			workers: true,
-			want:    "api: the \"mint\" strategy is not supported with distributed workers yet (it signs per-node from a local key reference; distributed mint is a follow-up)",
+			want:    wantOK,
 		},
 		{
 			name: "exec pool, no workers",
@@ -186,12 +188,15 @@ func TestCredentialPoolCharacterization(t *testing.T) {
 
 // TestAuthMatrixIsSingleSourceOfTruth asserts the reject/allow table is the one
 // place the distributed-auth decision lives, and pins the reproduce-fidelity
-// invariant sessionUser (api/reproduce.go) depends on: EVERY strategy carries a
-// non-empty WorkerRejection, i.e. NO strategy distributes from an INLINE pool —
-// the only authenticated distributed run is a source-backed pool (the carve-out
-// handled directly in validateCredentialPool). If a future phase lets a strategy
-// distribute inline, this assertion (and sessionUser) must change in lockstep.
+// invariant sessionUser (api/reproduce.go) depends on: a strategy either ALLOWS
+// workers on the strength of a non-secret reference the worker resolves locally
+// (mint's key reference; source pools take the earlier carve-out), OR carries a
+// non-empty rejection message. NO strategy distributes from an INLINE pool. If a
+// future phase changes this, the assertion (and sessionUser) must move in lockstep.
 func TestAuthMatrixIsSingleSourceOfTruth(t *testing.T) {
+	// mint fans out via its key reference (no shared file), so it is the one
+	// strategy allowed with workers without a source carve-out.
+	allowsWorkers := map[domain.CredentialStrategy]bool{domain.CredMint: true}
 	strategies := []domain.CredentialStrategy{
 		domain.CredPool,
 		domain.CredLogin,
@@ -200,9 +205,11 @@ func TestAuthMatrixIsSingleSourceOfTruth(t *testing.T) {
 		domain.CredExec,
 	}
 	for _, st := range strategies {
-		msg := runspec.WorkerRejectionForTest(st)
-		if msg == "" {
-			t.Errorf("strategy %q has no worker-rejection message: an inline pool must never distribute (reproduce fidelity)", st)
+		if allowsWorkers[st] {
+			continue // an allowed strategy needs no rejection message
+		}
+		if msg := runspec.WorkerRejectionForTest(st); msg == "" {
+			t.Errorf("strategy %q has no worker-rejection message and is not allowed with workers: an inline pool must never distribute (reproduce fidelity)", st)
 		}
 	}
 }

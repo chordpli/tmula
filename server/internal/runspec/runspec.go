@@ -336,7 +336,14 @@ func (r RunSpec) validateCredentialPool() error {
 			return fmt.Errorf("api: %w", err)
 		}
 	}
-	// No distributable source and workers requested: reject per the strategy's
+	// Distributed carve-out for a reference-only strategy (mint): it fans out by
+	// shipping only a key REFERENCE the worker resolves locally, so it is allowed
+	// with workers exactly like a source pool. authmatrix.go is the single source of
+	// truth for which strategies this covers.
+	if hasWorkers && allowsWorkers(r.CredentialPool.Strategy) {
+		return nil
+	}
+	// No distributable reference and workers requested: reject per the strategy's
 	// centralized rule (authmatrix.go). This rejection is load-bearing for reproduce
 	// fidelity — change the table there, in lockstep with the characterization test.
 	if hasWorkers {

@@ -65,8 +65,11 @@ func TestCredentialProviderMintMissingEnvErrors(t *testing.T) {
 	}
 }
 
-// TestValidateMintWithWorkersRejected keeps distributed mint refused (scoped follow-up).
-func TestValidateMintWithWorkersRejected(t *testing.T) {
+// TestValidateMintWithWorkersAllowed pins the P4 change: distributed mint is now
+// ALLOWED — the pool ships only its key REFERENCE (the resolved key is json:"-"),
+// so each worker resolves the same key locally and self-issues per global index
+// without a secret on the wire.
+func TestValidateMintWithWorkersAllowed(t *testing.T) {
 	pool := &domain.CredentialPool{
 		Strategy: domain.CredMint,
 		Mint: &domain.MintSpec{
@@ -76,8 +79,8 @@ func TestValidateMintWithWorkersRejected(t *testing.T) {
 	}
 	spec := mintSpecFor(pool)
 	spec.Workers = []string{"localhost:7000"}
-	if err := spec.Validate(); err == nil {
-		t.Fatal("mint + distributed workers should be rejected")
+	if err := spec.Validate(); err != nil {
+		t.Fatalf("mint + distributed workers should be allowed (ships only the key reference): %v", err)
 	}
 }
 
