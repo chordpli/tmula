@@ -981,7 +981,24 @@ auth:
 
 > **`tokens` 형식 주의.** subject 열이 없으므로 헤더나 본문 템플릿의 `{{.subject}}`는 빈 문자열로 렌더링됩니다. teardown 또는 경로 템플릿에 `{{.subject}}`가 필요하다면 `csv` 또는 `jsonl`을 쓰세요.
 
-외부 소스 풀은 **분산 워커**로 팬아웃할 수 있습니다 — 각 워커가 로컬에서 자기 슬라이스를 해석하며, 와이어를 건너는 것은 비밀 없는 참조뿐입니다. 인라인 `users` 풀과 login/bootstrap-signup 전략은 워커로 팬아웃할 수 없습니다.
+외부 소스 풀은 **분산 워커**로 팬아웃할 수 있습니다 — 각 워커가 로컬에서 자기 슬라이스를 해석하며, 와이어를 건너는 것은 비밀 없는 참조뿐입니다. 인라인 `users` 풀과 login/bootstrap-signup 전략은 워커로 팬아웃할 수 없습니다(mint는 팬아웃 가능 — [전략: mint](#전략-mint-로컬-jwt-자체-발급) 참고).
+
+#### 파일 없이 계정 패턴으로 생성 (`usersPattern`)
+
+수만~수십만 계정을 파일로 준비하기 번거로우면, subject/token 템플릿과 개수로 선언하세요. Expand 시 실체화되며, 비밀 템플릿은 와이어에 오르지 않습니다(실체화된 비밀만 `json:"-"`로 마스킹).
+
+```yaml
+auth:
+  strategy: pool            # 또는 login (그때는 subject=username, token=password)
+  usersPattern:
+    subject: "user{{.userIndex}}"
+    token: "pw-{{.userIndex}}"
+    count: 100000
+```
+
+`usersPattern`은 `users`·`source`와 상호 배타적입니다. 불투명 JWT는 패턴으로 만들 수 없습니다(그건 [mint](#전략-mint-로컬-jwt-자체-발급)의 몫). 웹 콘솔은 pool/login 카드의 "패턴으로 계정 생성" 패널로 같은 일을 하되, 브라우저에서 인라인 항목으로 실체화하므로 10,000행까지만 지원합니다 — 그보다 큰 풀은 위 시나리오 파일 `usersPattern`(서버에서 생성)을 쓰세요.
+
+> **대규모 풀 파일.** 외부 소스 파일 캡은 기본 512MiB이며 스트리밍으로 파싱합니다(30만 JWT JSONL ≈ 300–450MB도 무리 없이). `auth.source.maxBytes`로 캡을 조정할 수 있습니다(양수만, 캡 자체는 유지). login prewarm은 병렬로 실행되되 `RateCap.MaxConcurrency`(최대 16) 이하로 제한되어 IdP를 부하테스트하지 않습니다.
 
 ### 전략: login (실행 시 토큰 발급)
 
@@ -1032,6 +1049,42 @@ tmula run scenario.yaml --users 20                 # signup + run + teardown
 tmula run scenario.yaml --users 20 --keep-accounts # signup + run, 계정은 남겨 둠
 ```
 
+### 전략: mint (로컬 JWT 자체 발급)
+
+대상이 JWT를 **자체 발급**하고 서명 키를 직접 보유할 때, 로그인 없이 가상 사용자마다 토큰을 로컬에서 서명합니다. 키는 **참조**(env/file)로만 지정하며 키 본문은 절대 직렬화되지 않습니다.
+
+```yaml
+auth:
+  strategy: mint
+  mint:
+    alg: HS256                    # HS256 | RS256 | ES256
+    secretEncoding: raw           # HS256: raw | base64 | base64url
+    key: { env: MINT_SIGNING_KEY } # 또는 file: 로컬 파일 경로 (참조만)
+    subject: "user-{{.userIndex}}"
+    ttl: 1h
+```
+
+mint는 **분산 워커로 팬아웃할 수 있습니다** — ShardSpec에 실리는 것은 키 **참조**뿐이고, 각 워커가 로컬에서 같은 키를 해석해 전역 인덱스별로 서명합니다. 전제: 참조가 가리키는 키(env/file)가 모든 워커 노드에 동일하게 배포되어 있어야 합니다. 못 찾는 워커는 익명 실행 대신 명확한 런타임 에러로 샤드를 실패시킵니다. **주의:** Auth0/Cognito/Firebase처럼 IdP가 서명 키를 쥔 서비스에는 mint를 쓸 수 없습니다(발급 토큰이 거부됨) — 그런 경우 login 전략이나 웹의 OAuth2 가이드를 쓰세요. 웹 콘솔은 그런 관리형 IdP 스펙을 import하면 mint 선택 시 경고 배너를 띄웁니다.
+
+### 세션 쿠키 인증
+
+로그인이 토큰을 본문이 아니라 `Set-Cookie`로 돌려주는 서비스는, capture를 비워 두면 응답의 세션 쿠키(`session`/`token`/`jwt`/`auth`/`sid` 계열)가 자동으로 자격 증명 비밀로 캡처됩니다. 시나리오는 그 값을 쿠키 헤더로 되돌려 주입합니다.
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: signin
+        request: POST /login
+        body: '{"username":"u1","password":"p1"}'
+    # capture 생략: 본문에 토큰이 없으면 Set-Cookie에서 자동 감지
+# 시나리오 스텝의 헤더:
+#   headers: { Cookie: "session={{.token}}" }
+```
+
+세션이 만료되어 401이 나면 login 전략의 재로그인 폴백이 새 세션을 발급해 재시도하므로, 정적 세션 풀도 토큰 풀처럼 자가 치유합니다.
+
 ### 비밀이 in-process에만 머무는 이유
 
 도메인 `Credential.Secret` 필드에는 `json:"-"`가 붙어 있어 비밀이 **직렬화되지 않습니다**. HTTP/SSE/저장소 와이어를 건널 수 없고 영속화되지도 않습니다(`String()`도 로그에서 비밀을 가립니다). 구체적으로 다음과 같습니다.
@@ -1040,7 +1093,13 @@ tmula run scenario.yaml --users 20 --keep-accounts # signup + run, 계정은 남
 - HTTP로 POST 하려는 `users[].cred`는 **조용히 무시됩니다**. 비밀이 `json:"-"`로 제거되므로 HTTP 제출은 인증을 운반할 수 없습니다.
 - 원격 `--engine`은 인라인 풀·login·bootstrap-signup 실행을 **거부합니다**: `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`. **외부 소스** 풀은 예외입니다. 와이어를 건너는 것은 비밀 없는 참조뿐이고, 워커가 파일이나 환경 변수를 로컬에서 해석합니다.
 
-**제약**(검증 기준): 분산 워커와 자격 증명 풀을 함께 쓸 수 있는 것은 외부 소스 풀뿐입니다. 오픈 워크로드 모델은 인증 전략에 무관하게 in-process 전용입니다.
+**제약**(검증 기준): 분산 워커와 자격 증명 풀을 함께 쓸 수 있는 것은 외부 소스 풀과 mint 전략(둘 다 비밀 없는 참조만 실음)뿐입니다. 인라인 `users`·usersPattern·login·bootstrap-signup·exec는 워커와 함께 거부됩니다. 오픈 워크로드 모델은 인증 전략에 무관하게 in-process 전용입니다.
+
+### 웹 OAuth2 가이드 · basic/apiKey import · 보류된 것
+
+- **OAuth2 웹 가이드.** OAuth2만 제공하는 서비스는 웹 콘솔의 "OAuth2 서비스예요" 진입점에서 토큰 URL과 로그인 방식(아이디/비밀번호 · 클라이언트 키 · refresh token 붙여넣기 · access token만)만 답하면 login flow가 자동 조립됩니다. Auth0/Cognito/소셜 로그인처럼 사람 동의가 필요한 서비스는 앱/개발자도구에서 refresh token을 1회 복사해 붙여넣는 경로가 정답입니다. (참고: client_secret이나 붙여넣은 refresh token은 다른 로그인 본문과 마찬가지로 실행 스펙에 저장되므로, client_credentials에는 일회용 테스트 클라이언트를 권장합니다.)
+- **basic auth / apiKey import.** OpenAPI/Swagger를 import하면 http `basic`(→ `Authorization: Basic {{basicAuth .subject .token}}` 헤더 + username/password 풀), `apiKey` in query(→ 경로에 `?name={{.token|urlquery}}`), `apiKey` in cookie(→ `Cookie: name={{.token}}`)가 자동 도출됩니다. `REPLACE_ME`만 채우면 실행됩니다. `openIdConnect` 스킴은 discovery URL을 advisory로 알려 주며, 웹은 그 값을 OAuth2 가이드의 토큰 URL로 안내합니다.
+- **PKCE / device-code는 보류.** 사람 동의(인앱 브라우저·소셜·MFA)를 거치는 최초 authorization-code + PKCE와 device-code 플로는 헤드리스 자동화 대상이 아니라 **지원하지 않습니다**. 우회로: OAuth2 가이드의 **refresh token 붙여넣기**(1회 사람 로그인 후 refresh token만 복사), 사전 발급 토큰 pool, 또는 최후의 수단으로 exec(BYO-token 명령).
 
 ---
 
