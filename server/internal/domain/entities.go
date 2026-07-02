@@ -207,6 +207,10 @@ type CredentialSourceRef struct {
 	File   string `json:"file,omitempty"`
 	Env    string `json:"env,omitempty"`
 	Format string `json:"format,omitempty"`
+	// MaxBytes, when positive, overrides the resolver's default byte cap on the
+	// referenced file (the cap itself always stands — an override moves it, never
+	// disables it). Non-secret, so it rides the reference wherever it travels.
+	MaxBytes int64 `json:"maxBytes,omitempty"`
 }
 
 // Validate checks the reference is well-formed: exactly one of File/Env is set,
@@ -221,6 +225,9 @@ func (r CredentialSourceRef) Validate() error {
 	case "csv", "jsonl", "tokens":
 	default:
 		return fmt.Errorf("credential source: unknown format %q (want csv, jsonl or tokens)", r.Format)
+	}
+	if r.MaxBytes < 0 {
+		return fmt.Errorf("credential source: maxBytes must be positive (zero means the default cap)")
 	}
 	return nil
 }

@@ -333,6 +333,10 @@ type AuthSource struct {
 	// Format is the body encoding: csv (subject,token header), jsonl
 	// ({subject,token} per line) or tokens (one secret per line).
 	Format string `json:"format,omitempty"`
+	// MaxBytes, when positive, overrides the default byte cap on the referenced
+	// file (the cap itself always stands — an override moves it, never disables
+	// it). Zero means the default (512 MiB).
+	MaxBytes int64 `json:"maxBytes,omitempty"`
 }
 
 // Credential is one pre-supplied principal in the compact file: a non-sensitive
@@ -779,7 +783,7 @@ func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.Creden
 	if hasSource && keepSourceRef {
 		// Ship the reference unresolved (distributed engine path): validate its
 		// shape but do not read it — the engine's workers load it locally.
-		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format}
+		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format, MaxBytes: a.Source.MaxBytes}
 		if err := ref.Validate(); err != nil {
 			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
 		}
@@ -1027,7 +1031,7 @@ func credentialSourceFor(a AuthSource, dir string) (auth.CredentialSource, error
 	if root == "" {
 		root = "."
 	}
-	return auth.FileSource{Root: root, Path: a.File, Format: format}, nil
+	return auth.FileSource{Root: root, Path: a.File, Format: format, MaxBytes: a.MaxBytes}, nil
 }
 
 // buildTemplates maps each request-bearing step to an API template keyed t_<id>.

@@ -1,6 +1,9 @@
 package scenariofile
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -44,5 +47,54 @@ func TestExpandNoAdvisoriesStaysEmpty(t *testing.T) {
 	}
 	if len(spec.AuthAdvisories) != 0 {
 		t.Errorf("AuthAdvisories = %+v, want empty", spec.AuthAdvisories)
+	}
+}
+
+// TestAuthSourceMaxBytesOverride: auth.source.maxBytes caps the referenced file
+// (the cap itself always stands — the override just moves it), and the cap error
+// surfaces through Expand.
+func TestAuthSourceMaxBytesOverride(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pool.tokens"), []byte("tok-a\ntok-b\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s := Scenario{
+		Target: "http://h:1",
+		Flow:   []Step{{ID: "a", Request: "GET /a"}},
+		Auth:   &Auth{Strategy: "pool", Source: &AuthSource{File: "pool.tokens", Format: "tokens", MaxBytes: 3}},
+	}
+	_, err := ExpandFrom(s, dir)
+	if err == nil || !strings.Contains(err.Error(), "exceeds the 3-byte limit") {
+		t.Fatalf("err = %v, want the 3-byte cap error", err)
+	}
+
+	// A generous override loads fine.
+	s.Auth.Source.MaxBytes = 1 << 20
+	spec, err := ExpandFrom(s, dir)
+	if err != nil {
+		t.Fatalf("ExpandFrom with a generous cap: %v", err)
+	}
+	if len(spec.CredentialPool.Entries) != 2 {
+		t.Errorf("entries = %d, want 2", len(spec.CredentialPool.Entries))
+	}
+}
+
+// TestAuthSourceMaxBytesRidesTheRef: ExpandRef ships the maxBytes override on the
+// non-secret reference so a worker resolves the file under the same cap.
+func TestAuthSourceMaxBytesRidesTheRef(t *testing.T) {
+	s := Scenario{
+		Target: "http://h:1",
+		Flow:   []Step{{ID: "a", Request: "GET /a"}},
+		Auth:   &Auth{Strategy: "pool", Source: &AuthSource{File: "pool.tokens", Format: "tokens", MaxBytes: 99}},
+	}
+	spec, err := ExpandRef(s, "")
+	if err != nil {
+		t.Fatalf("ExpandRef: %v", err)
+	}
+	if spec.CredentialPool == nil || spec.CredentialPool.Source == nil {
+		t.Fatalf("expected a reference-only pool, got %+v", spec.CredentialPool)
+	}
+	if spec.CredentialPool.Source.MaxBytes != 99 {
+		t.Errorf("ref MaxBytes = %d, want 99", spec.CredentialPool.Source.MaxBytes)
 	}
 }
