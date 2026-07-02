@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -143,6 +144,26 @@ type Credential struct {
 	Secret    string        `json:"-"`
 	Refresh   string        `json:"-"`
 	ExpiresIn time.Duration `json:"-"`
+}
+
+// UnmarshalJSON reads the INBOUND wire shape the console posts for an inline
+// credential entry: {"subject","token"} — token lands in Secret. Without this,
+// json:"-" silently DROPPED the posted token and a web-authored pool ran with
+// empty secrets. The tag stays "-" so Marshal never emits a secret (masking at
+// rest, AD-011): the token is write-only across the wire — a stored/shared spec
+// round-trips with only the subject. Refresh and ExpiresIn are run-time state,
+// never wire-supplied.
+func (c *Credential) UnmarshalJSON(b []byte) error {
+	var w struct {
+		Subject string `json:"subject"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	c.Subject = w.Subject
+	c.Secret = w.Token
+	return nil
 }
 
 // String redacts BOTH secrets (Secret and Refresh) so a Credential cannot leak a
