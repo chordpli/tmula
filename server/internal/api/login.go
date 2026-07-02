@@ -400,13 +400,17 @@ func isFormURLEncoded(headers map[string]string) bool {
 }
 
 // refreshGrantDrop is the set of form fields a refresh grant must not carry: the
-// grant selector itself (rewritten to refresh_token) and the password/
-// authorization-code grant inputs that a refresh exchange does not use.
+// grant selector itself (rewritten to refresh_token), the password/
+// authorization-code grant inputs that a refresh exchange does not use, and a
+// refresh_token the LOGIN body itself carried (the paste-a-refresh-token path:
+// the derived exchange sends only the freshly captured {{.refreshToken}} — a
+// duplicate param breaks strict IdPs and would pin refresh to the stale paste).
 var refreshGrantDrop = map[string]bool{
-	"grant_type": true,
-	"username":   true,
-	"password":   true,
-	"code":       true,
+	"grant_type":    true,
+	"username":      true,
+	"password":      true,
+	"code":          true,
+	"refresh_token": true,
 }
 
 // rewriteToRefreshGrant rewrites a parsed login form into a refresh-grant body: it
