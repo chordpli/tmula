@@ -997,6 +997,133 @@ export function authFormFromImport(result: ImportResult): Partial<ExperimentForm
   return {}
 }
 
+// --- OAuth2 guide mode (a frontend ASSEMBLY layer, not a new server strategy) --
+
+// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
+// guide: a username+password (password grant), a client key (client_credentials),
+// a refresh token pasted from an app/browser session (refresh_token — the answer
+// for human-consent services like Auth0/Cognito/social login), or just an access
+// token (no grant at all — becomes a token pool).
+export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
+
+// OAuth2GuideForm is the guide's own input state: a token URL plus the grant's
+// fields. It is UI-local (NOT part of ExperimentForm) — authFormFromOAuth2Guide
+// compiles it onto the existing login/pool form fields, so the wire payload and
+// AUTH_FORM_DEFAULTS stay untouched.
+export interface OAuth2GuideForm {
+  tokenUrl: string
+  grant: OAuth2Grant
+  username: string
+  password: string
+  // users is an optional multi-user CSV (username,password header + rows); when
+  // non-empty it wins over the single username/password identity.
+  users: string
+  clientId: string
+  clientSecret: string
+  scope: string
+  refreshToken: string
+  accessToken: string
+}
+
+export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
+  tokenUrl: '',
+  grant: 'password',
+  username: '',
+  password: '',
+  users: '',
+  clientId: '',
+  clientSecret: '',
+  scope: '',
+  refreshToken: '',
+  accessToken: '',
+}
+
+// tokenPathFromUrl reduces a token URL (absolute or bare path) to the request
+// path the login flow POSTs — the run targets the scenario's base URL, so an
+// absolute URL keeps only its path (mirroring the importer's requestPathOf).
+export function tokenPathFromUrl(tokenUrl: string): string {
+  const raw = tokenUrl.trim()
+  if (!raw) return ''
+  try {
+    const u = new URL(raw)
+    return u.pathname && u.pathname !== '/' ? u.pathname : ''
+  } catch {
+    /* not absolute: treat as a bare path */
+  }
+  return raw.startsWith('/') ? raw : '/' + raw
+}
+
+// csvCell quotes one CSV value per the RFC-4180-lite reader the cred list is
+// parsed with, so a password carrying a comma or quote round-trips exactly.
+function csvCell(v: string): string {
+  if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"'
+  return v
+}
+
+// authFormFromOAuth2Guide compiles the guide's answers onto the EXISTING form
+// fields — the same pattern authFormFromImport uses. The three token grants
+// become an advanced-mode login flow (a single POST to the token path, form
+// Content-Type so the backend's refresh auto-derivation and urlquery rewrite
+// both engage); an access-token paste becomes a plain token pool. The password
+// grant's identity rides the credential list (one CSV row for a single user), so
+// the body carries only {{.username}}/{{.password}} placeholders — never a
+// literal secret — and the server url-encodes the row at render time.
+export function authFormFromOAuth2Guide(g: OAuth2GuideForm): Partial<ExperimentForm> {
+  if (g.grant === 'accessToken') {
+    return { authMode: 'pool', authPoolFormat: 'tokens', authPoolText: g.accessToken.trim() }
+  }
+
+  const parts: string[] = []
+  let scope: LoginScope = 'shared'
+  let credText = ''
+  switch (g.grant) {
+    case 'password':
+      // Each virtual user logs in as its own row — per-user scope.
+      scope = 'per-user'
+      parts.push('grant_type=password', 'username={{.username}}', 'password={{.password}}')
+      credText = g.users.trim()
+        ? g.users.trim()
+        : `username,password\n${csvCell(g.username)},${csvCell(g.password)}`
+      break
+    case 'clientCredentials':
+      // One machine identity shared by every user.
+      parts.push('grant_type=client_credentials')
+      break
+    case 'refreshToken':
+      // The pasted refresh token belongs to ONE session — shared across users. The
+      // backend's refresh auto-derivation replaces the pasted literal with the
+      // freshly captured {{.refreshToken}} on every subsequent refresh.
+      parts.push('grant_type=refresh_token', `refresh_token=${encodeURIComponent(g.refreshToken.trim())}`)
+      break
+  }
+  if (g.clientId.trim()) parts.push(`client_id=${encodeURIComponent(g.clientId.trim())}`)
+  if (g.clientSecret.trim()) parts.push(`client_secret=${encodeURIComponent(g.clientSecret.trim())}`)
+  if (g.scope.trim()) parts.push(`scope=${encodeURIComponent(g.scope.trim())}`)
+
+  const template = {
+    method: 'POST',
+    path: tokenPathFromUrl(g.tokenUrl),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    payloadTemplate: parts.join('&'),
+  }
+  return {
+    authMode: 'login',
+    // Advanced mode is the storage: the guide IS the friendly form, and the raw
+    // JSON stays reviewable/editable under the existing Advanced panel.
+    loginMode: 'advanced',
+    loginGraphJSON: JSON.stringify(
+      { id: LOGIN_NODE_ID, nodes: [{ id: LOGIN_NODE_ID, apiTemplateId: LOGIN_TEMPLATE_ID }], edges: [] },
+      null,
+      2,
+    ),
+    loginTemplatesJSON: JSON.stringify({ [LOGIN_TEMPLATE_ID]: template }, null, 2),
+    loginStart: LOGIN_NODE_ID,
+    loginScope: scope,
+    loginCredText: credText,
+    loginCredFormat: 'csv',
+  }
+}
+
 // loginFlowToSimpleForm tries to express a derived login flow as the simple mini-form
 // (a single login node hitting one template) so the import lands on the friendly fields
 // rather than raw JSON. It returns null when the flow is multi-step or otherwise too

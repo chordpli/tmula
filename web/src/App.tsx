@@ -5,6 +5,7 @@ import {
   allowlistMatchesHost,
   AUTH_FORM_DEFAULTS,
   authFormFromImport,
+  authFormFromOAuth2Guide,
   buildRunSpec,
   compareURL,
   createExperiment,
@@ -17,6 +18,7 @@ import {
   killRun,
   MAX_TRACE_USERS,
   mintManagedIdPAdvisory,
+  OAUTH2_GUIDE_DEFAULTS,
   parseAllowlist,
   parseCredentials,
   parseLoginCredentials,
@@ -39,14 +41,18 @@ import {
   type LoginScope,
   type MintAlg,
   type MintEncoding,
+  type OAuth2Grant,
+  type OAuth2GuideForm,
   type OutcomeSummary,
   type Report,
   type Stats,
 } from './api'
 import {
-  ADVANCED_AUTH_MODES,
+  ADVANCED_AUTH_ENTRIES,
   isAdvancedAuthMode,
-  PRIMARY_AUTH_MODES,
+  modeForEntry,
+  PRIMARY_AUTH_ENTRIES,
+  type AuthEntry,
   type AuthEntryOption,
 } from './authEntryModel'
 import GraphEditor from './GraphEditor'
@@ -1178,29 +1184,29 @@ function ImportPanel({
   )
 }
 
-// AuthModeRadios renders one radio group's worth of auth strategy options. The
-// grouping itself (which modes are entry points, which fold behind Advanced)
+// AuthModeRadios renders one radio group's worth of auth entry options. The
+// grouping itself (which entries are entry points, which fold behind Advanced)
 // lives in authEntryModel — presentation only, the wire values are untouched.
 function AuthModeRadios({
   options,
-  form,
-  set,
+  selected,
+  onPick,
 }: {
   options: AuthEntryOption[]
-  form: ExperimentForm
-  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  selected: AuthEntry
+  onPick: (entry: AuthEntry) => void
 }) {
   const { t } = useI18n()
   return (
     <div className="authmodes" role="radiogroup" aria-label={t('card.auth')}>
-      {options.map(({ mode, labelKey, descKey }) => (
-        <label key={mode} className={`authmode${form.authMode === mode ? ' authmode--on' : ''}`}>
+      {options.map(({ entry, labelKey, descKey }) => (
+        <label key={entry} className={`authmode${selected === entry ? ' authmode--on' : ''}`}>
           <input
             className="authmode__radio"
             type="radio"
             name="authMode"
-            checked={form.authMode === mode}
-            onChange={() => set('authMode', mode)}
+            checked={selected === entry}
+            onChange={() => onPick(entry)}
           />
           <span className="authmode__body">
             <span className="authmode__label">{t(labelKey)}</span>
@@ -1240,6 +1246,17 @@ function AuthCard({
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
   const mintAdvisory = mintManagedIdPAdvisory(advisories)
+  // entry is the UI-layer selection; 'oauth2' is a pseudo-entry whose guide
+  // compiles onto the login wire mode, so it cannot be derived from form.authMode
+  // alone. It self-heals: whenever the remembered entry no longer maps onto the
+  // current wire mode (an import or a round-trip changed it), the wire mode wins.
+  const [entry, setEntry] = useState<AuthEntry | null>(null)
+  const selected: AuthEntry =
+    entry !== null && modeForEntry(entry) === form.authMode ? entry : form.authMode
+  function pickEntry(e: AuthEntry) {
+    setEntry(e)
+    set('authMode', modeForEntry(e))
+  }
   // Surface every REPLACE_ME_* placeholder the active flow's body still carries as a
   // highlighted input the operator must fill — so after an auto-detected import the ONLY
   // thing left is the secret. Only the relevant mode's body is scanned.
@@ -1274,7 +1291,7 @@ function AuthCard({
           </div>
         )}
 
-        <AuthModeRadios options={PRIMARY_AUTH_MODES} form={form} set={set} />
+        <AuthModeRadios options={PRIMARY_AUTH_ENTRIES} selected={selected} onPick={pickEntry} />
 
         {/* Expert strategies fold behind Advanced (auto-open when one is selected,
             e.g. a round-tripped exec/mint spec): a normal operator never needs mint
@@ -1286,14 +1303,15 @@ function AuthCard({
             <span className="field__badge">{t('badge.advanced')}</span>
           </summary>
           <div className="stack advanced__body" style={{ gap: 16 }}>
-            <AuthModeRadios options={ADVANCED_AUTH_MODES} form={form} set={set} />
+            <AuthModeRadios options={ADVANCED_AUTH_ENTRIES} selected={selected} onPick={pickEntry} />
           </div>
         </details>
 
         {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
 
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
-        {form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
+        {selected === 'oauth2' && <AuthOAuth2GuideFields form={form} set={set} />}
+        {selected !== 'oauth2' && form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
         {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
         {form.authMode === 'mint' && (
           <>
@@ -1788,6 +1806,214 @@ function AuthLoginAdvancedBody({
         />
       </Field>
     </>
+  )
+}
+
+// OAUTH2_GRANTS is the ordered "how do you log in?" answer set for the OAuth2
+// guide, each mapping onto a grant the compiler (authFormFromOAuth2Guide) knows.
+const OAUTH2_GRANTS: { grant: OAuth2Grant; labelKey: string; descKey: string }[] = [
+  { grant: 'password', labelKey: 'auth.oauth2.grant.password', descKey: 'auth.oauth2.grant.password.desc' },
+  { grant: 'clientCredentials', labelKey: 'auth.oauth2.grant.cc', descKey: 'auth.oauth2.grant.cc.desc' },
+  { grant: 'refreshToken', labelKey: 'auth.oauth2.grant.refresh', descKey: 'auth.oauth2.grant.refresh.desc' },
+  { grant: 'accessToken', labelKey: 'auth.oauth2.grant.access', descKey: 'auth.oauth2.grant.access.desc' },
+]
+
+// AuthOAuth2GuideFields is the OAuth2 guided assembler (the "It's an OAuth2
+// service" entry): answer a token URL and "how do you log in?" and the guide
+// compiles the answers onto the existing login form fields via
+// authFormFromOAuth2Guide — a frontend assembly layer, not a new wire strategy.
+// The three token grants recompile live on every answer (the generated flow JSON
+// stays reviewable under Advanced); the access-token answer applies via an
+// explicit button because it switches the wire mode to pool (which unmounts this
+// panel). The guide's own answers are component state, so the wire form and
+// AUTH_FORM_DEFAULTS stay untouched.
+function AuthOAuth2GuideFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const [guide, setGuide] = useState<OAuth2GuideForm>(OAUTH2_GUIDE_DEFAULTS)
+
+  function applyCompiled(g: OAuth2GuideForm) {
+    const compiled = authFormFromOAuth2Guide(g)
+    for (const [k, v] of Object.entries(compiled)) {
+      set(k as keyof ExperimentForm, v as ExperimentForm[keyof ExperimentForm] as never)
+    }
+  }
+  function update(patch: Partial<OAuth2GuideForm>) {
+    const next = { ...guide, ...patch }
+    setGuide(next)
+    // The access-token answer compiles to a pool patch — applied via the explicit
+    // button below, so typing the token does not switch the mode mid-keystroke.
+    if (next.grant !== 'accessToken') applyCompiled(next)
+  }
+
+  const showClient = guide.grant !== 'accessToken'
+  return (
+    <div className="authpanel">
+      <p className="card__hint">{t('auth.oauth2.lead')}</p>
+
+      <Field label={t('auth.oauth2.tokenUrl')} help={t('auth.oauth2.tokenUrlHint')}>
+        <input
+          className="input"
+          value={guide.tokenUrl}
+          onChange={(e) => update({ tokenUrl: e.target.value })}
+          placeholder="https://idp.example.com/oauth/token"
+          spellCheck={false}
+        />
+      </Field>
+
+      <Field label={t('auth.oauth2.grant')} help={t('auth.oauth2.grantHint')}>
+        <div className="authmodes" role="radiogroup" aria-label={t('auth.oauth2.grant')}>
+          {OAUTH2_GRANTS.map(({ grant, labelKey, descKey }) => (
+            <label key={grant} className={`authmode${guide.grant === grant ? ' authmode--on' : ''}`}>
+              <input
+                className="authmode__radio"
+                type="radio"
+                name="oauth2Grant"
+                checked={guide.grant === grant}
+                onChange={() => update({ grant })}
+              />
+              <span className="authmode__body">
+                <span className="authmode__label">{t(labelKey)}</span>
+                <span className="authmode__desc">{t(descKey)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </Field>
+
+      {guide.grant === 'password' && (
+        <>
+          <div className="field-row field-row--2">
+            <Field label={t('auth.oauth2.username')}>
+              <input
+                className="input"
+                value={guide.username}
+                onChange={(e) => update({ username: e.target.value })}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </Field>
+            <Field label={t('auth.oauth2.password')}>
+              <input
+                className="input"
+                type="password"
+                value={guide.password}
+                onChange={(e) => update({ password: e.target.value })}
+                autoComplete="off"
+              />
+            </Field>
+          </div>
+          <details className="advanced" open={guide.users.trim().length > 0}>
+            <summary className="advanced__summary">
+              {t('auth.oauth2.users.toggle')}
+              <span className="field__badge">{t('badge.optional')}</span>
+            </summary>
+            <div className="stack advanced__body" style={{ gap: 16 }}>
+              <Field label={t('auth.oauth2.users')} help={t('auth.oauth2.usersHint')}>
+                <textarea
+                  className="textarea"
+                  value={guide.users}
+                  onChange={(e) => update({ users: e.target.value })}
+                  rows={5}
+                  placeholder={'username,password\nalice,pw-a\nbob,pw-b'}
+                  spellCheck={false}
+                />
+              </Field>
+            </div>
+          </details>
+        </>
+      )}
+
+      {guide.grant === 'refreshToken' && (
+        <Field label={t('auth.oauth2.refreshToken')} help={t('auth.oauth2.refreshTokenHint')}>
+          <input
+            className="input"
+            type="password"
+            value={guide.refreshToken}
+            onChange={(e) => update({ refreshToken: e.target.value })}
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+      )}
+
+      {guide.grant === 'accessToken' && (
+        <>
+          <Field label={t('auth.oauth2.accessToken')} help={t('auth.oauth2.accessTokenHint')}>
+            <input
+              className="input"
+              type="password"
+              value={guide.accessToken}
+              onChange={(e) => update({ accessToken: e.target.value })}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+            disabled={!guide.accessToken.trim()}
+            onClick={() => applyCompiled(guide)}
+          >
+            {t('auth.oauth2.accessToken.apply')}
+          </button>
+        </>
+      )}
+
+      {showClient && (
+        <div className="field-row field-row--2">
+          <Field label={t('auth.oauth2.clientId')} help={t('auth.oauth2.clientIdHint')}>
+            <input
+              className="input"
+              value={guide.clientId}
+              onChange={(e) => update({ clientId: e.target.value })}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
+          <Field label={t('auth.oauth2.clientSecret')} help={t('auth.oauth2.clientSecretHint')}>
+            <input
+              className="input"
+              type="password"
+              value={guide.clientSecret}
+              onChange={(e) => update({ clientSecret: e.target.value })}
+              autoComplete="off"
+            />
+          </Field>
+        </div>
+      )}
+
+      {showClient && (
+        <Field label={t('auth.oauth2.scope')} help={t('auth.oauth2.scopeHint')}>
+          <input
+            className="input"
+            value={guide.scope}
+            onChange={(e) => update({ scope: e.target.value })}
+            placeholder="read write"
+            spellCheck={false}
+          />
+        </Field>
+      )}
+
+      {guide.grant !== 'accessToken' && (
+        <details className="advanced">
+          <summary className="advanced__summary">
+            {t('auth.oauth2.advanced')}
+            <span className="field__badge">{t('badge.jsonAdvanced')}</span>
+          </summary>
+          <div className="stack advanced__body" style={{ gap: 16 }}>
+            <p className="card__hint">{t('auth.oauth2.advancedHint')}</p>
+            <AuthLoginAdvancedBody form={form} set={set} />
+          </div>
+        </details>
+      )}
+    </div>
   )
 }
 

@@ -5,11 +5,13 @@ import {
   AUTH_FORM_DEFAULTS,
   applyReplaceMe,
   authFormFromImport,
+  authFormFromOAuth2Guide,
   authFormFromSpec,
   buildAuth,
   findReplaceMePlaceholders,
   placeholderLabel,
   simpleLoginFlow,
+  tokenPathFromUrl,
   simpleSignupFlow,
   buildRunSpec,
   classifyEdge,
@@ -28,6 +30,7 @@ import {
   hostFromBaseUrl,
   importScenario,
   mintManagedIdPAdvisory,
+  OAUTH2_GUIDE_DEFAULTS,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
   latencyCellColor,
@@ -2123,5 +2126,109 @@ describe('mintManagedIdPAdvisory', () => {
     expect(mintManagedIdPAdvisory(undefined)).toBeNull()
     expect(mintManagedIdPAdvisory([])).toBeNull()
     expect(mintManagedIdPAdvisory([{ code: 'openidconnect-discovery' }])).toBeNull()
+  })
+})
+
+describe('authFormFromOAuth2Guide', () => {
+  const g = OAUTH2_GUIDE_DEFAULTS
+
+  it('compiles the password grant into an advanced login flow with per-user rows', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...g,
+      tokenUrl: 'https://idp.example.com/oauth/token',
+      grant: 'password',
+      username: 'alice',
+      password: 'p@ss,word',
+      clientId: 'web',
+      scope: 'read',
+    })
+    expect(patch.authMode).toBe('login')
+    expect(patch.loginMode).toBe('advanced')
+    expect(patch.loginScope).toBe('per-user')
+    expect(patch.loginStart).toBe('login')
+    const templates = JSON.parse(patch.loginTemplatesJSON!) as Record<
+      string,
+      { method: string; path: string; headers: Record<string, string>; payloadTemplate: string }
+    >
+    const tmpl = templates['t_login']
+    expect(tmpl.method).toBe('POST')
+    expect(tmpl.path).toBe('/oauth/token')
+    expect(tmpl.headers['Content-Type']).toBe('application/x-www-form-urlencoded')
+    expect(tmpl.payloadTemplate).toBe(
+      'grant_type=password&username={{.username}}&password={{.password}}&client_id=web&scope=read',
+    )
+    // The single identity rides the cred list as one CSV row (quoted where needed),
+    // so the body carries NO literal secret and the server url-encodes at render.
+    expect(patch.loginCredText).toBe('username,password\nalice,"p@ss,word"')
+    expect(patch.loginCredFormat).toBe('csv')
+    const graph = JSON.parse(patch.loginGraphJSON!) as { nodes: unknown[] }
+    expect(graph.nodes).toHaveLength(1)
+    // The patch composes into the exact wire shape the server-side guide tests pin.
+    const build = buildAuth({ ...form, ...patch })
+    expect(build!.authStrategy).toBe('login')
+    expect(build!.credentialPool.entries).toEqual([{ subject: 'alice', token: 'p@ss,word' }])
+    expect(build!.loginFlow!.templates).toEqual(templates)
+  })
+
+  it('prefers an operator-pasted multi-user list over the single identity', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...g,
+      tokenUrl: '/oauth/token',
+      grant: 'password',
+      username: 'ignored',
+      password: 'ignored',
+      users: 'username,password\na,pa\nb,pb',
+    })
+    expect(patch.loginCredText).toBe('username,password\na,pa\nb,pb')
+    const build = buildAuth({ ...form, ...patch })
+    expect(build!.credentialPool.entries).toEqual([
+      { subject: 'a', token: 'pa' },
+      { subject: 'b', token: 'pb' },
+    ])
+  })
+
+  it('compiles client_credentials into a shared-scope flow with form-encoded literals', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...g,
+      tokenUrl: 'https://idp.example.com/token',
+      grant: 'clientCredentials',
+      clientId: 'web',
+      clientSecret: 'sh&h=x',
+    })
+    expect(patch.loginScope).toBe('shared')
+    expect(patch.loginCredText).toBe('')
+    const templates = JSON.parse(patch.loginTemplatesJSON!) as Record<string, { payloadTemplate: string }>
+    expect(templates['t_login'].payloadTemplate).toBe(
+      'grant_type=client_credentials&client_id=web&client_secret=sh%26h%3Dx',
+    )
+  })
+
+  it('compiles a pasted refresh token into a refresh_token-grant login flow', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...g,
+      tokenUrl: '/oauth/token',
+      grant: 'refreshToken',
+      refreshToken: 'r+t/1=',
+      clientId: 'web',
+    })
+    expect(patch.authMode).toBe('login')
+    expect(patch.loginScope).toBe('shared')
+    const templates = JSON.parse(patch.loginTemplatesJSON!) as Record<string, { payloadTemplate: string }>
+    expect(templates['t_login'].payloadTemplate).toBe(
+      'grant_type=refresh_token&refresh_token=r%2Bt%2F1%3D&client_id=web',
+    )
+  })
+
+  it('turns an access-token paste into a token pool', () => {
+    const patch = authFormFromOAuth2Guide({ ...g, grant: 'accessToken', accessToken: ' tok-1 ' })
+    expect(patch).toEqual({ authMode: 'pool', authPoolFormat: 'tokens', authPoolText: 'tok-1' })
+  })
+
+  it('extracts the token path from an absolute URL and normalizes a bare path', () => {
+    expect(tokenPathFromUrl('https://idp.example.com/oauth/token')).toBe('/oauth/token')
+    expect(tokenPathFromUrl('oauth/token')).toBe('/oauth/token')
+    expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
+    expect(tokenPathFromUrl('')).toBe('')
+    expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
   })
 })
