@@ -276,46 +276,13 @@ func (r RunSpec) Validate() error {
 // validateCredentialPool checks an optional credential pool is usable on this
 // path. A nil pool is fine (the run is unauthenticated). The domain validation
 // rejects an unknown strategy, an empty "pool" strategy, and an inline-vs-source
-// conflict; on top of that the run path applies the D1 split that decides which
-// authenticated runs may distribute.
+// conflict; on top of that the run path applies the D1 distributed-auth split.
 //
-// D1 SPLIT (the load-bearing distributed-auth contract): a distributed run
-// authenticates ONLY from a shared, index-deterministic SourceRef that the worker
-// resolves LOCALLY; inline secrets and bootstrap stay rejected with workers.
-// Concretely:
-//
-//   - Source != nil && NO workers  → REJECTED. The in-process/API server must not
-//     read a client-chosen path off the wire; the CLI resolves single-node sources
-//     into entries at scenariofile.Expand, so a non-distributed spec must carry
-//     real entries.
-//   - Source (file/env) != nil && workers → ALLOWED, the distributed carve-out:
-//     only the reference crosses the wire and each worker loads its own slice and
-//     assigns by GLOBAL index, so every worker reconstructs the same provider
-//     (PoolProvider.Acquire is a pure function of the global index). No secret is
-//     serialized. shardSpecFor copies the ref into ShardSpec.CredentialSource.
-//   - Inline Entries != nil && workers → REJECTED. The secrets would serialize
-//     into the wire spec.
-//   - Bootstrap-signup && NO workers → ALLOWED when it carries a SignupFlow and
-//     either a teardown journey OR --keep-accounts (the gating-safety rule). The
-//     orchestrator compiles the SignupFlow, prewarms one account per virtual user,
-//     and defers teardown. A bootstrap pool with no SignupFlow, or no teardown and
-//     no keep-accounts, is REJECTED above.
-//   - Bootstrap-signup && workers → REJECTED. A bootstrap pool mints real accounts
-//     and has no shared reference to fan out; P4 keeps this rejected (distributed
-//     bootstrap is a follow-up). (Domain Validate already forbids a Source on a
-//     bootstrap pool.)
-//   - Login && workers → REJECTED. A minted login token is a json:"-" secret the
-//     worker fan-out cannot resolve. (Domain Validate forbids a Source on a login
-//     pool, so login never reaches the carve-out.)
-//
-// LOAD-BEARING FOR REPRODUCE FIDELITY: every distributed authenticated run is
-// either rejected here or carries a source the workers (and reproduce) resolve by
-// the SAME pure Acquire(global index). reproduce.go's sessionUser relies on this:
-// a distributed-auth finding replays under the same principal the shard ran as
-// because both rebuild the source-backed provider and key it by the global index.
-// If this split is ever changed, sessionUser must be updated in lockstep (D4: PR3
-// and PR4 land together). See also: CredentialProvider, the sessionUser function
-// in reproduce.go, and shardSpecFor in orchestrator.go.
+// The reject/allow-with-workers decision is CENTRALIZED in authmatrix.go (the D1
+// split contract, the per-strategy WorkerRejection table, and the
+// reproduce-fidelity rationale live there). This function is the small amount of
+// spec-shaped glue around that table: the source carve-out and the two in-process
+// requirement gates (bootstrap's SignupFlow + teardown-or-keep, login's flow).
 func (r RunSpec) validateCredentialPool() error {
 	if r.CredentialPool == nil {
 		return nil
@@ -339,6 +306,8 @@ func (r RunSpec) validateCredentialPool() error {
 		// the server never reads a client-chosen path off the wire.
 		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; a distributed run with workers ships the reference instead)")
 	}
+	// In-process requirement gates run BEFORE the worker rejection so a missing
+	// signupFlow / loginFlow surfaces its specific reason even for a workers spec.
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
 		// A bootstrap-signup pool provisions one real account per virtual user up
 		// front (the orchestrator compiles its SignupFlow and prewarms it). Two gates
@@ -349,9 +318,6 @@ func (r RunSpec) validateCredentialPool() error {
 		//   2. GATING SAFETY: it must either declare a teardown journey OR opt out with
 		//      KeepAccounts. A bootstrap run with no teardown and no keep-accounts is
 		//      refused, so a load test never strands thousands of real accounts.
-		//
-		// (bootstrap + workers is rejected below, with the other inline-secret pools —
-		// distributed bootstrap is a follow-up that has no shared reference to fan out.)
 		if r.CredentialPool.SignupFlow == nil {
 			return fmt.Errorf("api: the %q strategy needs a signupFlow describing how to provision an account", domain.CredBootstrapSignup)
 		}
@@ -370,34 +336,11 @@ func (r RunSpec) validateCredentialPool() error {
 			return fmt.Errorf("api: %w", err)
 		}
 	}
-	if r.CredentialPool.Strategy == domain.CredMint && hasWorkers {
-		// A mint pool self-issues a JWT per virtual user by signing locally with a key
-		// the operator holds. Distributed mint is plausible (each worker would resolve
-		// the key reference and sign deterministically by global index, like a source
-		// pool), but the key reference rides on the pool itself, not the shared Source
-		// shardSpecFor copies out — so it is kept rejected here as a scoped follow-up,
-		// alongside the other non-source pools. The mint key never serializes regardless.
-		return fmt.Errorf("api: the %q strategy is not supported with distributed workers yet (it signs per-node from a local key reference; distributed mint is a follow-up)", domain.CredMint)
-	}
-	if r.CredentialPool.Strategy == domain.CredExec && hasWorkers {
-		// An exec pool runs an arbitrary local command per virtual user. Its output is a
-		// json:"-" secret workers cannot resolve, and arbitrary command execution is never
-		// fanned out across remote workers — so distributed exec is rejected (the operator
-		// opt-in gate is single-node by construction).
-		return fmt.Errorf("api: the %q strategy is not supported with distributed workers (it runs a local command per user; remote command execution is not fanned out)", domain.CredExec)
-	}
+	// No distributable source and workers requested: reject per the strategy's
+	// centralized rule (authmatrix.go). This rejection is load-bearing for reproduce
+	// fidelity — change the table there, in lockstep with the characterization test.
 	if hasWorkers {
-		// Inline-secret carry (entries pool or a minted login token) cannot fan out:
-		// the secret would serialize into the wire spec / a json:"-" secret the
-		// worker cannot resolve. A bootstrap pool mints real accounts and has no
-		// shared reference to fan out either — distributed bootstrap is a follow-up,
-		// kept rejected here (P3 set this, P4 keeps it). Only a source-backed pool
-		// reaches workers (handled above). This rejection is load-bearing for
-		// reproduce fidelity — see the doc comment before relaxing it.
-		if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
-			return fmt.Errorf("api: the %q strategy is not supported with distributed workers (a bootstrap pool provisions per-node accounts and has no shared reference to fan out; distributed bootstrap is a follow-up)", domain.CredBootstrapSignup)
-		}
-		return fmt.Errorf("api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)")
+		return fmt.Errorf("%s", workerRejectionFor(r.CredentialPool.Strategy))
 	}
 	return nil
 }

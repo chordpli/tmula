@@ -183,3 +183,26 @@ func TestCredentialPoolCharacterization(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthMatrixIsSingleSourceOfTruth asserts the reject/allow table is the one
+// place the distributed-auth decision lives, and pins the reproduce-fidelity
+// invariant sessionUser (api/reproduce.go) depends on: EVERY strategy carries a
+// non-empty WorkerRejection, i.e. NO strategy distributes from an INLINE pool —
+// the only authenticated distributed run is a source-backed pool (the carve-out
+// handled directly in validateCredentialPool). If a future phase lets a strategy
+// distribute inline, this assertion (and sessionUser) must change in lockstep.
+func TestAuthMatrixIsSingleSourceOfTruth(t *testing.T) {
+	strategies := []domain.CredentialStrategy{
+		domain.CredPool,
+		domain.CredLogin,
+		domain.CredBootstrapSignup,
+		domain.CredMint,
+		domain.CredExec,
+	}
+	for _, st := range strategies {
+		msg := runspec.WorkerRejectionForTest(st)
+		if msg == "" {
+			t.Errorf("strategy %q has no worker-rejection message: an inline pool must never distribute (reproduce fidelity)", st)
+		}
+	}
+}
