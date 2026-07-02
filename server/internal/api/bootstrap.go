@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/chordpli/tmula/server/internal/auth"
@@ -147,14 +146,7 @@ func (s *Server) teardownFuncFor(spec RunSpec, sf domain.SignupFlow, guard *safe
 // min(RateCap.MaxConcurrency, bootstrapMaxConcurrency), floored at 1 so a zero/
 // negative cap still makes progress (sequentially).
 func effectivePrewarmConcurrency(rateCapMaxConcurrency int) int {
-	c := rateCapMaxConcurrency
-	if c > bootstrapMaxConcurrency {
-		c = bootstrapMaxConcurrency
-	}
-	if c < 1 {
-		c = 1
-	}
-	return c
+	return prewarmConcurrencyFor(rateCapMaxConcurrency, bootstrapMaxConcurrency)
 }
 
 // Prewarm provisions accounts for indices [0,n) ahead of the run, bounded to the
@@ -162,43 +154,13 @@ func effectivePrewarmConcurrency(rateCapMaxConcurrency int) int {
 // bootstrap-specific cap. Each provision goes through the deduping provider, so a
 // concurrent prewarm still signs up each index exactly once. The first error aborts
 // (a failed provision must fail the run, not run it half-authenticated); a canceled
-// context stops the burst.
+// context stops the burst. It shares the prewarmBounded spine with the login
+// strategy so the two behave identically under a rate cap.
 func (b *bootstrapAuth) Prewarm(ctx context.Context, n int) error {
-	if n <= 0 {
-		return nil
-	}
-	sem := make(chan struct{}, b.prewarmConcurrency)
-	var (
-		wg       sync.WaitGroup
-		errOnce  sync.Once
-		firstErr error
-	)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	for i := 0; i < n; i++ {
-		if ctx.Err() != nil {
-			break
-		}
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			i = n // stop scheduling
-			continue
-		}
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if _, err := b.provider.Acquire(ctx, idx); err != nil {
-				errOnce.Do(func() {
-					firstErr = err
-					cancel() // stop the rest of the burst on the first failure
-				})
-			}
-		}(i)
-	}
-	wg.Wait()
-	return firstErr
+	return prewarmBounded(ctx, n, b.prewarmConcurrency, func(ctx context.Context, idx int) error {
+		_, err := b.provider.Acquire(ctx, idx)
+		return err
+	})
 }
 
 // teardownBaseTimeout and teardownPerAccount scale the deprovision budget with the

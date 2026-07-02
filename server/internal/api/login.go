@@ -25,6 +25,10 @@ type loginAuth struct {
 	// shared is true for the client_credentials scope: every user shares one token
 	// (cache key 0) and one holder. Per-user mints one token per index.
 	shared bool
+	// prewarmConcurrency bounds the per-user prewarm burst: min(RateCap.MaxConcurrency,
+	// loginMaxPrewarmConcurrency), so priming 200k tokens is parallel yet never wider
+	// than the run's rate cap — the prewarm must not itself load-test the IdP.
+	prewarmConcurrency int
 
 	// sharedMu guards the lazy construction of the single shared holder. In the
 	// shared scope every seed() returns the SAME holder POINTER (and the same
@@ -101,20 +105,31 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		refreshRunner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, map[domain.ID]domain.APITemplate{refreshTmpl.ID: refreshTmpl}, load.WithGuard(guard))
 		refreshFunc = NewRefreshTokenFunc(refreshRunner, refreshTmpl, spec.Seed)
 	}
-	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared)
+	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared, spec.TargetEnv.RateCap.MaxConcurrency)
 }
 
+// loginMaxPrewarmConcurrency caps the per-user login prewarm burst regardless of
+// how generous the run's rate cap is, so priming a huge account pool does not slam
+// the IdP with thousands of simultaneous logins. The effective prewarm concurrency
+// is min(this, RateCap.MaxConcurrency).
+const loginMaxPrewarmConcurrency = 16
+
 // newLoginAuthFromToken builds a loginAuth over a token func, an OPTIONAL
-// refresh-token func, and scope. It is the single construction point for the
-// provider, so the run path and tests build the same seam. A nil refresh func keeps
-// the provider's Refresh on the re-login fallback path.
-func newLoginAuthFromToken(token auth.TokenFunc, refresh auth.RefreshTokenFunc, shared bool) (*loginAuth, error) {
+// refresh-token func, scope, and the run's rate-cap concurrency (which bounds the
+// prewarm burst). It is the single construction point for the provider, so the run
+// path and tests build the same seam. A nil refresh func keeps the provider's
+// Refresh on the re-login fallback path.
+func newLoginAuthFromToken(token auth.TokenFunc, refresh auth.RefreshTokenFunc, shared bool, rateCapMaxConcurrency int) (*loginAuth, error) {
 	provider, err := auth.NewLoginProvider(token)
 	if err != nil {
 		return nil, fmt.Errorf("api: build login provider: %w", err)
 	}
 	provider.SetRefreshToken(refresh) // nil-safe
-	return &loginAuth{provider: provider, shared: shared}, nil
+	return &loginAuth{
+		provider:           provider,
+		shared:             shared,
+		prewarmConcurrency: prewarmConcurrencyFor(rateCapMaxConcurrency, loginMaxPrewarmConcurrency),
+	}, nil
 }
 
 // cacheKey maps a user/arrival index onto the login provider's cache key. Per-user
@@ -187,13 +202,19 @@ func (l *loginAuth) refreshFunc(key int, holder load.CredentialHolder) load.Refr
 
 // Prewarm mints n tokens ahead of the run (per-user) or the single shared token
 // (shared), matching how the run will key them — so the first request of every
-// session has a token without a synchronous login on the hot path.
+// session has a token without a synchronous login on the hot path. The per-user
+// burst is bounded (prewarmBounded) so priming a large pool is parallel yet never
+// wider than the rate cap; the deduping provider still logs in each index exactly
+// once even under concurrency. Shared mints its single token directly.
 func (l *loginAuth) Prewarm(ctx context.Context, n int) error {
 	if l.shared {
 		_, err := l.provider.Acquire(ctx, 0)
 		return err
 	}
-	return l.provider.Prewarm(ctx, n)
+	return prewarmBounded(ctx, n, l.prewarmConcurrency, func(ctx context.Context, idx int) error {
+		_, err := l.provider.Acquire(ctx, idx)
+		return err
+	})
 }
 
 // refreshTemplateFor resolves the mid-run refresh transport's request template for a
