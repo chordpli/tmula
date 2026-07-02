@@ -821,6 +821,47 @@ export interface Report {
 // not whether to enable visualization.
 export const MAX_TRACE_USERS = 200
 
+// MAX_WEB_PATTERN_ROWS caps how many rows the browser generates from a pattern.
+// The browser resolves a pool into inline entries (D1) — it never ships a pattern
+// spec — so a huge count would materialize huge text and a huge payload. For a
+// truly large pool (hundreds of thousands) the CLI scenario file's usersPattern
+// generates server-side at expand time; the web generator is a convenience for
+// modest pools.
+export const MAX_WEB_PATTERN_ROWS = 10000
+
+// generateCredentialRows materializes `count` credential rows from a subject/token
+// template pair, substituting {{.userIndex}} for i=0..count-1, into the pasteable
+// text the pool ('tokens'/'csv') or login ('csv') textarea already parses — so a
+// pattern flows through the SAME browser-side parse into inline entries, with no
+// new wire shape. An empty subject template yields a bare-token list ('tokens');
+// otherwise a username,password CSV. It throws on a non-positive/over-cap count or
+// an empty token template so the caller surfaces the reason.
+export function generateCredentialRows(
+  subjectTemplate: string,
+  tokenTemplate: string,
+  count: number,
+  format: 'csv' | 'tokens',
+): string {
+  if (!(count > 0)) throw new Error('pattern needs a positive count')
+  if (count > MAX_WEB_PATTERN_ROWS) {
+    throw new Error(
+      `pattern count ${count} exceeds the browser limit of ${MAX_WEB_PATTERN_ROWS} — use the CLI scenario file's usersPattern for a larger pool`,
+    )
+  }
+  if (!tokenTemplate.trim()) throw new Error('pattern needs a token (or password) template')
+  const render = (tmpl: string, i: number) => tmpl.replace(/\{\{\.userIndex\}\}/g, String(i))
+  const lines: string[] = []
+  if (format === 'tokens') {
+    for (let i = 0; i < count; i++) lines.push(render(tokenTemplate, i))
+    return lines.join('\n')
+  }
+  lines.push('username,password')
+  for (let i = 0; i < count; i++) {
+    lines.push(`${csvCell(render(subjectTemplate, i))},${csvCell(render(tokenTemplate, i))}`)
+  }
+  return lines.join('\n')
+}
+
 // traceable reports whether a run is small enough that the backend will additionally
 // stream per-request trace events — i.e. whether the live view should animate
 // individual requests ('events') or fall back to the aggregate heatmap. It mirrors

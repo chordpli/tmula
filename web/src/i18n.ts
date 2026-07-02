@@ -222,6 +222,18 @@ const en: Record<string, string> = {
   'auth.mode.exec.desc':
     'Last resort. Run your own local command per user and read the token from its stdout — for auth no other strategy can model. Gated, runs locally.',
 
+  // Auth · pattern generator (generate N rows from a subject/token template)
+  'auth.pattern.toggle': 'Generate accounts from a pattern',
+  'auth.pattern.hint':
+    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For a very large pool (100k+), use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
+  'auth.pattern.subject': 'Subject template',
+  'auth.pattern.subjectHint': 'e.g. user{{.userIndex}} \u2014 leave empty for a bare token list.',
+  'auth.pattern.token': 'Secret template',
+  'auth.pattern.tokenHint': 'e.g. pw-{{.userIndex}} (the password for login, or a token for a pool). Not for opaque JWTs \u2014 those come from mint.',
+  'auth.pattern.count': 'Count',
+  'auth.pattern.generate': 'Generate',
+  'auth.pattern.generated': 'Generated {count} rows.',
+
   // Auth · OAuth2 guide (the "It's an OAuth2 service" assembler)
   'auth.mode.oauth2': 'It\u2019s an OAuth2 service',
   'auth.mode.oauth2.desc':
@@ -809,6 +821,18 @@ const ko: Record<string, string> = {
   'auth.mode.exec': '명령으로 토큰 가져오기(탈출구)',
   'auth.mode.exec.desc':
     '최후의 수단입니다. 사용자마다 직접 만든 로컬 명령을 실행해 stdout에서 토큰을 읽습니다 — 다른 전략으로 표현할 수 없는 인증용입니다. 게이트가 걸려 있고, 로컬에서 실행됩니다.',
+
+  // Auth · 패턴 생성기 (subject/token 템플릿으로 N개 행 생성)
+  'auth.pattern.toggle': '패턴으로 계정 생성',
+  'auth.pattern.hint':
+    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 아주 큰 풀(10만+)은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
+  'auth.pattern.subject': 'Subject 템플릿',
+  'auth.pattern.subjectHint': '예: user{{.userIndex}} \u2014 비우면 토큰만 있는 목록이 됩니다.',
+  'auth.pattern.token': 'Secret 템플릿',
+  'auth.pattern.tokenHint': '예: pw-{{.userIndex}} (로그인의 비밀번호 또는 풀의 토큰). 불투명 JWT에는 쓸 수 없습니다 \u2014 그건 mint의 몫입니다.',
+  'auth.pattern.count': '개수',
+  'auth.pattern.generate': '생성',
+  'auth.pattern.generated': '{count}개 행을 생성했습니다.',
 
   // Auth · OAuth2 가이드 ("OAuth2 서비스예요" 조립기)
   'auth.mode.oauth2': 'OAuth2 서비스예요',

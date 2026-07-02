@@ -11,12 +11,14 @@ import {
   createExperiment,
   findReplaceMePlaceholders,
   formFromRunSpec,
+  generateCredentialRows,
   getExperimentSpec,
   getReport,
   hostFromBaseUrl,
   importScenario,
   killRun,
   MAX_TRACE_USERS,
+  MAX_WEB_PATTERN_ROWS,
   mintManagedIdPAdvisory,
   OAUTH2_GUIDE_DEFAULTS,
   openIdConnectDiscoveryUrl,
@@ -1473,7 +1475,111 @@ function AuthPoolFields({
           {t('auth.pool.count', { count })}
         </p>
       ) : null}
+
+      <PatternGenerator
+        format={form.authPoolFormat === 'jsonl' ? 'tokens' : (form.authPoolFormat as 'csv' | 'tokens')}
+        onGenerated={(text) => {
+          // A subject,password pattern is CSV; a bare-token pattern is tokens. Match
+          // the pool format to what was generated so the live parse reads it.
+          set('authPoolFormat', text.startsWith('username,password') ? 'csv' : 'tokens')
+          set('authPoolText', text)
+        }}
+      />
     </div>
+  )
+}
+
+// PatternGenerator is the "generate accounts from a pattern" panel shared by the
+// pool and login cards: a subject/secret template pair and a count that
+// generateCredentialRows materializes into the target textarea (client-side, so
+// it flows through the same parse into inline entries — no new wire shape). For a
+// very large pool the CLI scenario file's usersPattern generates server-side; the
+// help text points there. onGenerated receives the generated text so the caller
+// drops it into its own field.
+function PatternGenerator({
+  format,
+  onGenerated,
+}: {
+  format: 'csv' | 'tokens'
+  onGenerated: (text: string) => void
+}) {
+  const { t } = useI18n()
+  const [subject, setSubject] = useState('user{{.userIndex}}')
+  const [token, setToken] = useState(format === 'tokens' ? 'tok-{{.userIndex}}' : 'pw-{{.userIndex}}')
+  const [count, setCount] = useState(100)
+  const [note, setNote] = useState('')
+  const [err, setErr] = useState('')
+
+  function generate() {
+    setNote('')
+    setErr('')
+    try {
+      const text = generateCredentialRows(subject, token, count, format)
+      onGenerated(text)
+      setNote(t('auth.pattern.generated', { count }))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  return (
+    <details className="advanced">
+      <summary className="advanced__summary">
+        {t('auth.pattern.toggle')}
+        <span className="field__badge">{t('badge.optional')}</span>
+      </summary>
+      <div className="stack advanced__body" style={{ gap: 16 }}>
+        <p className="card__hint">{t('auth.pattern.hint')}</p>
+        <div className="field-row field-row--2">
+          <Field label={t('auth.pattern.subject')} help={t('auth.pattern.subjectHint')}>
+            <input
+              className="input"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="user{{.userIndex}}"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={t('auth.pattern.token')} help={t('auth.pattern.tokenHint')}>
+            <input
+              className="input"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="pw-{{.userIndex}}"
+              spellCheck={false}
+            />
+          </Field>
+        </div>
+        <div className="field-row field-row--2">
+          <Field label={t('auth.pattern.count')}>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={MAX_WEB_PATTERN_ROWS}
+              value={count}
+              onChange={(e) => setCount(Math.max(1, Math.floor(Number(e.target.value) || 0)))}
+            />
+          </Field>
+          <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+            <button type="button" className="btn btn--ghost" onClick={generate}>
+              {t('auth.pattern.generate')}
+            </button>
+          </div>
+        </div>
+        {err ? (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{err}</span>
+          </div>
+        ) : note ? (
+          <p className="authpanel__ok" role="status">
+            <CheckMini />
+            {note}
+          </p>
+        ) : null}
+      </div>
+    </details>
   )
 }
 
@@ -1766,6 +1872,9 @@ function AuthLoginCredList({
             {t('auth.login.cred.count', { count })}
           </p>
         ) : null}
+
+        {/* Login rows are always username,password CSV. */}
+        <PatternGenerator format="csv" onGenerated={onCredText} />
       </div>
     </details>
   )

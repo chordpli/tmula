@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 )
@@ -308,6 +310,80 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += int64(n)
 	return n, err
+}
+
+// generatorMaxCount caps how many credentials a pattern source materializes,
+// matching the in-process pool ceiling (api.maxLocalPoolUsers) so a pattern
+// cannot declare a pool larger than a single node can run.
+const generatorMaxCount = 1_000_000
+
+// GeneratorSource materializes a credential pool from a subject/secret TEMPLATE
+// pair and a count, rendering {{.userIndex}} for i=0..Count-1 — so an operator
+// can declare tens of thousands of accounts with a pattern instead of a file
+// (auth.usersPattern). It renders with the auth package's own mini-template
+// (the mint/exec convention), so it adds no dependency on the load package. The
+// secret TEMPLATE is a secret: a GeneratorSource is built and materialized at
+// Expand time and is NEVER carried as a non-secret reference (unlike FileSource/
+// EnvSource), so the template string never rides the wire.
+type GeneratorSource struct {
+	subject *template.Template // nil when the subject template is empty
+	secret  *template.Template
+	count   int
+}
+
+// NewGeneratorSource parses the subject/secret templates and validates the count
+// (positive and within the pool ceiling). The secret template is required; an
+// empty subject template yields empty subjects (the opaque-token shape). A
+// malformed template fails here; a template referencing an undefined variable
+// fails on Load (missingkey=error), matching the mint strategy's strictness.
+func NewGeneratorSource(subjectTemplate, secretTemplate string, count int) (*GeneratorSource, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("auth: pattern credential source needs a positive count")
+	}
+	if count > generatorMaxCount {
+		return nil, fmt.Errorf("auth: pattern credential source count %d exceeds the %d limit", count, generatorMaxCount)
+	}
+	if strings.TrimSpace(secretTemplate) == "" {
+		return nil, fmt.Errorf("auth: pattern credential source needs a secret (token/password) template")
+	}
+	g := &GeneratorSource{count: count}
+	if strings.TrimSpace(subjectTemplate) != "" {
+		t, err := parseClaimTemplate("pattern subject", subjectTemplate)
+		if err != nil {
+			return nil, err
+		}
+		g.subject = t
+	}
+	sec, err := parseClaimTemplate("pattern secret", secretTemplate)
+	if err != nil {
+		return nil, err
+	}
+	g.secret = sec
+	return g, nil
+}
+
+// Load materializes the pool: for each index it renders the subject (if any) and
+// the secret with {{.userIndex}} in scope. A render error (e.g. an undefined
+// variable under missingkey=error) aborts with the failing index named.
+func (g *GeneratorSource) Load(_ context.Context) ([]domain.Credential, error) {
+	out := make([]domain.Credential, 0, g.count)
+	for i := 0; i < g.count; i++ {
+		data := map[string]string{"userIndex": strconv.Itoa(i)}
+		var subject string
+		if g.subject != nil {
+			s, err := execTemplate(g.subject, data)
+			if err != nil {
+				return nil, fmt.Errorf("auth: pattern credential %d: render subject: %w", i, err)
+			}
+			subject = s
+		}
+		secret, err := execTemplate(g.secret, data)
+		if err != nil {
+			return nil, fmt.Errorf("auth: pattern credential %d: render secret: %w", i, err)
+		}
+		out = append(out, domain.Credential{Subject: subject, Secret: secret})
+	}
+	return out, nil
 }
 
 // SourceFromRef builds a CredentialSource from a non-secret domain reference (a

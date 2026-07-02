@@ -391,3 +391,71 @@ func TestSourceFromRefThreadsMaxBytes(t *testing.T) {
 		t.Errorf("MaxBytes = %d, want 42", fs.MaxBytes)
 	}
 }
+
+// TestGeneratorSourceMaterializes renders subject+secret templates for i=0..N-1,
+// substituting {{.userIndex}}, in order.
+func TestGeneratorSourceMaterializes(t *testing.T) {
+	src, err := NewGeneratorSource("user{{.userIndex}}", "pw-{{.userIndex}}", 3)
+	if err != nil {
+		t.Fatalf("NewGeneratorSource: %v", err)
+	}
+	got, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []domain.Credential{
+		{Subject: "user0", Secret: "pw-0"},
+		{Subject: "user1", Secret: "pw-1"},
+		{Subject: "user2", Secret: "pw-2"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestGeneratorSourceEmptySubjectOK: a pattern may generate opaque secrets with
+// no subject (subject template empty → empty subject), the tokens-style shape.
+func TestGeneratorSourceEmptySubjectOK(t *testing.T) {
+	src, err := NewGeneratorSource("", "tok-{{.userIndex}}", 2)
+	if err != nil {
+		t.Fatalf("NewGeneratorSource: %v", err)
+	}
+	got, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 2 || got[0].Subject != "" || got[0].Secret != "tok-0" {
+		t.Fatalf("rows = %+v, want empty-subject tok-0/tok-1", got)
+	}
+}
+
+// TestGeneratorSourceRejectsBadInput: a non-positive count, a count over the cap,
+// an empty secret template, and a malformed template all fail loudly at build.
+func TestGeneratorSourceRejectsBadInput(t *testing.T) {
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "pw", 0); err == nil {
+		t.Error("count 0 should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "pw", generatorMaxCount+1); err == nil {
+		t.Error("count over the cap should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "", 1); err == nil {
+		t.Error("an empty secret template should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userInxed}}", "pw", 1); err != nil {
+		// A typo'd var is a build-time render error (missingkey=error) on Load, not
+		// at construction; assert Load surfaces it.
+		t.Fatalf("construction should not fail on a parseable-but-wrong var: %v", err)
+	}
+	badVar, _ := NewGeneratorSource("u{{.userInxed}}", "pw", 1)
+	if _, err := badVar.Load(context.Background()); err == nil {
+		t.Error("a template referencing an undefined var should fail on Load")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex", "pw", 1); err == nil {
+		t.Error("a malformed template should be rejected at construction")
+	}
+}

@@ -18,6 +18,8 @@ import {
   compareURL,
   formatCount,
   formFromRunSpec,
+  generateCredentialRows,
+  MAX_WEB_PATTERN_ROWS,
   getExperimentSpec,
   graphDepths,
   HEAT_ERR,
@@ -2230,5 +2232,36 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('generateCredentialRows', () => {
+  it('generates csv rows with a subject,token header substituting {{.userIndex}}', () => {
+    const text = generateCredentialRows('user{{.userIndex}}', 'pw-{{.userIndex}}', 3, 'csv')
+    expect(text).toBe('username,password\nuser0,pw-0\nuser1,pw-1\nuser2,pw-2')
+    // Flows straight through the login credential parser into per-user rows.
+    expect(parseLoginCredentials('csv', text)).toEqual([
+      { subject: 'user0', token: 'pw-0' },
+      { subject: 'user1', token: 'pw-1' },
+      { subject: 'user2', token: 'pw-2' },
+    ])
+  })
+
+  it('generates a tokens list when the subject template is empty', () => {
+    const text = generateCredentialRows('', 'tok-{{.userIndex}}', 2, 'tokens')
+    expect(text).toBe('tok-0\ntok-1')
+    expect(parseCredentials('tokens', text)).toEqual([{ token: 'tok-0' }, { token: 'tok-1' }])
+  })
+
+  it('quotes csv cells that carry a comma so the row round-trips', () => {
+    const text = generateCredentialRows('u{{.userIndex}}', 'a,b{{.userIndex}}', 1, 'csv')
+    expect(text).toBe('username,password\nu0,"a,b0"')
+    expect(parseLoginCredentials('csv', text)).toEqual([{ subject: 'u0', token: 'a,b0' }])
+  })
+
+  it('rejects a non-positive count, a count over the client cap, and an empty token template', () => {
+    expect(() => generateCredentialRows('u{{.userIndex}}', 'pw', 0, 'csv')).toThrow()
+    expect(() => generateCredentialRows('u{{.userIndex}}', 'pw', MAX_WEB_PATTERN_ROWS + 1, 'csv')).toThrow()
+    expect(() => generateCredentialRows('u{{.userIndex}}', '', 1, 'csv')).toThrow()
   })
 })
