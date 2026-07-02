@@ -5,6 +5,7 @@ import (
 	"testing"
 	"text/template"
 
+	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
 
@@ -27,7 +28,9 @@ func assertTemplateSafe(t *testing.T, label, body string) {
 	if !strings.Contains(body, "{{") {
 		return // brace-free: rendered verbatim, always safe
 	}
-	if _, err := template.New(label).Option("missingkey=error").Parse(body); err != nil {
+	// Parse with the same function set the run path renders with (load.apply), so a
+	// derived value using a run-path func (e.g. basicAuth) parses here exactly as there.
+	if _, err := template.New(label).Option("missingkey=error").Funcs(load.TemplateFuncs()).Parse(body); err != nil {
 		t.Errorf("%s is not a renderable template (would break the run): %q: %v", label, body, err)
 	}
 }
@@ -370,5 +373,133 @@ paths:
 	// a broken one.
 	if s.Auth != nil && s.Auth.Strategy == "login" {
 		t.Errorf("a flows-less oauth2 scheme must not yield a login block, got %+v", s.Auth)
+	}
+}
+
+// TestSecurityHTTPBasic derives a pool block from an http basic scheme: the
+// credential row is username (subject) + password (token) and secured operations
+// carry an RFC 7617 Authorization header built by the run path's basicAuth
+// template function. No login flow is invented — basic re-sends the credential
+// on every request.
+func TestSecurityHTTPBasic(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+components:
+  securitySchemes:
+    basic:
+      type: http
+      scheme: basic
+security:
+  - basic: []
+paths:
+  /items:
+    get:
+      operationId: listItems
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	if s.Auth == nil || s.Auth.Strategy != "pool" {
+		t.Fatalf("auth = %+v, want a pool strategy", s.Auth)
+	}
+	if s.Auth.Login != nil {
+		t.Errorf("must not invent a login flow for http basic, got %+v", s.Auth.Login)
+	}
+	if len(s.Auth.Users) != 1 ||
+		s.Auth.Users[0].Subject != "REPLACE_ME_USERNAME" ||
+		s.Auth.Users[0].Token != "REPLACE_ME_PASSWORD" {
+		t.Errorf("users = %+v, want a single REPLACE_ME_USERNAME/REPLACE_ME_PASSWORD entry", s.Auth.Users)
+	}
+	get := findStep(s, "GET /items")
+	if get == nil || get.Headers["Authorization"] != "Basic {{basicAuth .subject .token}}" {
+		t.Errorf("GET /items auth header = %+v, want Basic {{basicAuth .subject .token}}", get)
+	}
+	if get != nil {
+		assertTemplateSafe(t, "basic auth header", get.Headers["Authorization"])
+	}
+}
+
+// TestSecurityAPIKeyQuery emits a pool placeholder for an apiKey-in-query scheme:
+// the named query parameter is appended to each secured operation's request path
+// as a space-free {{.token|urlquery}} template (parseRequest demands a two-field
+// "METHOD /path" line, so the pipe carries no spaces).
+func TestSecurityAPIKeyQuery(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: query
+      name: api_key
+security:
+  - apiKey: []
+paths:
+  /items:
+    get:
+      operationId: listItems
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	if s.Auth == nil || s.Auth.Strategy != "pool" {
+		t.Fatalf("auth = %+v, want a pool strategy", s.Auth)
+	}
+	if len(s.Auth.Users) != 1 || s.Auth.Users[0].Token != "REPLACE_ME_API_KEY" {
+		t.Errorf("users = %+v, want a single REPLACE_ME_API_KEY entry", s.Auth.Users)
+	}
+	get := findStep(s, "GET /items?api_key={{.token|urlquery}}")
+	if get == nil {
+		t.Fatalf("no step with the api_key query appended; flow = %+v", s.Flow)
+	}
+	if len(get.Headers) != 0 {
+		t.Errorf("a query apiKey must not inject a header, got %+v", get.Headers)
+	}
+	assertTemplateSafe(t, "query apiKey path", get.Request)
+	if _, err := scenariofile.Expand(s); err != nil {
+		t.Errorf("expand imported scenario: %v", err)
+	}
+}
+
+// TestSecurityAPIKeyCookie emits a pool placeholder for an apiKey-in-cookie
+// scheme: secured operations carry a Cookie header pairing the named cookie with
+// {{.token}}.
+func TestSecurityAPIKeyCookie(t *testing.T) {
+	const doc = `
+openapi: 3.0.0
+servers:
+  - url: http://api.example.com
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: cookie
+      name: session
+security:
+  - apiKey: []
+paths:
+  /items:
+    get:
+      operationId: listItems
+`
+	s, err := FromOpenAPI([]byte(doc))
+	if err != nil {
+		t.Fatalf("FromOpenAPI: %v", err)
+	}
+	if s.Auth == nil || s.Auth.Strategy != "pool" {
+		t.Fatalf("auth = %+v, want a pool strategy", s.Auth)
+	}
+	get := findStep(s, "GET /items")
+	if get == nil || get.Headers["Cookie"] != "session={{.token}}" {
+		t.Errorf("GET /items Cookie header = %+v, want session={{.token}}", get)
+	}
+	if get != nil {
+		assertTemplateSafe(t, "cookie apiKey header", get.Headers["Cookie"])
 	}
 }

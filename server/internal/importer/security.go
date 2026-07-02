@@ -10,8 +10,8 @@ import (
 
 // securityScheme is the subset of an OpenAPI components.securitySchemes entry the
 // importer reads to derive auth. It spans the three families tmula can act on:
-// oauth2 (with flows), http (bearer), and apiKey (a static header). Anything else
-// (mutualTLS, openIdConnect, http basic) parses but yields no derivable auth.
+// oauth2 (with flows), http (bearer or basic), and apiKey (a static key). Anything
+// else (mutualTLS, openIdConnect, http digest) parses but yields no derivable auth.
 type securityScheme struct {
 	Type   string                `json:"type"`   // oauth2 | http | apiKey | ...
 	Scheme string                `json:"scheme"` // http: bearer | basic | ...
@@ -40,6 +40,11 @@ type derivedAuth struct {
 	auth        *scenariofile.Auth
 	header      string // the header injected on secured operations (e.g. Authorization)
 	headerValue string // the value template (e.g. "Bearer {{.token}}")
+	// queryParam, when set, appends "<name>={{.token|urlquery}}" to each secured
+	// operation's request path instead of injecting a header (the apiKey-in-query
+	// scheme). The template is space-free because parseRequest demands a two-field
+	// "METHOD /path" line.
+	queryParam string
 	// schemeNames are the scheme names this derivation covers, so a per-operation
 	// security requirement naming any of them marks that operation secured.
 	schemeNames map[string]bool
@@ -82,12 +87,15 @@ func deriveAuth(doc openAPIDoc, ops []apiOp) *derivedAuth {
 		if strings.EqualFold(scheme.Scheme, "bearer") {
 			return deriveHTTPBearer(name, ops)
 		}
-		return nil // http basic / digest: no token flow to derive
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return deriveHTTPBasic(name)
+		}
+		return nil // http digest: no token flow to derive
 	case "apikey":
-		if strings.EqualFold(scheme.In, "header") && scheme.Name != "" {
+		if apiKeyIn(scheme) != "" {
 			return deriveAPIKey(name, scheme)
 		}
-		return nil // query/cookie apiKey: not a header we can inject here
+		return nil // unnamed or unknown-location apiKey: nothing to inject
 	default:
 		return nil
 	}
@@ -125,11 +133,26 @@ func classifiable(sc securityScheme) bool {
 		flowName, _ := pickOAuth2Flow(sc.Flows)
 		return flowName != ""
 	case "http":
-		return strings.EqualFold(sc.Scheme, "bearer")
+		return strings.EqualFold(sc.Scheme, "bearer") || strings.EqualFold(sc.Scheme, "basic")
 	case "apikey":
-		return strings.EqualFold(sc.In, "header") && sc.Name != ""
+		return apiKeyIn(sc) != ""
 	default:
 		return false
+	}
+}
+
+// apiKeyIn returns the normalized location of a usable apiKey scheme (header,
+// query or cookie), or "" when the scheme is unnamed or somewhere the importer
+// cannot inject.
+func apiKeyIn(sc securityScheme) string {
+	if sc.Name == "" {
+		return ""
+	}
+	switch strings.ToLower(sc.In) {
+	case "header", "query", "cookie":
+		return strings.ToLower(sc.In)
+	default:
+		return ""
 	}
 }
 
@@ -209,19 +232,46 @@ func deriveHTTPBearer(name string, ops []apiOp) *derivedAuth {
 	}
 }
 
-// deriveAPIKey handles an apiKey-in-header scheme: a pool placeholder for the key
-// plus the named header injected as {{.token}} on secured operations. No login
-// flow is invented — the key is static.
-func deriveAPIKey(name string, sc securityScheme) *derivedAuth {
+// deriveHTTPBasic handles an http basic scheme: the credential row is username
+// (subject) + password (token), and secured operations carry an RFC 7617
+// Authorization header built by the run path's basicAuth template function. No
+// login flow exists to derive — basic re-sends the credential on every request.
+func deriveHTTPBasic(name string) *derivedAuth {
 	return &derivedAuth{
+		auth: &scenariofile.Auth{
+			Strategy: "pool",
+			Users:    []scenariofile.Credential{{Subject: "REPLACE_ME_USERNAME", Token: "REPLACE_ME_PASSWORD"}},
+		},
+		header:      "Authorization",
+		headerValue: "Basic {{basicAuth .subject .token}}",
+		schemeNames: map[string]bool{name: true},
+	}
+}
+
+// deriveAPIKey handles an apiKey scheme: a pool placeholder for the key plus the
+// key injected on secured operations where the scheme says it lives — the named
+// header as {{.token}}, the named query parameter appended to the request path,
+// or a Cookie header pairing the named cookie with {{.token}}. No login flow is
+// invented — the key is static.
+func deriveAPIKey(name string, sc securityScheme) *derivedAuth {
+	d := &derivedAuth{
 		auth: &scenariofile.Auth{
 			Strategy: "pool",
 			Users:    []scenariofile.Credential{{Subject: "tester", Token: "REPLACE_ME_API_KEY"}},
 		},
-		header:      sc.Name,
-		headerValue: "{{.token}}",
 		schemeNames: map[string]bool{name: true},
 	}
+	switch apiKeyIn(sc) {
+	case "query":
+		d.queryParam = sc.Name
+	case "cookie":
+		d.header = "Cookie"
+		d.headerValue = sc.Name + "={{.token}}"
+	default: // header
+		d.header = sc.Name
+		d.headerValue = "{{.token}}"
+	}
+	return d
 }
 
 // secures reports whether an operation requires one of the derived scheme(s).
