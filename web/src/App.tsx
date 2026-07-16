@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  assembleLoginBody,
   AUTH_FORM_DEFAULTS,
   authFormFromImport,
   authFormFromOAuth2Guide,
@@ -18,9 +19,12 @@ import {
   hostFromBaseUrl,
   importScenario,
   killRun,
+  localizeError,
+  LOGIN_BODY_MULTI,
+  LOGIN_BODY_SINGLE,
+  loginBodyOverwritable,
   MAX_TRACE_USERS,
   MAX_WEB_PATTERN_ROWS,
-  localizeError,
   mintManagedIdPAdvisory,
   oauth2GuideCanCompileOver,
   openIdConnectDiscoveryUrl,
@@ -135,15 +139,6 @@ const loginTemplatesPlaceholder = `{
     "extract": { "access_token": "$.access_token" }
   }
 }`
-
-// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
-// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so we can detect when the operator has not
-// edited it yet. LOGIN_BODY_MULTI is the smart default the multi-user path suggests:
-// each virtual user logs in as the NEXT credential-list row, so the body reads the row
-// via the {{.username}}/{{.password}} Go-template markers the backend exposes (NOT the
-// {username}/{password} markers the single-identity body uses).
-const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
-const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
 
 // signupStepsPlaceholder shows the bootstrap signup journey shape: a step list with a
 // bare method/path and an extract that captures the token. teardownPlaceholder shows
@@ -1793,18 +1788,51 @@ function AuthLoginFields({
   const { t } = useI18n()
   const simple = form.loginMode === 'simple'
   const hasCredList = form.loginCredText.trim().length > 0
-  // Smart default: when the operator supplies a credential list, the per-row body should
-  // pull the row in via {{.username}}/{{.password}}. Suggest the multi-user body ONLY
-  // when the current body is still untouched (the single-identity default) so we never
-  // clobber a hand-edited body; the operator can also apply it from the hint.
-  const bodyIsDefault = form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
-  const suggestMultiBody = hasCredList && bodyIsDefault
+  // The quick form may only regenerate an overwritable body (empty / shipped
+  // default / previously generated) — a hand-edited or imported body is the
+  // source of truth and shows the "custom body" note + explicit reset instead.
+  const canQuick = loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)
+  // Legacy affordance: a still-default single-identity body next to a credential
+  // list offers the one-click multi-user upgrade.
+  const suggestMultiBody = hasCredList && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
+
+  // assembleBody writes the quick-form answers into loginBodyTemplate. Row
+  // markers when a credential list is present; the literal values otherwise.
+  function assembleBody(useRowMarkers: boolean) {
+    set(
+      'loginBodyTemplate',
+      assembleLoginBody(
+        form.loginQuickUserField,
+        form.loginQuickPassField,
+        form.loginQuickUser,
+        form.loginQuickPass,
+        useRowMarkers,
+      ),
+    )
+    set('loginBodyGenerated', true)
+  }
+
+  // assembleNow flushes on BLUR (not per keystroke), so the masked password never
+  // streams into a visible textarea while it is typed. It never overwrites a
+  // hand-edited body, and it refuses to generate an empty-credential body from a
+  // stray focus.
+  function assembleNow() {
+    if (!loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)) return
+    if (!hasCredList && !form.loginQuickUser && !form.loginQuickPass) return
+    assembleBody(hasCredList)
+  }
+
   function setCredText(text: string) {
     set('loginCredText', text)
-    // The first time a list appears, auto-upgrade an untouched body to the per-row
-    // template so the common case just works; a hand-edited body is left as-is.
-    if (text.trim() && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE) {
-      set('loginBodyTemplate', LOGIN_BODY_MULTI)
+    // A list means per-row login: re-assemble an overwritable body with the
+    // {{.username}}/{{.password}} row markers so the common case just works. A
+    // hand-edited body is left as-is (the doctor warns if it ignores the rows).
+    if (text.trim() && loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)) {
+      set(
+        'loginBodyTemplate',
+        assembleLoginBody(form.loginQuickUserField, form.loginQuickPassField, form.loginQuickUser, form.loginQuickPass, true),
+      )
+      set('loginBodyGenerated', true)
     }
   }
   return (
@@ -1851,32 +1879,50 @@ function AuthLoginFields({
             </Field>
           </div>
 
-          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
-
-          <Field
-            label={t('auth.login.body')}
-            help={t('auth.login.bodyHint')}
-            tip={<HelpTip label={t('auth.login.body')} text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')} />}
-          >
-            <textarea
-              className="textarea"
-              value={form.loginBodyTemplate}
-              onChange={(e) => set('loginBodyTemplate', e.target.value)}
-              rows={4}
-              placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
-              spellCheck={false}
-            />
-          </Field>
-          {suggestMultiBody && (
-            <button
-              type="button"
-              className="btn btn--ghost"
-              style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
-              onClick={() => set('loginBodyTemplate', LOGIN_BODY_MULTI)}
-            >
-              {t('auth.login.body.useMulti')}
-            </button>
+          {/* The QUICK FORM: first contact fills Username + Password and the JSON
+              body assembles itself — no JSON authoring, no inert {username}
+              markers. With a credential list the body templates the rows instead,
+              so the single-identity inputs step aside. */}
+          {canQuick && !hasCredList && (
+            <div className="field-row field-row--2">
+              <Field label={t('auth.login.quick.user')} help={t('auth.login.quick.userHint')}>
+                <input
+                  className="input"
+                  value={form.loginQuickUser}
+                  onChange={(e) => set('loginQuickUser', e.target.value)}
+                  onBlur={assembleNow}
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+              </Field>
+              <Field label={t('auth.login.quick.pass')} help={t('auth.login.quick.passHint')}>
+                <input
+                  className="input"
+                  type="password"
+                  value={form.loginQuickPass}
+                  onChange={(e) => set('loginQuickPass', e.target.value)}
+                  onBlur={assembleNow}
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
           )}
+          {canQuick && hasCredList && <p className="card__hint">{t('auth.login.quick.rows')}</p>}
+          {!canQuick && (
+            <div className="stack" style={{ gap: 8 }}>
+              <p className="card__hint">{t('auth.login.quick.custom')}</p>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+                onClick={() => assembleBody(hasCredList)}
+              >
+                {t('auth.login.quick.reset')}
+              </button>
+            </div>
+          )}
+
+          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
         </>
       ) : (
         <AuthLoginAdvancedBody form={form} set={set} />
@@ -1894,6 +1940,72 @@ function AuthLoginFields({
             label={t('auth.advanced.rawLogin')}
             sub={t('auth.advanced.rawLoginSub')}
           />
+          {/* The raw body textarea lives HERE now (item: no JSON authoring on
+              first contact): editing it marks the body hand-authored, which
+              stops the quick form from regenerating over it. The field-name
+              overrides feed the quick-form assembly. */}
+          {simple && (
+            <>
+              <div className="field-row field-row--2">
+                <Field label={t('auth.login.quick.userField')} help={t('auth.login.quick.userFieldHint')}>
+                  <input
+                    className="input"
+                    value={form.loginQuickUserField}
+                    onChange={(e) => set('loginQuickUserField', e.target.value)}
+                    onBlur={assembleNow}
+                    placeholder="username"
+                    spellCheck={false}
+                  />
+                </Field>
+                <Field label={t('auth.login.quick.passField')} help={t('auth.login.quick.passFieldHint')}>
+                  <input
+                    className="input"
+                    value={form.loginQuickPassField}
+                    onChange={(e) => set('loginQuickPassField', e.target.value)}
+                    onBlur={assembleNow}
+                    placeholder="password"
+                    spellCheck={false}
+                  />
+                </Field>
+              </div>
+              <Field
+                label={t('auth.login.body')}
+                help={t('auth.login.bodyHint')}
+                tip={
+                  <HelpTip
+                    label={t('auth.login.body')}
+                    text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')}
+                  />
+                }
+              >
+                <textarea
+                  className="textarea"
+                  value={form.loginBodyTemplate}
+                  onChange={(e) => {
+                    set('loginBodyTemplate', e.target.value)
+                    // Hand edit: this body is now the source of truth.
+                    set('loginBodyGenerated', false)
+                  }}
+                  rows={4}
+                  placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
+                  spellCheck={false}
+                />
+              </Field>
+              {suggestMultiBody && (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+                  onClick={() => {
+                    set('loginBodyTemplate', LOGIN_BODY_MULTI)
+                    set('loginBodyGenerated', true)
+                  }}
+                >
+                  {t('auth.login.body.useMulti')}
+                </button>
+              )}
+            </>
+          )}
           <div className="field-row field-row--2">
             <Field
               label={t('auth.login.tokenVar')}

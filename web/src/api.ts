@@ -166,6 +166,20 @@ export interface ExperimentForm {
   replaceMeValues: Record<string, string>
 
   // --- UI-only fields (NEVER serialized into the RunSpec) ----------------------
+  // The login QUICK FORM (first-contact path): Username/Password inputs that
+  // ASSEMBLE the JSON login body, so nobody authors JSON (or meets the inert
+  // {username}/{password} markers) on first contact. The field names default to
+  // username/password and are overridable behind Advanced. These fields only
+  // author loginBodyTemplate — they never cross the wire themselves.
+  loginQuickUser: string
+  loginQuickPass: string
+  loginQuickUserField: string // JSON field name for the username (default "username")
+  loginQuickPassField: string // JSON field name for the password (default "password")
+  // loginBodyGenerated marks that loginBodyTemplate was written by the quick form
+  // (or another assembler), so regenerating over it is safe. Cleared the moment
+  // the operator edits the raw body textarea — a hand-edited body is the source
+  // of truth and is never clobbered (same rule as the OAuth2 guide).
+  loginBodyGenerated: boolean
   // authEntryOAuth2 remembers that the operator's Auth-card entry is the OAuth2
   // guide — a pseudo-entry that compiles onto the 'login' wire mode, so it cannot
   // be derived from authMode alone. Living on the form (instead of component
@@ -293,6 +307,46 @@ export interface MintSpec {
   ttl: string // Go duration string (e.g. "1h0m0s") the backend parses into a time.Duration
 }
 
+// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
+// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so callers can detect an untouched
+// body. LOGIN_BODY_MULTI is the multi-user default: each virtual user logs in as
+// the NEXT credential-list row via the {{.username}}/{{.password}} Go-template
+// markers the backend exposes (NOT the inert single-brace markers).
+export const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
+export const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
+
+// assembleLoginBody builds the JSON login body from the quick-form answers, so
+// first contact never requires authoring JSON by hand. With a credential list
+// (useRowMarkers) the body references the per-row {{.username}}/{{.password}}
+// markers; without one it inlines the literal values. Field names default to
+// username/password; everything is JSON-encoded properly, so a generated body
+// NEVER carries the inert single-brace {username}/{password} markers.
+export function assembleLoginBody(
+  userField: string,
+  passField: string,
+  username: string,
+  password: string,
+  useRowMarkers: boolean,
+): string {
+  const uf = userField.trim() || 'username'
+  const pf = passField.trim() || 'password'
+  const body: Record<string, string> = {}
+  body[uf] = useRowMarkers ? '{{.username}}' : username
+  body[pf] = useRowMarkers ? '{{.password}}' : password
+  return JSON.stringify(body)
+}
+
+// loginBodyOverwritable reports whether an assembler (the quick form, the curl
+// filler, the cred-list upgrade) may regenerate the login body without asking:
+// only over an empty body, the shipped defaults, or a body an assembler itself
+// generated (the loginBodyGenerated bit, cleared when the operator edits the raw
+// textarea). A hand-edited body is the source of truth — same no-clobber rule as
+// the OAuth2 guide.
+export function loginBodyOverwritable(body: string, generated: boolean): boolean {
+  const b = body.trim()
+  return generated || b === '' || b === LOGIN_BODY_SINGLE || b === LOGIN_BODY_MULTI
+}
+
 // OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
 // guide: a username+password (password grant), a client key (client_credentials),
 // a refresh token pasted from an app/browser session (refresh_token — the answer
@@ -387,6 +441,11 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'execEnvText'
   | 'execTimeoutSeconds'
   | 'replaceMeValues'
+  | 'loginQuickUser'
+  | 'loginQuickPass'
+  | 'loginQuickUserField'
+  | 'loginQuickPassField'
+  | 'loginBodyGenerated'
   | 'authEntryOAuth2'
   | 'oauth2Guide'
 > = {
@@ -396,7 +455,7 @@ export const AUTH_FORM_DEFAULTS: Pick<
   loginMode: 'simple',
   loginUrlMethod: 'POST',
   loginUrlPath: '',
-  loginBodyTemplate: '{"username": "{username}", "password": "{password}"}',
+  loginBodyTemplate: LOGIN_BODY_SINGLE,
   loginGraphJSON: '',
   loginTemplatesJSON: '',
   loginStart: '',
@@ -433,6 +492,11 @@ export const AUTH_FORM_DEFAULTS: Pick<
   execEnvText: '',
   execTimeoutSeconds: 30,
   replaceMeValues: {},
+  loginQuickUser: '',
+  loginQuickPass: '',
+  loginQuickUserField: 'username',
+  loginQuickPassField: 'password',
+  loginBodyGenerated: false,
   authEntryOAuth2: false,
   oauth2Guide: OAUTH2_GUIDE_DEFAULTS,
 }

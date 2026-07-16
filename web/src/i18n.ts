@@ -369,6 +369,21 @@ const en: Record<string, string> = {
     'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
   'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
 
+  // Auth · login · quick form (no JSON authoring on first contact)
+  'auth.login.quick.user': 'Username',
+  'auth.login.quick.userHint': 'tmula builds the JSON login body from these two fields — no JSON needed.',
+  'auth.login.quick.pass': 'Password',
+  'auth.login.quick.passHint': 'Substituted into the body when you leave the field; part of this run’s spec on the control plane.',
+  'auth.login.quick.userField': 'Username field name',
+  'auth.login.quick.userFieldHint': 'The JSON key the login API expects for the username (default: username).',
+  'auth.login.quick.passField': 'Password field name',
+  'auth.login.quick.passFieldHint': 'The JSON key the login API expects for the password (default: password).',
+  'auth.login.quick.rows':
+    'A credential list is supplied — the login body templates each row in via {{.username}}/{{.password}} automatically.',
+  'auth.login.quick.custom':
+    'This login uses a custom body (imported or hand-edited) — review or edit it under Advanced. It will not be overwritten.',
+  'auth.login.quick.reset': 'Start over with the quick form',
+
   // Auth · login · simple-form URL, the import "secrets to fill" panel, and Advanced toggle
   'auth.login.url': 'Login URL',
   'auth.login.urlHint': 'The endpoint tmula posts to in order to log in. Pick the method and give the path, e.g. POST /login.',
@@ -1066,6 +1081,21 @@ const ko: Record<string, string> = {
   'auth.login.body.multiTip':
     '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
   'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
+
+  // Auth · 로그인 · 퀵 폼 (첫 사용에 JSON 작성 불필요)
+  'auth.login.quick.user': '아이디',
+  'auth.login.quick.userHint': '이 두 칸만 채우면 tmula가 JSON 로그인 본문을 만들어 줍니다 — JSON이 필요 없습니다.',
+  'auth.login.quick.pass': '비밀번호',
+  'auth.login.quick.passHint': '칸을 벗어날 때 본문에 채워집니다. 이 실행의 spec으로 컨트롤 플레인에 남습니다.',
+  'auth.login.quick.userField': '아이디 필드 이름',
+  'auth.login.quick.userFieldHint': '로그인 API가 기대하는 아이디의 JSON 키입니다(기본값: username).',
+  'auth.login.quick.passField': '비밀번호 필드 이름',
+  'auth.login.quick.passFieldHint': '로그인 API가 기대하는 비밀번호의 JSON 키입니다(기본값: password).',
+  'auth.login.quick.rows':
+    '자격 증명 목록이 있습니다 — 로그인 본문이 각 행을 {{.username}}/{{.password}}로 자동으로 채워 넣습니다.',
+  'auth.login.quick.custom':
+    '이 로그인은 직접 작성했거나 가져온 본문을 사용합니다 — 고급에서 확인·수정하세요. 덮어쓰지 않습니다.',
+  'auth.login.quick.reset': '퀵 폼으로 다시 시작',
 
   // Auth · 로그인 · 간단 양식 URL, 가져오기 "비밀값 입력" 패널, 고급 토글
   'auth.login.url': '로그인 URL',

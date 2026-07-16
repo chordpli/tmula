@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  assembleLoginBody,
   AUTH_FORM_DEFAULTS,
   applyReplaceMe,
   authFormFromImport,
@@ -42,6 +43,10 @@ import {
   latencyCellColor,
   latencyHeatmapURL,
   layoutGraph,
+  LOGIN_BODY_MULTI,
+  LOGIN_BODY_SINGLE,
+  loginBodyOverwritable,
+  loginBodyReferencesRow,
   lerpColor,
   localizeError,
   outcomeRates,
@@ -2273,6 +2278,56 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('login quick form (assembleLoginBody / loginBodyOverwritable)', () => {
+  it('assembles a literal-credential JSON body with proper escaping', () => {
+    const body = assembleLoginBody('username', 'password', 'alice', 'p"w\\d', false)
+    expect(JSON.parse(body)).toEqual({ username: 'alice', password: 'p"w\\d' })
+    // A generated body NEVER carries the inert single-brace markers (kills the
+    // item-3a trap at the source).
+    expect(body).not.toMatch(/\{(?:username|password)\}/)
+  })
+
+  it('honors custom field names and defaults blank ones', () => {
+    expect(JSON.parse(assembleLoginBody('email', 'pw', 'a@x.com', 's', false))).toEqual({
+      email: 'a@x.com',
+      pw: 's',
+    })
+    expect(JSON.parse(assembleLoginBody('  ', '', 'u', 'p', false))).toEqual({ username: 'u', password: 'p' })
+  })
+
+  it('templates the credential-list row markers when a list is supplied', () => {
+    const body = assembleLoginBody('login_id', 'passwd', 'ignored', 'ignored', true)
+    expect(JSON.parse(body)).toEqual({ login_id: '{{.username}}', passwd: '{{.password}}' })
+    expect(loginBodyReferencesRow(body)).toBe(true)
+  })
+
+  it('only overwrites a default, empty, or previously generated body', () => {
+    expect(loginBodyOverwritable('', false)).toBe(true)
+    expect(loginBodyOverwritable(LOGIN_BODY_SINGLE, false)).toBe(true)
+    expect(loginBodyOverwritable(LOGIN_BODY_MULTI, false)).toBe(true)
+    // Generated → regenerating is fine even though the text is custom.
+    expect(loginBodyOverwritable('{"email":"a","pw":"b"}', true)).toBe(true)
+    // Hand-authored (or imported) → never clobbered.
+    expect(loginBodyOverwritable('{"email":"a","pw":"b"}', false)).toBe(false)
+    expect(loginBodyOverwritable('{"user":"REPLACE_ME_USER"}', false)).toBe(false)
+  })
+
+  it('a quick-form body flows through buildAuth unchanged (payload contract intact)', () => {
+    const body = assembleLoginBody('username', 'password', 'alice', 'pw-a', false)
+    const form: ExperimentForm = {
+      ...({} as ExperimentForm),
+      ...AUTH_FORM_DEFAULTS,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginBodyTemplate: body,
+    } as ExperimentForm
+    const auth = buildAuth(form)
+    expect(auth?.authStrategy).toBe('login')
+    const templates = auth?.loginFlow?.templates as Record<string, { payloadTemplate?: string }>
+    expect(templates['t_login'].payloadTemplate).toBe(body)
   })
 })
 
