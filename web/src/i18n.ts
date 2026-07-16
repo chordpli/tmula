@@ -329,9 +329,10 @@ const en: Record<string, string> = {
   'auth.login.scope.perUser': 'Per user — one token per virtual user',
   'auth.login.scope.shared': 'Shared — one token for all (client_credentials)',
   'auth.login.body': 'Login body',
-  'auth.login.bodyHint': 'The request body tmula sends to log in. Use {username}/{password} markers, or template a credential-list row.',
+  'auth.login.bodyHint':
+    'The request body tmula sends to log in. Put the real credentials inline — a {username}/{password} marker is NOT substituted — or template a credential-list row with {{.username}}/{{.password}}.',
   'auth.login.body.tip':
-    'The body sent to your login URL. For a single identity, put your credentials inline (or use the {username}/{password} markers). To log in many users, supply a credential list below and reference each row with {{.username}}/{{.password}}.',
+    'The body sent to your login URL. For a single identity, put your real credentials inline — the {username}/{password} markers are placeholders for YOU to replace; nothing fills them in automatically. To log in many users, supply a credential list below and reference each row with {{.username}}/{{.password}}.',
   'auth.login.body.multiTip':
     'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
   'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
@@ -381,9 +382,10 @@ const en: Record<string, string> = {
   'auth.bootstrap.signupUrlHint': 'The endpoint that registers a new account. Pick the method and give the path, e.g. POST /register.',
   'auth.bootstrap.signupMethod': 'Signup HTTP method',
   'auth.bootstrap.body': 'Signup body',
-  'auth.bootstrap.bodyHint': 'The request body tmula sends to sign up. Use {{.userIndex}} so each account is unique, and {password} for the password.',
+  'auth.bootstrap.bodyHint':
+    'The request body tmula sends to sign up. Use {{.userIndex}} so each account is unique, and write the password as a real value — a {password} marker is NOT substituted.',
   'auth.bootstrap.body.tip':
-    'The body posted to your signup URL, rendered once per account. {{.userIndex}} is the virtual-user number — put it in the email or username (e.g. test+{{.userIndex}}@example.com) so every signup is distinct. {password} fills in the password tmula reuses to log in.',
+    'The body posted to your signup URL, rendered once per account. {{.userIndex}} is the virtual-user number — put it in the email or username (e.g. test+{{.userIndex}}@example.com) so every signup is distinct. Write the password literally: nothing fills a {password} marker in, so it would be sent as-is.',
   'auth.bootstrap.teardownUrl': 'Teardown URL',
   'auth.bootstrap.teardownUrlHint': 'The endpoint that deletes one account after the run. {{.subject}} is the account id, e.g. DELETE /accounts/{{.subject}}.',
   'auth.bootstrap.teardownMethod': 'Teardown HTTP method',
@@ -490,6 +492,16 @@ const en: Record<string, string> = {
   'doctor.authMintKey':
     'Local signing is selected but no signing key is referenced — set a key environment variable or a key file so tmula can sign.',
   'doctor.authMintClaims': 'Extra claims JSON is invalid: {error}',
+  'doctor.authLoginBodyMarker':
+    'The login body still contains a literal {username}/{password} marker — nothing fills it in, so it would be sent as-is. Enter the real credentials, or reference a credential-list row with {{.username}}/{{.password}}.',
+  'doctor.authSignupBodyMarker':
+    'The signup body still contains a literal {username}/{password} marker — nothing fills it in, so it would be sent as-is. Write the real value (the password the test accounts should use).',
+  'doctor.authReplaceMe':
+    'An auth field still contains the {placeholder} placeholder — fill in the real value before running.',
+  'doctor.authTokenUnreferenced':
+    'Auth is configured, but no scenario template references {{.token}} (or {{basicAuth …}}) — every request would go out without the credential. Add e.g. "Authorization": "Bearer {{.token}}" to a template’s headers.',
+  'doctor.authTokenWithoutAuth':
+    'A scenario template references {{.token}}, but auth is set to None — the marker would be sent literally. Configure auth or remove the reference.',
 
   // Presets (Feature A)
   'presets.label': 'Start from a template',
@@ -932,9 +944,10 @@ const ko: Record<string, string> = {
   'auth.login.scope.perUser': '사용자별 — 가상 사용자마다 토큰 1개',
   'auth.login.scope.shared': '공유 — 전체가 토큰 1개 (client_credentials)',
   'auth.login.body': '로그인 본문',
-  'auth.login.bodyHint': '로그인할 때 tmula가 보내는 요청 본문입니다. {username}/{password} 마커를 쓰거나, 자격 증명 목록의 행을 템플릿으로 넣으세요.',
+  'auth.login.bodyHint':
+    '로그인할 때 tmula가 보내는 요청 본문입니다. 실제 자격 증명을 직접 넣으세요 — {username}/{password} 마커는 치환되지 않습니다 — 또는 자격 증명 목록의 행을 {{.username}}/{{.password}}로 참조하세요.',
   'auth.login.body.tip':
-    '로그인 URL로 보내는 본문입니다. 단일 신원이면 자격 증명을 직접 넣거나 {username}/{password} 마커를 쓰세요. 여러 사용자를 로그인시키려면 아래에 자격 증명 목록을 주고, {{.username}}/{{.password}}로 각 행을 참조하세요.',
+    '로그인 URL로 보내는 본문입니다. 단일 신원이면 실제 자격 증명을 직접 넣으세요 — {username}/{password} 마커는 직접 바꿔 넣어야 하는 자리표시자일 뿐, 아무것도 자동으로 채워 주지 않습니다. 여러 사용자를 로그인시키려면 아래에 자격 증명 목록을 주고, {{.username}}/{{.password}}로 각 행을 참조하세요.',
   'auth.login.body.multiTip':
     '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
   'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
@@ -984,9 +997,10 @@ const ko: Record<string, string> = {
   'auth.bootstrap.signupUrlHint': '새 계정을 등록하는 엔드포인트입니다. 메서드를 고르고 경로를 입력하세요. 예: POST /register.',
   'auth.bootstrap.signupMethod': '가입 HTTP 메서드',
   'auth.bootstrap.body': '가입 본문',
-  'auth.bootstrap.bodyHint': 'tmula가 가입할 때 보내는 요청 본문입니다. 계정마다 고유하도록 {{.userIndex}}를, 비밀번호에는 {password}를 사용하세요.',
+  'auth.bootstrap.bodyHint':
+    'tmula가 가입할 때 보내는 요청 본문입니다. 계정마다 고유하도록 {{.userIndex}}를 사용하고, 비밀번호는 실제 값을 그대로 적으세요 — {password} 마커는 치환되지 않습니다.',
   'auth.bootstrap.body.tip':
-    '가입 URL로 보내는 본문이며 계정마다 한 번씩 렌더링됩니다. {{.userIndex}}는 가상 사용자 번호입니다 — 이메일이나 사용자명에 넣어(예: test+{{.userIndex}}@example.com) 가입이 서로 겹치지 않게 하세요. {password}에는 tmula가 로그인에 재사용할 비밀번호가 채워집니다.',
+    '가입 URL로 보내는 본문이며 계정마다 한 번씩 렌더링됩니다. {{.userIndex}}는 가상 사용자 번호입니다 — 이메일이나 사용자명에 넣어(예: test+{{.userIndex}}@example.com) 가입이 서로 겹치지 않게 하세요. 비밀번호는 문자 그대로 적으세요: {password} 마커는 아무것도 채워 주지 않아 그대로 전송됩니다.',
   'auth.bootstrap.teardownUrl': '정리 URL',
   'auth.bootstrap.teardownUrlHint': '실행 후 계정 하나를 삭제하는 엔드포인트입니다. {{.subject}}는 계정 id입니다. 예: DELETE /accounts/{{.subject}}.',
   'auth.bootstrap.teardownMethod': '정리 HTTP 메서드',
@@ -1093,6 +1107,16 @@ const ko: Record<string, string> = {
   'doctor.authMintKey':
     '로컬 서명이 선택되었지만 서명 키가 참조되지 않았습니다 — tmula가 서명할 수 있도록 키 환경 변수나 키 파일을 설정하세요.',
   'doctor.authMintClaims': '추가 클레임 JSON이 올바르지 않습니다: {error}',
+  'doctor.authLoginBodyMarker':
+    '로그인 본문에 아직 {username}/{password} 마커가 그대로 남아 있습니다 — 아무것도 값을 채워 주지 않아 문자 그대로 전송됩니다. 실제 자격 증명을 입력하거나, 자격 증명 목록의 행을 {{.username}}/{{.password}}로 참조하세요.',
+  'doctor.authSignupBodyMarker':
+    '가입 본문에 아직 {username}/{password} 마커가 그대로 남아 있습니다 — 아무것도 값을 채워 주지 않아 문자 그대로 전송됩니다. 테스트 계정이 사용할 실제 값을 입력하세요.',
+  'doctor.authReplaceMe':
+    '인증 필드에 아직 {placeholder} 자리표시자가 남아 있습니다 — 실행 전에 실제 값을 입력하세요.',
+  'doctor.authTokenUnreferenced':
+    '인증이 설정되어 있지만 어떤 시나리오 템플릿도 {{.token}}(또는 {{basicAuth …}})를 참조하지 않습니다 — 모든 요청이 자격 증명 없이 나갑니다. 템플릿 headers에 예: "Authorization": "Bearer {{.token}}"을 추가하세요.',
+  'doctor.authTokenWithoutAuth':
+    '시나리오 템플릿이 {{.token}}을 참조하지만 인증이 없음으로 설정되어 있습니다 — 마커가 문자 그대로 전송됩니다. 인증을 설정하거나 참조를 제거하세요.',
 
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',

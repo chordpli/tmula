@@ -2254,7 +2254,7 @@ function AuthBootstrapFields({
                 value={form.signupBodyTemplate}
                 onChange={(e) => set('signupBodyTemplate', e.target.value)}
                 rows={4}
-                placeholder={'{"email": "test+{{.userIndex}}@example.com", "password": "{password}"}'}
+                placeholder={'{"email": "test+{{.userIndex}}@example.com", "password": "a-real-password"}'}
                 spellCheck={false}
               />
             </Field>

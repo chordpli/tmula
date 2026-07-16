@@ -1,5 +1,7 @@
 import {
   allowlistMatchesHost,
+  applyReplaceMe,
+  findReplaceMePlaceholders,
   hostFromBaseUrl,
   loginBodyReferencesRow,
   parseAllowlist,
@@ -85,7 +87,62 @@ export function doctorForm(form: ExperimentForm): DoctorIssue[] {
     issues.push(...doctorTemplates(templatesResult.value, graphResult.value))
   }
   issues.push(...doctorAuth(form))
+  issues.push(...doctorAuthTokenWiring(form))
   return issues
+}
+
+// LITERAL_MARKER_RE matches the inert single-brace {username}/{password} markers a
+// simple-mode login/signup body may still carry. NOTHING substitutes them — they go
+// out as literal strings — so a body that still holds one is a guaranteed silent
+// auth failure. The Go-template row markers ({{.username}}/{{.password}}) do not
+// match: their braces are doubled and the name is dotted.
+const LITERAL_MARKER_RE = /\{(?:username|password)\}/
+
+// TOKEN_REF_RE matches a scenario template referencing the acquired credential:
+// the {{.token}} marker or the {{basicAuth …}} helper (whitespace tolerated).
+const TOKEN_REF_RE = /\{\{\s*\.token\s*\}\}|\{\{\s*basicAuth\b/
+
+// doctorAuthTokenWiring catches the two halves of the "auth configured but never
+// wired" trap: auth is on but no scenario template references {{.token}} (the run
+// would send anonymous requests while the operator believes it authenticates), and
+// the inverse — templates reference {{.token}} while auth is off (the marker goes
+// out literally). Both are warnings: a rare scenario may authenticate another way.
+function doctorAuthTokenWiring(form: ExperimentForm): DoctorIssue[] {
+  const referencesToken = TOKEN_REF_RE.test(form.templatesJSON)
+  if (form.authMode !== 'none' && !referencesToken) {
+    return [issue('warning', 'auth-token-unreferenced', 'doctor.authTokenUnreferenced')]
+  }
+  if (form.authMode === 'none' && referencesToken) {
+    return [issue('warning', 'auth-token-without-auth', 'doctor.authTokenWithoutAuth')]
+  }
+  return []
+}
+
+// doctorReplaceMe flags any REPLACE_ME_* placeholder still left in the ACTIVE auth
+// mode's material. Simple-mode bodies are checked after the operator's secret
+// substitution (applyReplaceMe — exactly what buildAuth sends); advanced-mode JSON
+// is checked raw because buildAuth never substitutes there, so a value in
+// replaceMeValues must not hide a placeholder that would still go out literally.
+function doctorReplaceMe(form: ExperimentForm): DoctorIssue[] {
+  const sources: string[] = []
+  if (form.authMode === 'pool') {
+    sources.push(form.authPoolText)
+  } else if (form.authMode === 'login') {
+    sources.push(
+      form.loginMode === 'simple'
+        ? applyReplaceMe(form.loginBodyTemplate, form.replaceMeValues)
+        : form.loginTemplatesJSON,
+    )
+  } else if (form.authMode === 'bootstrap') {
+    sources.push(
+      form.signupMode === 'simple'
+        ? applyReplaceMe(form.signupBodyTemplate, form.replaceMeValues)
+        : form.signupStepsJSON,
+    )
+  }
+  const leftover = findReplaceMePlaceholders(...sources)
+  if (leftover.length === 0) return []
+  return [issue('error', 'auth-replace-me', 'doctor.authReplaceMe', { placeholder: leftover[0] })]
 }
 
 // doctorAuth surfaces the auth-section blockers so a misconfigured pool/login/bootstrap
@@ -113,6 +170,13 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     if (form.loginMode === 'simple') {
       if (!form.loginUrlPath.trim()) {
         issues.push(issue('error', 'auth-login-url', 'doctor.authLoginUrl'))
+      }
+      // The inert-marker trap: a single-brace {username}/{password} marker is NOT
+      // substituted by anything — it would be POSTed literally, so the login can
+      // only fail. Blocks the run until the real value (or a {{.username}} row
+      // reference) replaces it.
+      if (LITERAL_MARKER_RE.test(form.loginBodyTemplate)) {
+        issues.push(issue('error', 'auth-login-body-marker', 'doctor.authLoginBodyMarker'))
       }
     } else {
       const graph = parseJSON(form.loginGraphJSON)
@@ -154,6 +218,10 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     if (simple) {
       if (!form.signupUrlPath.trim()) {
         issues.push(issue('error', 'auth-bootstrap-url', 'doctor.authBootstrapUrl'))
+      }
+      // Same inert-marker trap as the login body: {password} is never substituted.
+      if (LITERAL_MARKER_RE.test(form.signupBodyTemplate)) {
+        issues.push(issue('error', 'auth-signup-body-marker', 'doctor.authSignupBodyMarker'))
       }
     } else {
       try {
@@ -198,6 +266,7 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
       }
     }
   }
+  issues.push(...doctorReplaceMe(form))
   return issues
 }
 
