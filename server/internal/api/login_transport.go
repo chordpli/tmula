@@ -140,14 +140,17 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 		// Explicit capture is authoritative; auto-detect only fills what was not
 		// explicitly captured. Detect once so the token and (when not explicitly
 		// named) the subject come from the same response.
-		var autoToken, autoSubject string
+		var autoToken, autoSubject, autoSource string
 		if flow.TokenVar == "" || flow.SubjectVar == "" {
-			autoToken, autoSubject = load.DetectCredential(final.Body, final.SetCookie)
+			autoToken, autoSubject, autoSource = load.DetectCredentialSource(final.Body, final.SetCookie)
 		}
 
 		token := captured[flow.TokenVar]
 		if flow.TokenVar == "" {
 			token = autoToken
+			// Auto-detect is the token source: name where it came from (body key or
+			// Set-Cookie), never the value, so an operator sees how tmula authenticated.
+			load.LogAutoCaptureSource(autoSource)
 		}
 		if token == "" {
 			if flow.TokenVar == "" {
@@ -277,10 +280,11 @@ func NewRefreshTokenFunc(runner *load.Runner, refreshTmpl domain.APITemplate, ba
 		}
 		// Capture the rotated access token (and any subject) from the response, then the
 		// rotated refresh token / lifetime — mirroring the login's auto-detect.
-		token, _ := load.DetectCredential(final.Body, final.SetCookie)
+		token, _, source := load.DetectCredentialSource(final.Body, final.SetCookie)
 		if token == "" {
 			return domain.Credential{}, fmt.Errorf("api: refresh-token exchange user %d: response carried no access token", userIndex)
 		}
+		load.LogAutoCaptureSource(source)
 		refresh, expiresIn := load.DetectRefresh(final.Body)
 		if refresh == "" {
 			// Rotation rule: the server did not rotate the refresh token, so keep the

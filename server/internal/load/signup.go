@@ -157,14 +157,17 @@ func NewSignupRunner(runner *Runner, flow SignupFlow, baseSeed int64, opts ...Si
 				// Explicit capture is authoritative; auto-detect only fills what was not
 				// explicitly captured. Detect once so token and (when not explicitly named)
 				// subject come from the same response.
-				var autoToken, autoSubject string
+				var autoToken, autoSubject, autoSource string
 				if flow.TokenVar == "" || flow.SubjectVar == "" {
-					autoToken, autoSubject = DetectCredential(final.Body, final.SetCookie)
+					autoToken, autoSubject, autoSource = DetectCredentialSource(final.Body, final.SetCookie)
 				}
 
 				token := vars[flow.TokenVar]
 				if flow.TokenVar == "" {
 					token = autoToken
+					// Name where the token was auto-captured from (body key or Set-Cookie),
+					// never the value, so a signup that named no capture is still visible.
+					LogAutoCaptureSource(autoSource)
 				}
 				if token == "" {
 					if flow.TokenVar == "" {
