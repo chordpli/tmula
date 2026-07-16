@@ -53,10 +53,40 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 	if spec.CredentialPool == nil || spec.CredentialPool.Strategy != domain.CredLogin {
 		return nil, nil
 	}
+	flow, runner, err := s.compileLoginFlow(spec, guard)
+	if err != nil {
+		return nil, err
+	}
+	tokenFunc, err := NewLoginTokenFunc(runner, flow, spec.Seed)
+	if err != nil {
+		return nil, fmt.Errorf("api: compile login flow: %w", err)
+	}
+	// Build the mid-run refresh transport from the login flow. An explicit override on
+	// the flow wins (refreshTemplateFor checks it first); else a real grant_type=
+	// refresh_token transport is auto-derived when the token POST is an OAuth2 form
+	// grant. When neither yields a template (a non-form login with no override),
+	// refreshFunc stays nil and Refresh falls back to re-running the login — the safe
+	// default. The refresh exchange runs through the SAME guarded runner as the login,
+	// so it obeys the same allowlist and rate cap.
+	var refreshFunc auth.RefreshTokenFunc
+	if refreshTmpl, ok := refreshTemplateFor(flow); ok {
+		refreshRunner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, map[domain.ID]domain.APITemplate{refreshTmpl.ID: refreshTmpl}, load.WithGuard(guard))
+		refreshFunc = NewRefreshTokenFunc(refreshRunner, refreshTmpl, spec.Seed)
+	}
+	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared, spec.TargetEnv.RateCap.MaxConcurrency)
+}
+
+// compileLoginFlow compiles a CredLogin spec's login authoring block into the runnable
+// LoginFlow plus a guarded runner, the shared front half of loginAuthFor. It is factored
+// out so the preflight endpoint can run the login flow ONCE (and detect the token source)
+// through the exact same compiled flow and safety guard the run path uses — a preflight
+// must never escape the target allowlist. It returns an error for a login pool that
+// carries no login flow (a wiring bug Validate normally catches).
+func (s *Server) compileLoginFlow(spec RunSpec, guard *safety.Guard) (LoginFlow, *load.Runner, error) {
 	if spec.LoginFlow == nil {
 		// Validate already rejects this, but guard against a programming error
 		// reaching the runtime with no flow to mint from.
-		return nil, fmt.Errorf("api: login run has no login flow to mint tokens from")
+		return LoginFlow{}, nil, fmt.Errorf("api: login run has no login flow to mint tokens from")
 	}
 	flow := LoginFlow{
 		Graph: spec.LoginFlow.Graph,
@@ -89,23 +119,7 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 	// no result/event sink, so RunOnce (which the transport drives) stays findings-
 	// isolated even if those were set.
 	runner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, flow.Templates, load.WithGuard(guard))
-	tokenFunc, err := NewLoginTokenFunc(runner, flow, spec.Seed)
-	if err != nil {
-		return nil, fmt.Errorf("api: compile login flow: %w", err)
-	}
-	// Build the mid-run refresh transport from the login flow. An explicit override on
-	// the flow wins (refreshTemplateFor checks it first); else a real grant_type=
-	// refresh_token transport is auto-derived when the token POST is an OAuth2 form
-	// grant. When neither yields a template (a non-form login with no override),
-	// refreshFunc stays nil and Refresh falls back to re-running the login — the safe
-	// default. The refresh exchange runs through the SAME guarded runner as the login,
-	// so it obeys the same allowlist and rate cap.
-	var refreshFunc auth.RefreshTokenFunc
-	if refreshTmpl, ok := refreshTemplateFor(flow); ok {
-		refreshRunner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, map[domain.ID]domain.APITemplate{refreshTmpl.ID: refreshTmpl}, load.WithGuard(guard))
-		refreshFunc = NewRefreshTokenFunc(refreshRunner, refreshTmpl, spec.Seed)
-	}
-	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared, spec.TargetEnv.RateCap.MaxConcurrency)
+	return flow, runner, nil
 }
 
 // loginMaxPrewarmConcurrency caps the per-user login prewarm burst regardless of

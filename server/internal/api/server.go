@@ -210,6 +210,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
 	s.mux.HandleFunc("POST /import", s.handleImport)
+	s.mux.HandleFunc("POST /auth/preflight", s.authPreflight)
+	s.mux.HandleFunc("POST /auth/discover", s.authDiscover)
 }
 
 // CreateExperiment validates and registers a run spec in-process, returning the
