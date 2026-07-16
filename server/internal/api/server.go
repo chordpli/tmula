@@ -269,7 +269,7 @@ func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 	// at StartRun — before any provider/runner — exactly like the prod-lock guard, unless
 	// the operator explicitly enabled exec (WithAllowExec / the --allow-exec flag).
 	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredExec && !s.allowExec {
-		return "", &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command per virtual user and is disabled by default; enable it explicitly with the --allow-exec flag (server WithAllowExec) before running an exec scenario", domain.CredExec)}
+		return "", &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command per virtual user and is disabled by default; enable it explicitly with the --allow-exec flag (server WithAllowExec) before running an exec scenario (if you don't operate the engine, ask its operator to start it with --allow-exec)", domain.CredExec)}
 	}
 
 	guard, err := safety.NewGuardForEnv(spec.TargetEnv, nil, false)
