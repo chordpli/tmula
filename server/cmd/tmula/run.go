@@ -205,6 +205,11 @@ func runScenario(args []string) error {
 		spec.CredentialPool.KeepAccounts = true
 	}
 
+	// A mint run against a managed IdP is the #1 mint footgun: the importer flagged that
+	// the token issuer's signing key is not the operator's, so tokens tmula forges will be
+	// rejected. Warn loudly (but do not block) before sending traffic that will 401.
+	warnMintManagedIdP(spec)
+
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
@@ -390,6 +395,22 @@ func buildScenario(file, target, get, post string) (scenariofile.Scenario, error
 		sc.Target = target
 	}
 	return sc, nil
+}
+
+// warnMintManagedIdP prints a stderr warning when a mint run coexists with a
+// mint-managed-idp advisory: the importer flagged that the token issuer's signing key is
+// not the operator's, so a forged token will be rejected. It warns rather than blocks —
+// an operator who genuinely holds the key (a self-hosted issuer the importer could not
+// tell apart) may proceed — but the footgun is surfaced before any traffic is sent.
+func warnMintManagedIdP(spec api.RunSpec) {
+	if spec.CredentialPool == nil || spec.CredentialPool.Strategy != domain.CredMint {
+		return
+	}
+	for _, adv := range spec.AuthAdvisories {
+		if adv.Code == domain.AdvisoryMintManagedIDP {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", adv.Message())
+		}
+	}
 }
 
 // sourceBackedAuth reports whether the scenario's auth is a pool backed by an

@@ -437,3 +437,23 @@ func TestCredentialPoolWireDecode(t *testing.T) {
 		t.Fatalf("entries = %+v, want secrets t-a and t-b", p.Entries)
 	}
 }
+
+// TestAuthAdvisoryMessage pins the human-readable advisory copy the CLI prints: each
+// known code renders an actionable sentence naming its detail, and an unknown code
+// degrades to the bare code+detail rather than an empty string.
+func TestAuthAdvisoryMessage(t *testing.T) {
+	mint := AuthAdvisory{Code: AdvisoryMintManagedIDP, Detail: "login.auth0.com"}
+	if msg := mint.Message(); !strings.Contains(msg, "login.auth0.com") || !strings.Contains(strings.ToLower(msg), "mint") || !strings.Contains(strings.ToLower(msg), "login") {
+		t.Errorf("mint-managed-idp message should name the host and point at the login strategy, got %q", msg)
+	}
+
+	oidc := AuthAdvisory{Code: AdvisoryOpenIDConnectDiscovery, Detail: "https://idp.example.com/.well-known/openid-configuration"}
+	if msg := oidc.Message(); !strings.Contains(msg, "openid-configuration") || !strings.Contains(strings.ToLower(msg), "token endpoint") {
+		t.Errorf("openidconnect-discovery message should name the discovery URL and the token endpoint, got %q", msg)
+	}
+
+	unknown := AuthAdvisory{Code: "some-new-code", Detail: "x"}
+	if msg := unknown.Message(); msg == "" || !strings.Contains(msg, "some-new-code") {
+		t.Errorf("an unknown advisory should still render its code, got %q", msg)
+	}
+}

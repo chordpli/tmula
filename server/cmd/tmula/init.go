@@ -50,6 +50,12 @@ func initScenario(args []string) error {
 	if note != "" {
 		fmt.Fprintln(os.Stderr, note)
 	}
+	// Surface import-time auth advisories the importer could not act on (the managed-IdP
+	// mint footgun, the OpenID Connect discovery pointer) so the operator sees them before
+	// picking a strategy that cannot work. Each renders to a human-readable line.
+	for _, adv := range sc.AuthAdvisories {
+		fmt.Fprintf(os.Stderr, "note: %s\n", adv.Message())
+	}
 	if *target != "" {
 		sc.Target = *target
 	}

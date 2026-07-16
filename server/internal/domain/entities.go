@@ -198,6 +198,45 @@ type AuthAdvisory struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// Advisory codes the importer emits. They are stable machine keys; Message renders
+// each into a human-readable, actionable sentence for the CLI (and the UI can translate
+// them independently).
+const (
+	// AdvisoryMintManagedIDP: the token issuer is a managed IdP whose signing key the
+	// operator does not hold, so the mint strategy cannot forge tokens it will accept.
+	AdvisoryMintManagedIDP = "mint-managed-idp"
+	// AdvisoryOpenIDConnectDiscovery: the scheme is OpenID Connect; the discovery URL
+	// (Detail) names the token endpoint the OAuth2/login route should point at.
+	AdvisoryOpenIDConnectDiscovery = "openidconnect-discovery"
+)
+
+// Message renders the advisory into a human-readable, actionable sentence for the CLI.
+// It is the single source of truth for the advisory copy so `tmula init` and `tmula run`
+// (and any other surface) describe a code identically. An unknown code degrades to the
+// bare code plus its detail rather than an empty string, so a newly-added advisory is
+// never invisible.
+func (a AuthAdvisory) Message() string {
+	switch a.Code {
+	case AdvisoryMintManagedIDP:
+		host := a.Detail
+		if host == "" {
+			host = "a managed identity provider"
+		}
+		return fmt.Sprintf("the token issuer is a managed IdP (%s) whose signing key you do not hold — the mint strategy cannot forge tokens it will accept; use the login strategy against the IdP instead", host)
+	case AdvisoryOpenIDConnectDiscovery:
+		url := a.Detail
+		if url == "" {
+			url = "the issuer's discovery document"
+		}
+		return fmt.Sprintf("the security scheme is OpenID Connect; its discovery document (%s) names the token endpoint — point auth.login at that token URL (POST /auth/discover can fetch it for you)", url)
+	default:
+		if a.Detail != "" {
+			return fmt.Sprintf("%s (%s)", a.Code, a.Detail)
+		}
+		return a.Code
+	}
+}
+
 // CredentialSourceRef is a non-secret pointer to an external credential pool: a
 // file path (relative to the scenario document) or an environment variable, plus
 // the format its body is encoded in. It carries no secret field by design, so a
