@@ -655,7 +655,7 @@ tmula demo [--addr :8080] [--duration 60s] [--no-browser]
 | `--ramp-to <rate>` | 0 | 오픈 모델: 램프 최고 비율(`--open`을 시작값으로 사용). |
 | `--seed <n>` | 1 | 난수 시드. |
 | `--engine <url>` | - | in-process 대신 기존 엔진에 HTTP로 실행. |
-| `--auth-source <ref>` | - | 시나리오 수정 없이 외부 자격증명 풀 연결: `file:./pool.csv` 또는 `env:VAR`. in-process로 해석(비밀은 wire를 건너지 않음)하며, 시나리오의 `auth` 블록을 덮어씁니다. [인증된 실행](#인증된-실행) 참고. |
+| `--auth-source <ref>` | - | 시나리오 수정 없이 외부 자격증명 풀 연결: `file:./pool.csv` 또는 `env:VAR`. in-process로 해석(비밀은 wire를 건너지 않음)하며, 시나리오의 `auth` 블록을 덮어씁니다. [인증이 필요한 실행](#인증이-필요한-실행) 참고. |
 | `--auth-format <fmt>` | (추론) | `--auth-source`의 본문 형식: `csv` \| `jsonl` \| `tokens`. `.csv`/`.jsonl` 확장자에서 추론, 없으면 `tokens`. |
 | `--keep-accounts` | false | bootstrap-signup 전용: 프로비저닝한 계정을 그대로 둡니다(teardown 옵트아웃). 없으면 teardown 플로가 없는 signup 풀은 거부됩니다. |
 | `--json` | false | 요약 대신 원시 보고서 JSON 출력. |
