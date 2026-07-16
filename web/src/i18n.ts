@@ -505,6 +505,12 @@ const en: Record<string, string> = {
     'Auth is configured, but no scenario template references {{.token}} (or {{basicAuth …}}) — every request would go out without the credential. Add e.g. "Authorization": "Bearer {{.token}}" to a template’s headers.',
   'doctor.authTokenWithoutAuth':
     'A scenario template references {{.token}}, but auth is set to None — the marker would be sent literally. Configure auth or remove the reference.',
+  'doctor.authOAuth2TokenUrl':
+    'OAuth2 is selected but the token URL is empty — paste the token endpoint of your IdP (or fetch it from the issuer URL).',
+  'doctor.authOAuth2AccessNotApplied':
+    'You pasted an access token but have not applied it — click "Use as a token pool" so the run actually uses it.',
+  'doctor.authOAuth2AccessEmpty':
+    '"I only have an access token" is selected but no token is pasted yet.',
 
   // Presets (Feature A)
   'presets.label': 'Start from a template',
@@ -1124,6 +1130,12 @@ const ko: Record<string, string> = {
     '인증이 설정되어 있지만 어떤 시나리오 템플릿도 {{.token}}(또는 {{basicAuth …}})를 참조하지 않습니다 — 모든 요청이 자격 증명 없이 나갑니다. 템플릿 headers에 예: "Authorization": "Bearer {{.token}}"을 추가하세요.',
   'doctor.authTokenWithoutAuth':
     '시나리오 템플릿이 {{.token}}을 참조하지만 인증이 없음으로 설정되어 있습니다 — 마커가 문자 그대로 전송됩니다. 인증을 설정하거나 참조를 제거하세요.',
+  'doctor.authOAuth2TokenUrl':
+    'OAuth2가 선택되었지만 토큰 URL이 비어 있습니다 — IdP의 토큰 엔드포인트를 붙여넣으세요(또는 발급자 URL로 가져오세요).',
+  'doctor.authOAuth2AccessNotApplied':
+    'access token을 붙여넣었지만 아직 적용하지 않았습니다 — "토큰 풀로 사용"을 눌러야 실행이 실제로 사용합니다.',
+  'doctor.authOAuth2AccessEmpty':
+    '"access token만 있어요"를 선택했지만 아직 토큰을 붙여넣지 않았습니다.',
 
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',

@@ -118,6 +118,42 @@ function doctorAuthTokenWiring(form: ExperimentForm): DoctorIssue[] {
   return []
 }
 
+// doctorOAuth2Guide checks the login mode through the OAuth2 guide's eyes — the
+// fields the operator actually saw. Two traps get guide-language messages:
+//   - an empty token URL (the guide's first question) instead of "login URL"
+//   - an access token that was pasted but never APPLIED ("Use as a token pool"
+//     not clicked — the wire mode is still login, so the paste does nothing)
+// With a token URL present, the compiled flow JSON is still validated so a
+// hand-edited (non-regenerated) flow with a typo is caught the same as before.
+function doctorOAuth2Guide(form: ExperimentForm): DoctorIssue[] {
+  const g = form.oauth2Guide
+  if (g.grant === 'accessToken') {
+    return [
+      g.accessToken.trim()
+        ? issue('error', 'auth-oauth2-access-not-applied', 'doctor.authOAuth2AccessNotApplied')
+        : issue('error', 'auth-oauth2-access-empty', 'doctor.authOAuth2AccessEmpty'),
+    ]
+  }
+  const issues: DoctorIssue[] = []
+  if (!g.tokenUrl.trim()) {
+    // An un-compiled (empty) flow is a consequence of the missing token URL —
+    // report only the cause, not the knock-on JSON errors.
+    issues.push(issue('error', 'auth-oauth2-token-url', 'doctor.authOAuth2TokenUrl'))
+    return issues
+  }
+  const graph = parseJSON(form.loginGraphJSON)
+  if (!graph.ok) {
+    issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
+  }
+  const templates = parseJSON(form.loginTemplatesJSON)
+  if (!templates.ok) {
+    issues.push(
+      issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
+    )
+  }
+  return issues
+}
+
 // doctorReplaceMe flags any REPLACE_ME_* placeholder still left in the ACTIVE auth
 // mode's material. Simple-mode bodies are checked after the operator's secret
 // substitution (applyReplaceMe — exactly what buildAuth sends); advanced-mode JSON
@@ -166,8 +202,13 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     // An empty token capture is fine: tmula auto-detects the token from the login
     // response (E1), so no "missing capture path" warning is raised. The simple
     // mini-form only needs a request path (buildAuth compiles the rest); the advanced
-    // mode still validates the raw graph/templates JSON.
-    if (form.loginMode === 'simple') {
+    // mode still validates the raw graph/templates JSON. When the operator's UI
+    // entry is the OAuth2 GUIDE, the doctor speaks the guide's language instead:
+    // the user never saw a "login URL" field, so a login-URL error would point at
+    // nothing on their screen.
+    if (form.authEntryOAuth2) {
+      issues.push(...doctorOAuth2Guide(form))
+    } else if (form.loginMode === 'simple') {
       if (!form.loginUrlPath.trim()) {
         issues.push(issue('error', 'auth-login-url', 'doctor.authLoginUrl'))
       }

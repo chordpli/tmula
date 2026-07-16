@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { AUTH_FORM_DEFAULTS, type ExperimentForm } from './api'
+import {
+  AUTH_FORM_DEFAULTS,
+  authFormFromOAuth2Guide,
+  OAUTH2_GUIDE_DEFAULTS,
+  type ExperimentForm,
+} from './api'
 import { doctorForm } from './scenarioDoctor'
 
 const form: ExperimentForm = {
@@ -278,6 +283,74 @@ describe('doctorForm', () => {
     expect(got).toContain('auth-token-without-auth')
     // The clean baseline (no auth, no token reference) stays silent.
     expect(codes(form)).not.toContain('auth-token-without-auth')
+  })
+
+  it('speaks the OAuth2 guide language when the guide entry is active and the token URL is empty', () => {
+    const got = codes({ ...form, authMode: 'login', authEntryOAuth2: true })
+    expect(got).toContain('auth-oauth2-token-url')
+    // The user never saw a "login URL" field — that message must not appear,
+    // and neither must the knock-on empty-JSON errors.
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-login-graph-json')
+    // Without the guide flag, plain login keeps its own message.
+    expect(codes({ ...form, authMode: 'login' })).toContain('auth-login-url')
+  })
+
+  it('is clean when the guide has a token URL and its compiled flow', () => {
+    const compiled = authFormFromOAuth2Guide({
+      ...OAUTH2_GUIDE_DEFAULTS,
+      tokenUrl: 'https://idp.example.com/oauth/token',
+      grant: 'clientCredentials',
+      clientId: 'web',
+      clientSecret: 's',
+    })
+    const got = codes({
+      ...form,
+      ...compiled,
+      authEntryOAuth2: true,
+      oauth2Guide: {
+        ...OAUTH2_GUIDE_DEFAULTS,
+        tokenUrl: 'https://idp.example.com/oauth/token',
+        grant: 'clientCredentials',
+        clientId: 'web',
+        clientSecret: 's',
+      },
+    } as ExperimentForm)
+    expect(got).not.toContain('auth-oauth2-token-url')
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-login-graph-json')
+    expect(got).not.toContain('auth-login-templates-json')
+  })
+
+  it('flags a pasted-but-not-applied access token with a guide-aware message', () => {
+    const base = {
+      ...form,
+      authMode: 'login' as const,
+      authEntryOAuth2: true,
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const, accessToken: 'tok-1' },
+    }
+    const got = codes(base)
+    expect(got).toContain('auth-oauth2-access-not-applied')
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-oauth2-token-url')
+    // Nothing pasted yet → the guide asks for the token instead.
+    const empty = codes({
+      ...base,
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const },
+    })
+    expect(empty).toContain('auth-oauth2-access-empty')
+    // Once applied ("Use as a token pool"), the wire mode is pool and the guide
+    // errors disappear — the ordinary pool checks take over.
+    const applied = codes({
+      ...form,
+      authMode: 'pool' as const,
+      authEntryOAuth2: true,
+      authPoolFormat: 'tokens' as const,
+      authPoolText: 'tok-1',
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const, accessToken: 'tok-1' },
+    })
+    expect(applied).not.toContain('auth-oauth2-access-not-applied')
+    expect(applied).not.toContain('auth-pool-empty')
   })
 
   it('flags a mint run with no signing-key reference', () => {
