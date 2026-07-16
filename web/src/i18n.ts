@@ -282,6 +282,22 @@ const en: Record<string, string> = {
     'The login flow JSON was hand-edited, so the guide no longer overwrites it automatically. Regenerate replaces it with a flow built from the answers above.',
   'auth.oauth2.regenerate': 'Regenerate the login flow',
 
+  // Auth · preflight (the "Test login / Test signup / Test token" button)
+  'auth.preflight.button.login': 'Test login',
+  'auth.preflight.button.signup': 'Test signup',
+  'auth.preflight.button.token': 'Test token',
+  'auth.preflight.testing': 'Testing…',
+  'auth.preflight.hint': 'Sends ONE real credential request to the target with the settings above — no load, no run.',
+  'auth.preflight.ok.login': 'Logged in',
+  'auth.preflight.ok.signup': 'Signed up',
+  'auth.preflight.ok.token': 'Token accepted',
+  'auth.preflight.okDetail': 'token found in {source}, starts with {prefix}',
+  'auth.preflight.okSource': 'token found in {source}',
+  'auth.preflight.okSubject': 'subject {subject}',
+  'auth.preflight.fail': 'The test failed (HTTP {status}).',
+  'auth.preflight.failPlain': 'The test failed.',
+  'auth.preflight.error': 'Could not run the test: {error}',
+
   // Auth · the Advanced fold hiding the expert strategies (mint / exec)
   'auth.advanced.modes': 'More ways to authenticate (expert)',
 
@@ -906,6 +922,22 @@ const ko: Record<string, string> = {
   'auth.oauth2.handAuthored':
     '로그인 흐름 JSON이 직접 수정된 상태라 가이드가 더 이상 자동으로 덮어쓰지 않습니다. 다시 생성을 누르면 위 답변으로 만든 흐름으로 교체합니다.',
   'auth.oauth2.regenerate': '로그인 흐름 다시 생성',
+
+  // Auth · 사전 점검("로그인 테스트 / 가입 테스트 / 토큰 테스트" 버튼)
+  'auth.preflight.button.login': '로그인 테스트',
+  'auth.preflight.button.signup': '가입 테스트',
+  'auth.preflight.button.token': '토큰 테스트',
+  'auth.preflight.testing': '테스트 중…',
+  'auth.preflight.hint': '위 설정 그대로 대상에 실제 자격 증명 요청을 딱 한 번 보냅니다 — 부하도, 실행도 없습니다.',
+  'auth.preflight.ok.login': '로그인 성공',
+  'auth.preflight.ok.signup': '가입 성공',
+  'auth.preflight.ok.token': '토큰 확인됨',
+  'auth.preflight.okDetail': '{source}에서 토큰 발견, {prefix}(으)로 시작',
+  'auth.preflight.okSource': '{source}에서 토큰 발견',
+  'auth.preflight.okSubject': 'subject {subject}',
+  'auth.preflight.fail': '테스트가 실패했습니다 (HTTP {status}).',
+  'auth.preflight.failPlain': '테스트가 실패했습니다.',
+  'auth.preflight.error': '테스트를 실행할 수 없습니다: {error}',
 
   // Auth · 전문가 전략(mint / exec)을 감추는 Advanced 접힘
   'auth.advanced.modes': '다른 인증 방법 (전문가)',

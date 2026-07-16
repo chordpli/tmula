@@ -2490,6 +2490,49 @@ export async function importScenario(
   return (await res.json()) as ImportResult
 }
 
+// --- Auth preflight (the "Test login / Test token" button) ----------------------
+
+// PreflightResult is what POST /api/auth/preflight returns with a 200: ok reports
+// whether ONE credential acquisition succeeded against the target using the very
+// spec the run would use. On success the server names where it found the token
+// (tokenSource, e.g. "body:access_token"), a short non-secret prefix of it, and
+// the subject when one was captured. On a failed acquisition ok is false and
+// reason carries the server's explanation (shown verbatim — it is data).
+export interface PreflightResult {
+  ok: boolean
+  strategy?: string
+  httpStatus?: number
+  tokenSource?: string
+  tokenPrefix?: string
+  subject?: string
+  reason?: string
+}
+
+// preflightAuth tests the form's auth configuration WITHOUT starting a run: it
+// POSTs the SAME RunSpec buildRunSpec produces (so what is tested is exactly what
+// the run would send) and the server performs one credential acquisition. A
+// non-2xx (400 invalid spec, 403 gated exec) throws with the server's own error
+// text, unwrapped from the { "error": … } envelope like importScenario.
+export async function preflightAuth(spec: RunSpec): Promise<PreflightResult> {
+  const res = await fetch(`${API}/auth/preflight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  })
+  if (!res.ok) {
+    const text = (await res.text()).trim()
+    let message = text
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) message = parsed.error
+    } catch {
+      /* not JSON: keep the raw text */
+    }
+    throw new Error(message || `auth preflight failed: ${res.status}`)
+  }
+  return (await res.json()) as PreflightResult
+}
+
 export async function getReport(runId: string): Promise<Report> {
   const res = await fetch(`${API}/runs/${runId}/report`)
   if (!res.ok) throw new Error(`report failed: ${res.status}`)

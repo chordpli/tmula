@@ -52,6 +52,7 @@ import {
   parseSSEData,
   parseSegments,
   parseTraceFrame,
+  preflightAuth,
   probeRun,
   reportHTMLURL,
   requestTotal,
@@ -2269,6 +2270,86 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('preflightAuth', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  // mockFetch installs a fetch stub returning the given response and records the
+  // calls, mirroring the importScenario test harness.
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      })
+    })
+    return calls
+  }
+
+  const spec = { start: 'login' } as unknown as RunSpec
+
+  it('POSTs the run spec JSON to /api/auth/preflight and parses a success', async () => {
+    const calls = mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        ok: true,
+        strategy: 'login',
+        httpStatus: 200,
+        tokenSource: 'body:access_token',
+        tokenPrefix: 'eyJhbG…',
+        subject: 'alice',
+      }),
+    })
+    const res = await preflightAuth(spec)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/auth/preflight')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.body).toBe(JSON.stringify(spec))
+    expect(res.ok).toBe(true)
+    expect(res.tokenSource).toBe('body:access_token')
+    expect(res.tokenPrefix).toBe('eyJhbG…')
+    expect(res.subject).toBe('alice')
+  })
+
+  it('returns a failed acquisition (200 ok:false) with the server reason intact', async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        ok: false,
+        strategy: 'login',
+        httpStatus: 401,
+        reason: 'login flow step "login" returned status 401 — check the login URL and credentials',
+      }),
+    })
+    const res = await preflightAuth(spec)
+    expect(res.ok).toBe(false)
+    expect(res.httpStatus).toBe(401)
+    expect(res.reason).toMatch(/401/)
+  })
+
+  it('unwraps a 400 {"error"} envelope and surfaces a plain 403 body', async () => {
+    mockFetch({ ok: false, status: 400, body: '{"error":"invalid spec: no credentialPool"}' })
+    await expect(preflightAuth(spec)).rejects.toThrow('invalid spec: no credentialPool')
+    mockFetch({ ok: false, status: 403, body: 'exec is gated: start the server with --allow-exec' })
+    await expect(preflightAuth(spec)).rejects.toThrow('--allow-exec')
+  })
+
+  it('falls back to the status code when the error body is empty', async () => {
+    mockFetch({ ok: false, status: 400, body: '' })
+    await expect(preflightAuth(spec)).rejects.toThrow('400')
+  })
+
+  it('propagates a network failure', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
+    await expect(preflightAuth(spec)).rejects.toThrow('network down')
   })
 })
 

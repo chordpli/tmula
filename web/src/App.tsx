@@ -26,6 +26,7 @@ import {
   parseCredentials,
   parseLoginCredentials,
   placeholderLabel,
+  preflightAuth,
   probeRun,
   reportHTMLURL,
   runDisabled,
@@ -48,6 +49,7 @@ import {
   type OAuth2Grant,
   type OAuth2GuideForm,
   type OutcomeSummary,
+  type PreflightResult,
   type Report,
   type Stats,
   type StreamFrame,
@@ -1424,6 +1426,78 @@ function ReplaceMeFields({
   )
 }
 
+// AuthPreflight is the "Test login / Test signup / Test token" button every auth
+// panel carries: one click sends the SAME RunSpec buildRunSpec would submit to
+// POST /api/auth/preflight, where the server performs exactly ONE credential
+// acquisition — no load, no run. Success shows a compact confirmation naming
+// where the token was found; a failed acquisition (200 ok:false) shows the
+// server's reason INLINE in the panel, next to the fields that caused it, so the
+// operator never has to hunt in the far-away run bar. A local build error (e.g.
+// malformed credential text) surfaces the same way. `kind` only picks the copy.
+function AuthPreflight({ form, kind }: { form: ExperimentForm; kind: 'login' | 'signup' | 'token' }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<PreflightResult | null>(null)
+  const [err, setErr] = useState('')
+
+  async function test() {
+    setBusy(true)
+    setErr('')
+    setResult(null)
+    try {
+      const spec = buildRunSpec(form)
+      setResult(await preflightAuth(spec))
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="import__actions">
+        <button type="button" className="btn btn--ghost" onClick={test} disabled={busy}>
+          <CheckMini />
+          {busy ? t('auth.preflight.testing') : t(`auth.preflight.button.${kind}`)}
+        </button>
+        <span className="field__help">{t('auth.preflight.hint')}</span>
+      </div>
+      {result?.ok && (
+        <p className="authpanel__ok" role="status">
+          <CheckMini />
+          <span>
+            {t(`auth.preflight.ok.${kind}`)}
+            {result.tokenSource &&
+              ' — ' +
+                (result.tokenPrefix
+                  ? t('auth.preflight.okDetail', { source: result.tokenSource, prefix: result.tokenPrefix })
+                  : t('auth.preflight.okSource', { source: result.tokenSource }))}
+            {result.subject && ' · ' + t('auth.preflight.okSubject', { subject: result.subject })}
+          </span>
+        </p>
+      )}
+      {result && !result.ok && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>
+            {result.httpStatus
+              ? t('auth.preflight.fail', { status: result.httpStatus })
+              : t('auth.preflight.failPlain')}
+            {result.reason && <span className="alert__sub">{result.reason}</span>}
+          </span>
+        </div>
+      )}
+      {err && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{t('auth.preflight.error', { error: err })}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // AuthPoolFields authors a token pool: a format selector, a file upload, and a textarea
 // of pasted credentials. The file and textarea are BOTH parsed in the browser — the
 // file's text is loaded into the textarea on pick (so the operator sees exactly what
@@ -1522,6 +1596,8 @@ function AuthPoolFields({
           set('authPoolText', text)
         }}
       />
+
+      <AuthPreflight form={form} kind="token" />
     </div>
   )
 }
@@ -1807,6 +1883,8 @@ function AuthLoginFields({
           )}
         </div>
       </details>
+
+      <AuthPreflight form={form} kind="login" />
     </div>
   )
 }
@@ -2209,6 +2287,10 @@ function AuthOAuth2GuideFields({
           </div>
         </details>
       )}
+
+      {/* The access-token answer becomes a pool via the explicit apply button —
+          until then there is no assembled flow to test, so no preflight here. */}
+      {guide.grant !== 'accessToken' && <AuthPreflight form={form} kind="login" />}
     </div>
   )
 }
@@ -2407,6 +2489,10 @@ function AuthBootstrapFields({
             )}
           </div>
         </details>
+
+        {/* Inside the fieldset: testing a signup CREATES a real account, so the
+            button stays disabled until the non-production gate is confirmed. */}
+        <AuthPreflight form={form} kind="signup" />
       </fieldset>
     </div>
   )
@@ -2545,6 +2631,8 @@ function AuthMintFields({
           <span>{claimsError}</span>
         </div>
       )}
+
+      <AuthPreflight form={form} kind="token" />
     </div>
   )
 }
