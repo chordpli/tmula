@@ -139,7 +139,7 @@ segments:                    # 선택: 페르소나 믹스 (open 전용)
   - { name: browser, weight: 0.7, start: browse }
   - { name: buyer,   weight: 0.3, start: cart }
 ```
-> **인증(`auth`)**: `token` 은 자격증명의 비밀값으로, `{{.token}}` 템플릿(예: `Authorization: "Bearer {{.token}}"`)에 채워집니다. closed 모델은 유저 인덱스로, open 모델은 세션(도착) 인덱스로 자격증명을 배정하며, 둘 다 엔트리 수를 넘으면 순환합니다. 비밀값은 직렬화·영속화되지 않으므로(마스킹), `tmula run` 은 이 경우 인-프로세스로 실행합니다(원격 `--engine` 에는 비밀값을 전송할 수 없어 미지원).
+> **인증(`auth`)**: `token` 은 자격증명의 비밀값으로, `{{.token}}` 템플릿(예: `Authorization: "Bearer {{.token}}"`)에 채워집니다. closed 모델은 유저 인덱스로, open 모델은 세션(도착) 인덱스로 자격증명을 배정하며, 둘 다 엔트리 수를 넘으면 순환합니다. 비밀값은 직렬화·영속화되지 않으므로(마스킹), `tmula run` 은 이 경우 인-프로세스로 실행합니다(원격 `--engine` 에는 비밀값을 전송할 수 없어 미지원). pool 외에도 login(실행 시 발급)·bootstrap-signup·mint(로컬 JWT 서명)·exec 전략과 `usersPattern`(패턴으로 계정 생성)이 있습니다 — 전략별 레퍼런스는 [가이드의 인증 장](../docs/guide.ko.md#인증이-필요한-실행)을 보세요. auth 블록을 손으로 쓰기 싫다면 **tmula-auth** 스킬(`.claude/skills/tmula-auth/SKILL.md`)이 Swagger/OpenAPI 스펙·HAR에서 로그인 flow·헤더·토큰 캡처를 자동 도출해 줍니다(채울 비밀 하나만 남김).
 
 ### 기존 API에서 시작: `tmula init`
 

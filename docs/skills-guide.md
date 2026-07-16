@@ -2,7 +2,7 @@
 
 *English · [한국어](skills-guide.ko.md)*
 
-A walkthrough of the five [Claude Code](https://docs.claude.com/en/docs/claude-code) skills that take you
+A walkthrough of the six [Claude Code](https://docs.claude.com/en/docs/claude-code) skills that take you
 from "here's an API" to "here's what breaks under load" with tmula. For the one-screen overview see
 [skills.md](skills.md); this is the detailed reference - what each skill does, how it's used, its process,
 and what its output looks like (with real output captured from a live run).
@@ -18,8 +18,14 @@ and what its output looks like (with real output captured from a live run).
                           └───────────────┴──── tmula-up (orchestrates all four) ────┘
 ```
 
-Four **atoms** - each works standalone with no dependency on the others - and one **orchestrator** that
+Five **atoms** - each works standalone with no dependency on the others - and one **orchestrator** that
 chains them. They live in `.claude/skills/` and Claude Code auto-discovers them when you open this repo.
+
+The fifth atom, **tmula-auth**, derives the whole `auth` block — login endpoint, request body, token
+capture, `Authorization` headers — from a Swagger/OpenAPI spec, a running API's base URL, or a HAR,
+leaving exactly one `REPLACE_ME` secret to fill (see `.claude/skills/tmula-auth/SKILL.md`). scaffold's
+`tmula init` already auto-derives auth when the spec declares a security scheme; reach for tmula-auth
+when you want the block standalone (paste/merge) or the import derived none.
 
 **Invoke** a skill by its slash name (`/tmula-up`, `/tmula-scaffold`, …) or just describe the goal
 ("load-test this API from its swagger", "make my scenario runnable", "is this finding real?").
@@ -29,6 +35,7 @@ chains them. They live in `.claude/skills/` and Claude Code auto-discovers them 
 | Artifact | Produced by | Consumed by |
 |---|---|---|
 | `json/scenario.json` | scaffold (writes), enrich (rewrites) | enrich, run, up |
+| `json/auth.json` (the standalone `auth` block) | tmula-auth | paste/merge into any scenario; read at a glance |
 | `json/report.json` (`tmula run --json`) | run | triage (as `--baseline-file`) |
 | `./bin/tmula` | `go build -o ./bin/tmula ./server/cmd/tmula` | all |
 

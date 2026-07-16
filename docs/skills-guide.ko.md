@@ -2,7 +2,7 @@
 
 *[English](skills-guide.md) · 한국어*
 
-내 API를 부하 상황에 넣어보고 어디서 먼저 깨지는지 찾아내는 과정을, 다섯 개의
+내 API를 부하 상황에 넣어보고 어디서 먼저 깨지는지 찾아내는 과정을, 여섯 개의
 [Claude Code](https://docs.claude.com/en/docs/claude-code) 스킬로 처음부터 끝까지 돕는 안내서입니다.
 간단한 요약은 [skills.md](skills.md)에 있고, 이 문서는 자세한 설명서입니다. 각 스킬이 무슨 일을 하고,
 언제 쓰며, 어떤 순서로 동작하고, 결과가 어떻게 나오는지(실제로 돌려본 출력까지) 담았습니다.
@@ -18,9 +18,15 @@
                           └───────────────┴──── tmula-up (네 단계를 한 번에 진행) ────┘
 ```
 
-서로 의존하지 않고 따로따로도 쓸 수 있는 **아톰 스킬 4개**와, 이들을 순서대로 엮어주는
+서로 의존하지 않고 따로따로도 쓸 수 있는 **아톰 스킬 5개**와, 이들을 순서대로 엮어주는
 **오케스트레이터 1개**로 이루어져 있습니다. 모두 `.claude/skills/` 아래에 있고, 이 레포를 Claude
 Code로 열면 자동으로 인식됩니다.
+
+다섯 번째 아톰 **tmula-auth**는 Swagger/OpenAPI 스펙·실행 중인 API의 base URL·HAR에서 `auth` 블록
+전체 — 로그인 엔드포인트, 요청 본문, 토큰 캡처, `Authorization` 헤더 — 를 자동 도출하고, 채울 비밀
+`REPLACE_ME` 하나만 남깁니다(`.claude/skills/tmula-auth/SKILL.md` 참고). scaffold의 `tmula init`도
+스펙에 security scheme이 선언돼 있으면 auth를 자동 도출하므로, 블록만 따로 필요하거나(붙여넣기/병합)
+import가 아무것도 도출하지 못했을 때 tmula-auth를 쓰면 됩니다.
 
 쓸 때는 슬래시 이름(`/tmula-up`, `/tmula-scaffold` …)을 부르거나, 그냥 하고 싶은 걸 말로 해도 됩니다
 ("이 swagger로 부하 테스트해줘", "내 시나리오 실행되게 만들어줘", "이 finding 진짜야?").
@@ -31,6 +37,7 @@ Code로 열면 자동으로 인식됩니다.
 | 파일 | 만드는 곳 | 쓰는 곳 |
 |---|---|---|
 | `json/scenario.json` | scaffold(생성), enrich(수정) | enrich, run, up |
+| `json/auth.json` (독립 `auth` 블록) | tmula-auth | 아무 시나리오에나 붙여넣기/병합; 한눈에 확인 |
 | `json/report.json` (`tmula run --json`) | run | triage (`--baseline-file`) |
 | `./bin/tmula` | `go build -o ./bin/tmula ./server/cmd/tmula` | 전부 |
 

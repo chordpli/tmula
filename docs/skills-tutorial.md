@@ -10,11 +10,12 @@ see [skills-guide.md](skills-guide.md).
 
 | Skill | What it does | Command it runs |
 |---|---|---|
-| **tmula-scaffold** | build a scenario scaffold from a spec (+ console graph/templates) | `tmula init`, `to-console.sh` |
+| **tmula-scaffold** | build a scenario scaffold from a spec (+ console graph/templates); auth is auto-derived when the spec declares a security scheme | `tmula init`, `to-console.sh` |
+| **tmula-auth** | derive the `auth` block standalone (login flow + headers + one `REPLACE_ME` secret) — the demo shop below needs none | `tmula init` (auth derivation) |
 | **tmula-enrich** | make the scenario runnable and safe (no CLI command; edits the file) | (none) |
 | **tmula-run** | safety gate → dry-run → load | `tmula run` |
 | **tmula-triage** | reproduce a finding · baseline gate | `tmula reproduce`, `tmula run --baseline-file` |
-| **tmula-up** | run the four skills above, in order | (calls the skills above) |
+| **tmula-up** | run the pipeline skills above, in order | (calls the skills above) |
 
 All generated JSON is written under a `json/` folder (gitignored): scenario, report, baseline, plus the web
 console's `graph.json` · `templates.json` · `source.json`.
