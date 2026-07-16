@@ -152,6 +152,7 @@ version of `tmula demo` (explicit curl/jq calls; needs `go`, `jq`, `curl`) - see
 | **Load-concentration** | Targets one endpoint or spikes open arrivals | ✅ Works |
 | **Think time** | Adds a random pause between user steps | ✅ Works |
 | **Findings thresholds** | Tunes error-rate, p95, and availability gates | ✅ Works |
+| **Authenticated runs** | Gives each virtual user a real credential — token pool, live login, self-signed JWT, session cookie | ✅ Works |
 | **Payload mutation** | Mutates bodies to surface input-validation bugs | 🚧 [Roadmap](#roadmap) |
 | **Step reordering** | Visits permitted steps out of scripted order | 🚧 [Roadmap](#roadmap) |
 | **Concentration profiles** | Applies timed concurrency to one graph node | 🚧 [Roadmap](#roadmap) |
@@ -160,6 +161,25 @@ Two workload models drive arrivals: **closed** (a fixed pool of looping users) a
 arrive at a rate over time, for organic concurrency). Open is the realistic default and takes an
 optional persona mix. A safety layer (host **allowlist**, **rate cap**, **kill switch**) keeps a run
 from escaping its target.
+
+Traffic can carry **real auth**: an `auth:` block assigns every virtual user a credential — a
+pre-issued token pool, a real login per user (with mid-run refresh), a self-signed JWT when you hold
+the key, a session cookie, or an OAuth2 IdP via the web console's guided mode. Secrets never cross
+the wire:
+
+```yaml
+auth:
+  strategy: login
+  source: { file: users.csv, format: csv }   # one row per account (username,password)
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+```
+
+Strategy choices, worked examples, and the decision table live in
+[Authenticated runs](docs/guide.en.md#authenticated-runs) in the manual.
 
 ---
 
