@@ -212,7 +212,8 @@ const en: Record<string, string> = {
   'auth.mode.pool': 'I already have tokens',
   'auth.mode.pool.desc': 'Easiest. Paste one bearer token or API key, or a list of pre-issued tokens — one per user.',
   'auth.mode.login': 'Log in to get tokens',
-  'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
+  'auth.mode.login.desc':
+    'Give your login URL and a body — tmula logs in and captures the token for you. Cookie-session logins work too: the session cookie is captured automatically.',
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
   'auth.mode.mint': 'Sign a token locally (self-issued JWT)',
@@ -225,12 +226,13 @@ const en: Record<string, string> = {
   // Auth · pattern generator (generate N rows from a subject/token template)
   'auth.pattern.toggle': 'Generate accounts from a pattern',
   'auth.pattern.hint':
-    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For a very large pool (100k+), use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
+    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For more than 10,000 rows, use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
   'auth.pattern.subject': 'Subject template',
   'auth.pattern.subjectHint': 'e.g. user{{.userIndex}} \u2014 leave empty for a bare token list.',
   'auth.pattern.token': 'Secret template',
   'auth.pattern.tokenHint': 'e.g. pw-{{.userIndex}} (the password for login, or a token for a pool). Not for opaque JWTs \u2014 those come from mint.',
   'auth.pattern.count': 'Count',
+  'auth.pattern.countHint': 'Up to {max} rows can be generated in the browser; beyond that, use the CLI usersPattern.',
   'auth.pattern.generate': 'Generate',
   'auth.pattern.generated': 'Generated {count} rows.',
 
@@ -245,6 +247,8 @@ const en: Record<string, string> = {
     'The endpoint that issues tokens (e.g. https://idp.example.com/oauth/token). For an openIdConnect service, use the token_endpoint from its discovery document.',
   'auth.oauth2.discovery':
     'This service publishes an OpenID Connect discovery document at {url} \u2014 open it and copy its token_endpoint into the Token URL above.',
+  'auth.oauth2.tokenUrlExamples':
+    'Typical shapes \u2014 Keycloak: https://<host>/realms/<realm>/protocol/openid-connect/token \u00b7 Auth0: https://<tenant>.auth0.com/oauth/token \u00b7 Cognito: https://<domain>.auth.<region>.amazoncognito.com/oauth2/token',
   'auth.oauth2.grant': 'How do you log in?',
   'auth.oauth2.grantHint': 'Pick the answer that matches what you have \u2014 tmula picks the grant.',
   'auth.oauth2.grant.password': 'With a username and password',
@@ -253,7 +257,7 @@ const en: Record<string, string> = {
   'auth.oauth2.grant.cc.desc': 'A machine identity: client_id + client_secret, one token shared by every user.',
   'auth.oauth2.grant.refresh': 'I\u2019m already logged in on an app or browser',
   'auth.oauth2.grant.refresh.desc':
-    'Paste a refresh token copied once from the app/devtools \u2014 the answer for services that need a human consent screen (Auth0, Cognito, social login).',
+    'Paste a refresh token copied once from the app/devtools \u2014 the answer for services that need a human consent screen (Auth0, Cognito, social login; the usual path when your service uses the \u201cauthorization code\u201d flow).',
   'auth.oauth2.grant.access': 'I only have an access token',
   'auth.oauth2.grant.access.desc': 'Use it as a token pool. If it expires mid-run, requests will start failing.',
   'auth.oauth2.username': 'Username',
@@ -323,6 +327,8 @@ const en: Record<string, string> = {
   'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
   'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
   'auth.pool.count': '{count} credential(s) parsed',
+  'auth.pool.basicHint':
+    'Basic-auth recipe: put the username in subject and the password in token, then send Authorization: Basic {{basicAuth .subject .token}} from your scenario template headers.',
 
   // Auth · login
   'auth.tokenVar.autoPlaceholder': 'auto-detect',
@@ -362,7 +368,8 @@ const en: Record<string, string> = {
   'auth.login.method': 'Login HTTP method',
   'auth.secrets.title': 'Secrets to fill in',
   'auth.secrets.hint': 'Almost done — the import filled in everything except the secret(s) below. Enter them and the login is ready.',
-  'auth.secrets.fieldHint': 'Filled in here in your browser and substituted at send time — the value is never stored.',
+  'auth.secrets.fieldHint':
+    'Filled in here and substituted into the body at send time. Never stored in your browser — but it does become part of this run’s spec on the control plane, like any login body.',
   'auth.advanced.login': 'Advanced',
   'auth.advanced.rawLogin': 'Edit the raw login flow (JSON)',
   'auth.advanced.rawLoginSub': 'Switch off the simple form and author the login graph and templates as raw JSON.',
@@ -855,7 +862,8 @@ const ko: Record<string, string> = {
   'auth.mode.pool': '이미 토큰이 있어요',
   'auth.mode.pool.desc': '가장 쉬운 길. bearer 토큰이나 API 키 하나, 또는 미리 발급한 토큰 목록을 붙여넣거나 업로드합니다 — 사용자마다 하나씩 배정됩니다.',
   'auth.mode.login': '로그인해서 토큰을 받아요',
-  'auth.mode.login.desc': '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다.',
+  'auth.mode.login.desc':
+    '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다. 쿠키 세션 로그인도 됩니다 — 세션 쿠키는 자동으로 캡처됩니다.',
   'auth.mode.bootstrap': '계정을 만들어서 테스트해요',
   'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다. 비프로덕션 전용, 확인 게이트가 있습니다.',
   'auth.mode.mint': '토큰을 로컬에서 서명(자체 발급 JWT)',
@@ -868,12 +876,13 @@ const ko: Record<string, string> = {
   // Auth · 패턴 생성기 (subject/token 템플릿으로 N개 행 생성)
   'auth.pattern.toggle': '패턴으로 계정 생성',
   'auth.pattern.hint':
-    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 아주 큰 풀(10만+)은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
+    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 10,000행이 넘는 풀은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
   'auth.pattern.subject': 'Subject 템플릿',
   'auth.pattern.subjectHint': '예: user{{.userIndex}} \u2014 비우면 토큰만 있는 목록이 됩니다.',
   'auth.pattern.token': 'Secret 템플릿',
   'auth.pattern.tokenHint': '예: pw-{{.userIndex}} (로그인의 비밀번호 또는 풀의 토큰). 불투명 JWT에는 쓸 수 없습니다 \u2014 그건 mint의 몫입니다.',
   'auth.pattern.count': '개수',
+  'auth.pattern.countHint': '브라우저에서는 최대 {max}행까지 생성할 수 있습니다. 그 이상은 CLI usersPattern을 사용하세요.',
   'auth.pattern.generate': '생성',
   'auth.pattern.generated': '{count}개 행을 생성했습니다.',
 
@@ -887,6 +896,8 @@ const ko: Record<string, string> = {
     '토큰을 발급하는 엔드포인트입니다(예: https://idp.example.com/oauth/token). openIdConnect 서비스라면 discovery 문서의 token_endpoint를 넣으세요.',
   'auth.oauth2.discovery':
     '이 서비스는 {url} 에 OpenID Connect discovery 문서를 게시합니다 \u2014 열어서 token_endpoint 값을 위의 토큰 URL에 붙여넣으세요.',
+  'auth.oauth2.tokenUrlExamples':
+    '흔한 형태 \u2014 Keycloak: https://<호스트>/realms/<realm>/protocol/openid-connect/token · Auth0: https://<테넌트>.auth0.com/oauth/token · Cognito: https://<도메인>.auth.<리전>.amazoncognito.com/oauth2/token',
   'auth.oauth2.grant': '어떻게 로그인하나요?',
   'auth.oauth2.grantHint': '가진 것에 맞는 답을 고르면 tmula가 grant를 알아서 고릅니다.',
   'auth.oauth2.grant.password': '아이디/비밀번호로',
@@ -895,7 +906,7 @@ const ko: Record<string, string> = {
   'auth.oauth2.grant.cc.desc': '머신 아이덴티티: client_id + client_secret, 토큰 하나를 모든 사용자가 공유합니다.',
   'auth.oauth2.grant.refresh': '앱/브라우저에서 이미 로그인했어요',
   'auth.oauth2.grant.refresh.desc':
-    '앱이나 개발자도구에서 refresh token을 1회 복사해 붙여넣으세요 \u2014 사람 동의 화면이 필요한 서비스(Auth0, Cognito, 소셜 로그인)의 정답 경로입니다.',
+    '앱이나 개발자도구에서 refresh token을 1회 복사해 붙여넣으세요 \u2014 사람 동의 화면이 필요한 서비스(Auth0, Cognito, 소셜 로그인)의 정답 경로이며, 서비스가 “authorization code” 플로우를 쓴다면 보통 이 길입니다.',
   'auth.oauth2.grant.access': 'access token만 있어요',
   'auth.oauth2.grant.access.desc': '토큰 풀로 사용합니다. 실행 중에 만료되면 요청이 실패하기 시작할 수 있습니다.',
   'auth.oauth2.username': '아이디',
@@ -965,6 +976,8 @@ const ko: Record<string, string> = {
   'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
   'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
   'auth.pool.count': '자격 증명 {count}개 파싱됨',
+  'auth.pool.basicHint':
+    'Basic 인증 레시피: subject에 아이디, token에 비밀번호를 넣고, 시나리오 템플릿 headers에서 Authorization: Basic {{basicAuth .subject .token}}을 보내세요.',
 
   // Auth · 로그인
   'auth.tokenVar.autoPlaceholder': '자동 감지',
@@ -1004,7 +1017,8 @@ const ko: Record<string, string> = {
   'auth.login.method': '로그인 HTTP 메서드',
   'auth.secrets.title': '입력할 비밀값',
   'auth.secrets.hint': '거의 다 됐습니다 — 가져오기가 아래 비밀값만 남기고 모두 채웠습니다. 입력하면 로그인 준비가 끝납니다.',
-  'auth.secrets.fieldHint': '브라우저에서 입력되어 전송 시점에 본문에 채워집니다 — 값은 저장되지 않습니다.',
+  'auth.secrets.fieldHint':
+    '여기에 입력되어 전송 시점에 본문에 채워집니다. 브라우저에는 저장되지 않지만, 다른 로그인 본문과 마찬가지로 이 실행의 spec으로 컨트롤 플레인에 남습니다.',
   'auth.advanced.login': '고급',
   'auth.advanced.rawLogin': '원본 로그인 흐름 편집 (JSON)',
   'auth.advanced.rawLoginSub': '간단 양식을 끄고 로그인 그래프와 템플릿을 원본 JSON으로 직접 작성합니다.',

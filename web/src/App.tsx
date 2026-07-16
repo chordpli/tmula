@@ -1639,6 +1639,10 @@ function AuthPoolFields({
         />
       </Field>
 
+      {/* Discoverability: the pool carries Basic-auth credentials just fine —
+          spell out the {{basicAuth}} recipe so nobody hand-base64s a header. */}
+      <p className="card__hint">{t('auth.pool.basicHint')}</p>
+
       {parseError ? (
         <div className="authpanel__err" role="alert">
           <AlertIcon />
@@ -1728,14 +1732,23 @@ function PatternGenerator({
           </Field>
         </div>
         <div className="field-row field-row--2">
-          <Field label={t('auth.pattern.count')}>
+          <Field
+            label={t('auth.pattern.count')}
+            help={t('auth.pattern.countHint', { max: MAX_WEB_PATTERN_ROWS.toLocaleString() })}
+          >
             <input
               className="input"
               type="number"
               min={1}
               max={MAX_WEB_PATTERN_ROWS}
               value={count}
-              onChange={(e) => setCount(Math.max(1, Math.floor(Number(e.target.value) || 0)))}
+              onChange={(e) =>
+                // Clamp to the real browser cap so a typed 50000 can never reach
+                // the generator's over-cap error — the field simply stops at it.
+                setCount(
+                  Math.min(MAX_WEB_PATTERN_ROWS, Math.max(1, Math.floor(Number(e.target.value) || 0))),
+                )
+              }
             />
           </Field>
           <div style={{ display: 'flex', alignItems: 'flex-end' }}>
@@ -2194,6 +2207,9 @@ function AuthOAuth2GuideFields({
           spellCheck={false}
         />
       </Field>
+      {/* Static shape examples for the big managed IdPs, so "what does my token
+          URL even look like" has an answer right under the field. */}
+      <p className="card__hint">{t('auth.oauth2.tokenUrlExamples')}</p>
       {discoveryUrl && (
         <p className="authpanel__ok" role="status">
           <CheckMini />
