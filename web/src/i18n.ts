@@ -336,6 +336,12 @@ const en: Record<string, string> = {
   'auth.pool.count': '{count} credential(s) parsed',
   'auth.pool.basicHint':
     'Basic-auth recipe: put the username in subject and the password in token, then send Authorization: Basic {{basicAuth .subject .token}} from your scenario template headers.',
+  // JWT expiry feedback (decoded client-side, never verified).
+  'auth.pool.expiry': 'First token expires in {in}.',
+  'auth.pool.expirySoon':
+    'First token expires in {in} — before this run ends ({duration}s). Requests will start failing mid-run; paste fresher tokens or shorten the run.',
+  'auth.pool.expired':
+    'A pasted token is already expired — requests would fail immediately. Paste a fresh token.',
 
   // Auth · login
   'auth.tokenVar.autoPlaceholder': 'auto-detect',
@@ -1049,6 +1055,12 @@ const ko: Record<string, string> = {
   'auth.pool.count': '자격 증명 {count}개 파싱됨',
   'auth.pool.basicHint':
     'Basic 인증 레시피: subject에 아이디, token에 비밀번호를 넣고, 시나리오 템플릿 headers에서 Authorization: Basic {{basicAuth .subject .token}}을 보내세요.',
+  // JWT 만료 피드백 (브라우저에서 디코드만 하며 검증하지 않습니다).
+  'auth.pool.expiry': '가장 빠른 토큰이 {in} 후 만료됩니다.',
+  'auth.pool.expirySoon':
+    '가장 빠른 토큰이 {in} 후 만료됩니다 — 이 실행이 끝나기 전({duration}초)입니다. 실행 도중 요청이 실패하기 시작하니, 새 토큰을 붙여넣거나 실행을 줄이세요.',
+  'auth.pool.expired':
+    '붙여넣은 토큰 중 이미 만료된 것이 있습니다 — 요청이 즉시 실패합니다. 새 토큰을 붙여넣으세요.',
 
   // Auth · 로그인
   'auth.tokenVar.autoPlaceholder': '자동 감지',

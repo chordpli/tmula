@@ -17,6 +17,7 @@ import {
   buildRunSpec,
   classifyEdge,
   compareURL,
+  decodeJwtExp,
   discoverIssuer,
   formatCount,
   formFromRunSpec,
@@ -33,6 +34,7 @@ import {
   heatmapURL,
   heatWidth,
   hostFromBaseUrl,
+  humanDuration,
   importScenario,
   isOAuth2GuideGeneratedFlow,
   mintManagedIdPAdvisory,
@@ -57,6 +59,7 @@ import {
   parseLatencyFrame,
   parseAllowlist,
   parseSignupSteps,
+  poolExpiry,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
@@ -2278,6 +2281,58 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('token paste intelligence (decodeJwtExp / poolExpiry / humanDuration)', () => {
+  // jwt crafts an unsigned three-segment token whose payload is real base64url —
+  // exactly the shape the pool decoder feeds on (it never verifies signatures).
+  // btoa keeps the test browser-typed (no Buffer / @types/node dependency).
+  const b64u = (obj: unknown) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const jwt = (payload: unknown) => `${b64u({ alg: 'none', typ: 'JWT' })}.${b64u(payload)}.sig`
+  const NOW = 1_800_000_000_000 // fixed "now" in ms
+  const nowSec = NOW / 1000
+
+  it('decodes the exp claim from a JWT without verifying it', () => {
+    expect(decodeJwtExp(jwt({ exp: 1234567890, sub: 'alice' }))).toBe(1234567890)
+  })
+
+  it('silently ignores non-JWT tokens, missing exp, and undecodable payloads', () => {
+    expect(decodeJwtExp('opaque-bearer-token')).toBeNull()
+    expect(decodeJwtExp('a.b')).toBeNull()
+    expect(decodeJwtExp(jwt({ sub: 'no-exp' }))).toBeNull()
+    expect(decodeJwtExp('x.!!!not-base64url!!!.y')).toBeNull()
+    expect(decodeJwtExp(jwt({ exp: 'soon' }))).toBeNull()
+  })
+
+  it('reports the EARLIEST expiry across the pool and skips opaque tokens', () => {
+    const entries = [
+      { token: 'opaque' },
+      { token: jwt({ exp: nowSec + 3600 }) },
+      { token: jwt({ exp: nowSec + 1920 }), subject: 'bob' }, // 32m — the earliest
+    ]
+    const exp = poolExpiry(entries, NOW)
+    expect(exp).not.toBeNull()
+    expect(exp!.expired).toBe(false)
+    expect(exp!.msLeft).toBe(1920 * 1000)
+    expect(humanDuration(exp!.msLeft)).toBe('32m')
+  })
+
+  it('flags an already-expired token and stays silent for all-opaque pools', () => {
+    const expired = poolExpiry([{ token: jwt({ exp: nowSec - 60 }) }], NOW)
+    expect(expired!.expired).toBe(true)
+    expect(expired!.msLeft).toBe(-60 * 1000)
+    expect(poolExpiry([{ token: 'opaque-1' }, { token: 'opaque-2' }], NOW)).toBeNull()
+    expect(poolExpiry([], NOW)).toBeNull()
+  })
+
+  it('renders durations compactly (45s / 32m / 2h 5m / 3h)', () => {
+    expect(humanDuration(45_000)).toBe('45s')
+    expect(humanDuration(1_920_000)).toBe('32m')
+    expect(humanDuration((2 * 3600 + 5 * 60) * 1000)).toBe('2h 5m')
+    expect(humanDuration(3 * 3600 * 1000)).toBe('3h')
+    expect(humanDuration(-5_000)).toBe('0s')
   })
 })
 

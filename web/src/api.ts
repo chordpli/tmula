@@ -815,6 +815,65 @@ function parseLoginCredsJSONL(body: string): CredentialEntry[] {
   return out
 }
 
+// --- Token paste intelligence (pool-mode JWT expiry feedback) --------------------
+
+// decodeJwtExp extracts the exp claim (seconds since epoch) from a JWT-shaped
+// token — three base64url segments — WITHOUT any signature verification: this is
+// registration-time feedback only, never a security decision. Returns null for
+// non-JWT tokens, an undecodable payload, or a missing/non-numeric exp, so
+// opaque bearer tokens pass through silently.
+export function decodeJwtExp(token: string): number | null {
+  const parts = token.split('.')
+  if (parts.length !== 3 || !parts[0] || !parts[1]) return null
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1])) as { exp?: unknown }
+    return typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : null
+  } catch {
+    return null
+  }
+}
+
+// base64UrlDecode maps base64url onto the base64 alphabet, restores the padding,
+// and decodes via atob (available in every target browser and Node ≥ 16).
+function base64UrlDecode(s: string): string {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/')
+  return atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
+}
+
+// PoolExpiry summarizes the EARLIEST exp among the JWT-shaped tokens of a pool:
+// the wall-clock instant, whether it is already past, and the signed time left.
+export interface PoolExpiry {
+  earliestExpMs: number
+  expired: boolean
+  msLeft: number // negative when already expired
+}
+
+// poolExpiry scans parsed pool entries for JWT expiries and reports the earliest,
+// or null when no entry looks like a JWT with an exp (nothing to say — opaque
+// tokens are ignored silently).
+export function poolExpiry(entries: CredentialEntry[], nowMs: number): PoolExpiry | null {
+  let earliest: number | null = null
+  for (const e of entries) {
+    const exp = decodeJwtExp(e.token)
+    if (exp !== null && (earliest === null || exp < earliest)) earliest = exp
+  }
+  if (earliest === null) return null
+  const earliestExpMs = earliest * 1000
+  return { earliestExpMs, expired: earliestExpMs <= nowMs, msLeft: earliestExpMs - nowMs }
+}
+
+// humanDuration renders a millisecond span compactly for the expiry line:
+// 45s / 32m / 2h 5m. Sub-second (and negative) spans clamp to 0s.
+export function humanDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  const rem = m % 60
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`
+}
+
 // loginBodyReferencesRow reports whether a login body pulls a credential-list row in —
 // i.e. it mentions the {{.username}} or {{.password}} Go-template markers the backend
 // exposes for each entry. The scenario doctor uses it to warn when a multi-user list is

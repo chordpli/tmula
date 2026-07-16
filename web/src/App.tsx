@@ -17,6 +17,7 @@ import {
   getExperimentSpec,
   getReport,
   hostFromBaseUrl,
+  humanDuration,
   importScenario,
   killRun,
   localizeError,
@@ -32,6 +33,7 @@ import {
   parseCredentials,
   parseLoginCredentials,
   placeholderLabel,
+  poolExpiry,
   preflightAuth,
   probeRun,
   reportHTMLURL,
@@ -44,6 +46,7 @@ import {
   traceable,
   type AuthAdvisory,
   type AuthMode,
+  type CredentialEntry,
   type CredFormat,
   type ExperimentForm,
   type ImportResult,
@@ -1576,15 +1579,23 @@ function AuthPoolFields({
 
   // Live parse of the pasted text for the count / inline error. It never throws out of
   // render: a malformed body surfaces as a short message, an empty body as nothing.
-  let count = 0
+  let entries: CredentialEntry[] = []
   let parseError = ''
   if (form.authPoolText.trim()) {
     try {
-      count = parseCredentials(form.authPoolFormat, form.authPoolText).length
+      entries = parseCredentials(form.authPoolFormat, form.authPoolText)
     } catch (e) {
       parseError = localizeError(e, t)
     }
   }
+  const count = entries.length
+  // Token paste intelligence: when entries look like JWTs, decode (NOT verify)
+  // the payload and surface the earliest exp — expired or expiring before the
+  // configured run duration is a warning, otherwise a quiet fact. Opaque tokens
+  // yield null and say nothing.
+  const expiry = count > 0 ? poolExpiry(entries, Date.now()) : null
+  const runMs = form.workloadKind === 'open' ? form.durationSeconds * 1000 : 0
+  const expiresMidRun = !!expiry && !expiry.expired && runMs > 0 && expiry.msLeft < runMs
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -1651,6 +1662,29 @@ function AuthPoolFields({
           {t('auth.pool.count', { count })}
         </p>
       ) : null}
+
+      {/* JWT expiry feedback next to the parse count: already expired and
+          expiring-before-the-run-ends warn loudly; a comfortable expiry is a
+          quiet informational line. */}
+      {expiry &&
+        (expiry.expired ? (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{t('auth.pool.expired')}</span>
+          </div>
+        ) : expiresMidRun ? (
+          <div className="authpanel__warn" role="alert">
+            <AlertIcon />
+            <span>
+              {t('auth.pool.expirySoon', {
+                in: humanDuration(expiry.msLeft),
+                duration: form.durationSeconds,
+              })}
+            </span>
+          </div>
+        ) : (
+          <p className="card__hint">{t('auth.pool.expiry', { in: humanDuration(expiry.msLeft) })}</p>
+        ))}
 
       <PatternGenerator
         format={form.authPoolFormat === 'jsonl' ? 'tokens' : (form.authPoolFormat as 'csv' | 'tokens')}
