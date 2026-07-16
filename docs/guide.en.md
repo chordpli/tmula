@@ -471,7 +471,7 @@ segments:
 
 # Optional auth - see "Authenticated runs":
 auth:
-  strategy: pool                  # pool (pre-supplied) | login (mint at run time) | bootstrap-signup (provision)
+  strategy: pool                  # pool (pre-supplied) | login (mint at run time) | bootstrap-signup (provision) | mint (self-sign) | exec (BYO command)
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
@@ -525,7 +525,7 @@ findings:
 | `thinkMs` | `[min, max]` | Think-time range (must be exactly two ints, else `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | Back-pressure cap. |
 
-**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, or `bootstrap-signup`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }` (mutually exclusive with `users`). For `login`: `login.flow`, `login.capture.token` (required), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool).
+**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, `bootstrap-signup`, `mint`, or `exec`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }`, or `usersPattern: { subject, token, count }` (the three are mutually exclusive). For `login`: `login.flow`, `login.capture.token` (required), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool). For `mint`: the [mint block](#strategy-mint-self-issue-a-jwt-locally). For `exec`: the [exec block](#strategy-exec-bring-your-own-token--escape-hatch) (opt-in gated).
 
 **`findings` fields** (every field optional; a `0`/omitted value keeps its default)
 
@@ -1082,7 +1082,7 @@ use the defaults (auto-detection included).
 
 To make simulated traffic carry real auth material, attach a **credential pool**. Each closed virtual user (by **user index**) or open session (by **session/arrival index**) is assigned a credential, wrapping around when there are more users than entries. Reference it from a template header (`"Authorization": "Bearer {{.token}}"`), or use `{{.subject}}` for the non-sensitive principal.
 
-There are four credential strategies. Pick the one that fits your service.
+There are five credential strategies. Pick the one that fits your service.
 
 ### Strategy: pool (pre-supplied credentials)
 
@@ -1200,6 +1200,30 @@ auth:
 ```
 
 mint **can fan out to distributed workers** — only the key **reference** rides on the ShardSpec, and each worker resolves the same key locally and signs per global index. Prerequisite: the referenced key (env/file) must be deployed identically on every worker node; a worker that cannot resolve it fails its shard with a clear runtime error instead of running unauthenticated. **Caution:** mint cannot be used for a service whose signing key the IdP holds (Auth0/Cognito/Firebase) — the issued token would be rejected; use the login strategy or the web OAuth2 guide there. The web console shows a warning banner when you pick mint after importing such a managed-IdP spec.
+
+### Strategy: exec (bring your own token — escape hatch)
+
+Use when nothing above fits but a **local command** can print a token — a vendor CLI already mints them (`aws`, `gcloud`, `vault`, a custom SDK helper), or the auth dance is something tmula cannot model declaratively. tmula runs the command once per virtual user and its stdout becomes `{{.token}}`:
+
+```yaml
+auth:
+  strategy: exec
+  exec:
+    command: ["vault", "token", "create", "-field=token"]  # argv - NOT a shell string
+    env: { VAULT_ADDR: "https://vault.internal:8200" }     # secrets belong here, not in argv
+    timeout: 10s            # optional per-invocation bound (a sane default applies)
+    maxOutputBytes: 65536   # optional stdout cap (a sane default applies)
+```
+
+`command` elements and `env` values may reference `{{.userIndex}}`, so each virtual user can mint its own identity. The command is executed argv-only — **no shell**, so a metacharacter in an argument is passed literally.
+
+**Security caveats — read before using:**
+
+- exec runs an **arbitrary local command**. A scenario file alone never executes anything: the run is rejected unless the operator opts in with the **`--allow-exec`** flag (`tmula run --allow-exec`, or `WithAllowExec` on an embedded server). Off by default.
+- The command's network egress is **outside the safety guard** — whatever it talks to is bound by neither the target allowlist nor the rate cap. Point it only at infrastructure you trust it with.
+- Keep secrets in `env` values (which may reference host env), never in `command` — argv is visible to `ps`.
+
+exec is **in-process only**: like login and bootstrap-signup it is rejected against a remote `--engine` and with distributed workers. Prefer any declarative strategy when one fits — exec is the escape hatch, not the default.
 
 ### Session-cookie auth
 

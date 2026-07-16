@@ -471,7 +471,7 @@ segments:
 
 # Optional auth - see "인증이 필요한 실행":
 auth:
-  strategy: pool                  # pool(미리 공급) | login(실행 시 발급) | bootstrap-signup(계정 프로비저닝)
+  strategy: pool                  # pool(미리 공급) | login(실행 시 발급) | bootstrap-signup(계정 프로비저닝) | mint(자체 서명) | exec(BYO 명령)
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
@@ -525,7 +525,7 @@ findings:
 | `thinkMs` | `[min, max]` | 생각 시간 범위(정확히 정수 두 개여야 함, 아니면 `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | 백프레셔 상한. |
 
-**`auth` 필드.** [인증이 필요한 실행](#인증이-필요한-실행) 참고. `strategy`는 `pool`(기본), `login`, `bootstrap-signup` 중 하나입니다. `pool`일 때: `users`는 `{ subject, token }` 목록이거나, `source: { file, env, format }`(상호 배타적)을 씁니다. `login`일 때: `login.flow`, `login.capture.token`(필수), `login.capture.subject`(선택), `login.scope`(`per-user` | `shared`). `bootstrap-signup`일 때: `signup.flow`, `signup.capture.token`, `signup.teardown`(선택), `keepAccounts`(bool).
+**`auth` 필드.** [인증이 필요한 실행](#인증이-필요한-실행) 참고. `strategy`는 `pool`(기본), `login`, `bootstrap-signup`, `mint`, `exec` 중 하나입니다. `pool`일 때: `users`는 `{ subject, token }` 목록이거나, `source: { file, env, format }` 또는 `usersPattern: { subject, token, count }`를 씁니다(셋은 상호 배타적). `login`일 때: `login.flow`, `login.capture.token`(필수), `login.capture.subject`(선택), `login.scope`(`per-user` | `shared`). `bootstrap-signup`일 때: `signup.flow`, `signup.capture.token`, `signup.teardown`(선택), `keepAccounts`(bool). `mint`일 때: [mint 블록](#전략-mint-로컬-jwt-자체-발급). `exec`일 때: [exec 블록](#전략-exec-직접-가져온-토큰--탈출구)(명시적 opt-in 게이트).
 
 **`findings` 필드**(모든 필드 선택; `0`이거나 생략된 값은 기본값을 유지)
 
@@ -947,7 +947,7 @@ OpenAPI는 *어떤* 엔드포인트가 있는지만 알고, HAR는 한 세션의
 
 시뮬레이션 트래픽이 진짜 인증 정보를 운반하게 하려면 **자격 증명 풀**(credential pool)을 붙이세요. 각 클로즈드 가상 사용자(**사용자 인덱스** 기준) 또는 오픈 세션(**세션/도착 인덱스** 기준)에 자격 증명이 배정되며, 항목보다 사용자가 많으면 돌아가며 재사용합니다. 템플릿 헤더에서 `"Authorization": "Bearer {{.token}}"`로 참조하거나, 비민감 주체에는 `{{.subject}}`를 쓰세요.
 
-자격 증명 전략은 네 가지입니다. 서비스에 맞는 것을 고르세요.
+자격 증명 전략은 다섯 가지입니다. 서비스에 맞는 것을 고르세요.
 
 ### 전략: pool (미리 공급된 자격 증명)
 
@@ -1065,6 +1065,30 @@ auth:
 ```
 
 mint는 **분산 워커로 팬아웃할 수 있습니다** — ShardSpec에 실리는 것은 키 **참조**뿐이고, 각 워커가 로컬에서 같은 키를 해석해 전역 인덱스별로 서명합니다. 전제: 참조가 가리키는 키(env/file)가 모든 워커 노드에 동일하게 배포되어 있어야 합니다. 못 찾는 워커는 익명 실행 대신 명확한 런타임 에러로 샤드를 실패시킵니다. **주의:** Auth0/Cognito/Firebase처럼 IdP가 서명 키를 쥔 서비스에는 mint를 쓸 수 없습니다(발급 토큰이 거부됨) — 그런 경우 login 전략이나 웹의 OAuth2 가이드를 쓰세요. 웹 콘솔은 그런 관리형 IdP 스펙을 import하면 mint 선택 시 경고 배너를 띄웁니다.
+
+### 전략: exec (직접 가져온 토큰 — 탈출구)
+
+위의 어떤 전략도 맞지 않지만 **로컬 명령**이 토큰을 출력할 수 있을 때 사용합니다 — 벤더 CLI가 이미 토큰을 발급해 주거나(`aws`, `gcloud`, `vault`, 자체 SDK 헬퍼), 인증 절차가 tmula가 선언적으로 모델링할 수 없는 형태일 때입니다. tmula는 가상 사용자마다 명령을 한 번 실행하고 그 stdout이 `{{.token}}`이 됩니다.
+
+```yaml
+auth:
+  strategy: exec
+  exec:
+    command: ["vault", "token", "create", "-field=token"]  # argv - 셸 문자열이 아님
+    env: { VAULT_ADDR: "https://vault.internal:8200" }     # 비밀은 argv가 아니라 여기에
+    timeout: 10s            # 선택: 호출당 시간 제한(적절한 기본값 적용)
+    maxOutputBytes: 65536   # 선택: stdout 상한(적절한 기본값 적용)
+```
+
+`command` 원소와 `env` 값은 `{{.userIndex}}`를 참조할 수 있어 가상 사용자마다 자기 정체성으로 토큰을 만들 수 있습니다. 명령은 argv 그대로 실행됩니다 — **셸을 거치지 않으므로** 인자 속 메타문자는 문자 그대로 전달됩니다.
+
+**보안 주의 사항 — 사용 전에 꼭 읽으세요:**
+
+- exec는 **임의의 로컬 명령을 실행**합니다. 시나리오 파일만으로는 아무것도 실행되지 않습니다: 운영자가 **`--allow-exec`** 플래그(`tmula run --allow-exec`, 임베디드 서버는 `WithAllowExec`)로 명시적으로 허용하지 않는 한 실행이 거부됩니다. 기본값은 꺼짐입니다.
+- 명령의 네트워크 송신은 **안전장치 밖**입니다 — 명령이 닿는 곳은 대상 allowlist에도 rate cap에도 묶이지 않습니다. 신뢰할 수 있는 인프라에만 겨누세요.
+- 비밀은 `command`가 아니라 `env` 값에 두세요(호스트 환경 변수를 참조할 수 있습니다) — argv는 `ps`로 노출됩니다.
+
+exec는 **in-process 전용**입니다. login·bootstrap-signup처럼 원격 `--engine`과 분산 워커에서는 거부됩니다. 맞는 선언적 전략이 있다면 그쪽을 쓰세요 — exec는 기본값이 아니라 탈출구입니다.
 
 ### 세션 쿠키 인증
 
