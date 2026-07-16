@@ -1165,7 +1165,15 @@ auth:
 
 - **OAuth2 웹 가이드.** OAuth2만 제공하는 서비스는 웹 콘솔의 "OAuth2 서비스예요" 진입점에서 토큰 URL과 로그인 방식(아이디/비밀번호 · 클라이언트 키 · refresh token 붙여넣기 · access token만)만 답하면 login flow가 자동 조립됩니다. Auth0/Cognito/소셜 로그인처럼 사람 동의가 필요한 서비스는 앱/개발자도구에서 refresh token을 1회 복사해 붙여넣는 경로가 정답입니다. (참고: client_secret이나 붙여넣은 refresh token은 다른 로그인 본문과 마찬가지로 실행 스펙에 저장되므로, client_credentials에는 일회용 테스트 클라이언트를 권장합니다.)
 - **basic auth / apiKey import.** OpenAPI/Swagger를 import하면 http `basic`(→ `Authorization: Basic {{basicAuth .subject .token}}` 헤더 + username/password 풀), `apiKey` in query(→ 경로에 `?name={{.token|urlquery}}`), `apiKey` in cookie(→ `Cookie: name={{.token}}`)가 자동 도출됩니다. `REPLACE_ME`만 채우면 실행됩니다. `openIdConnect` 스킴은 discovery URL을 advisory로 알려 주며, 웹은 그 값을 OAuth2 가이드의 토큰 URL로 안내합니다.
-- **PKCE / device-code는 보류.** 사람 동의(인앱 브라우저·소셜·MFA)를 거치는 최초 authorization-code + PKCE와 device-code 플로는 헤드리스 자동화 대상이 아니라 **지원하지 않습니다**. 우회로: OAuth2 가이드의 **refresh token 붙여넣기**(1회 사람 로그인 후 refresh token만 복사), 사전 발급 토큰 pool, 또는 최후의 수단으로 exec(BYO-token 명령).
+- **PKCE / device-code는 보류.** 사람 동의(인앱 브라우저·소셜·MFA)를 거치는 최초 authorization-code + PKCE와 device-code 플로는 헤드리스 자동화 대상이 아니라 **지원하지 않습니다**. 우회로: OAuth2 가이드의 **refresh token 붙여넣기**(1회 사람 로그인 후 refresh token만 복사), 사전 발급 토큰 pool, 또는 최후의 수단으로 [exec](#전략-exec-직접-가져온-토큰--탈출구)(BYO-token 명령).
+
+#### refresh token은 어떻게 동작하나
+
+로그인이 OAuth2 **폼 grant**(폼 인코딩 본문의 `grant_type=…`)라면 tmula는 거기서 실제 갱신 교환을 자동 도출합니다: 같은 토큰 엔드포인트로 보내는 `grant_type=refresh_token&refresh_token={{.refreshToken}}` POST입니다(명시적 `login.refresh` 재정의가 자동 도출보다 우선하며, JSON 본문 로그인에도 쓸 수 있습니다). refresh token은 실행 시 로그인 응답에서 캡처되며 파일에 적을 일이 없습니다. 실제 수명 주기는 다음과 같습니다.
+
+- **401 1회 재시도와의 상호작용.** 실행 중 401이 난 요청은 갱신을 **한 번** 트리거하고 — 도출된 `refresh_token` 교환이 있으면 그것을, 없으면 재로그인 폴백을 — 실패한 요청을 한 번 재시도합니다. 갱신/재로그인 트래픽은 finding에서 제외됩니다.
+- **per-user vs shared 스코프.** `scope: per-user`이면 가상 사용자마다 자기 access + refresh token 쌍을 들고 독립적으로 갱신합니다. `scope: shared`(client_credentials 방식)이면 자격 증명이 하나입니다: 갱신 한 번이 모든 세션이 쓰는 토큰을 교체합니다.
+- **사용 시 회전(rotation-on-use).** 많은 IdP(rotation을 켠 Auth0, Cognito, 대부분의 컨슈머 서비스)는 **교환할 때마다 refresh token을 회전**시킵니다 — 응답에 *새* refresh token이 실리고 이전 것은 무효가 됩니다. tmula는 이를 처리합니다: 매 교환마다 회전된(또는 그대로 이어지는) refresh token을 다음 교환을 위해 저장합니다. 다만 웹 OAuth2 가이드에 붙여넣은 refresh token이 **일회용**일 수 있다는 뜻이기도 합니다: 같은 값을 동시에 도는 두 번째 실행에 재사용하지 말고, tmula의 첫 갱신이 그 토큰을 소비하면 복사해 온 앱이 로그아웃될 수 있다는 점도 예상하세요.
 
 ---
 
