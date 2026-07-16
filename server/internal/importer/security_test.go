@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"text/template"
@@ -9,6 +10,32 @@ import (
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
+
+// replaceMeTestRE matches an importer REPLACE_ME_* placeholder in a derived auth block.
+var replaceMeTestRE = regexp.MustCompile(`REPLACE_ME[A-Z0-9_]*`)
+
+// fillAuthPlaceholders simulates the user filling the REPLACE_ME_* secrets a spec importer
+// scaffolds, so a test can then confirm the scenario expands into a runnable spec. Expand
+// now REJECTS an unfilled placeholder (the fill-it-in-first contract), so a structural
+// importer test that wants to reach Expand must fill the secret first.
+func fillAuthPlaceholders(s scenariofile.Scenario) scenariofile.Scenario {
+	if s.Auth == nil {
+		return s
+	}
+	for i := range s.Auth.Users {
+		s.Auth.Users[i].Token = replaceMeTestRE.ReplaceAllString(s.Auth.Users[i].Token, "filled-secret")
+		s.Auth.Users[i].Subject = replaceMeTestRE.ReplaceAllString(s.Auth.Users[i].Subject, "filled-subject")
+	}
+	if s.Auth.Login != nil {
+		for i := range s.Auth.Login.Flow {
+			s.Auth.Login.Flow[i].Body = replaceMeTestRE.ReplaceAllString(s.Auth.Login.Flow[i].Body, "filled-secret")
+			for k, v := range s.Auth.Login.Flow[i].Headers {
+				s.Auth.Login.Flow[i].Headers[k] = replaceMeTestRE.ReplaceAllString(v, "filled-secret")
+			}
+		}
+	}
+	return s
+}
 
 // findStep returns the first flow step whose request matches, or nil.
 func findStep(s scenariofile.Scenario, request string) *scenariofile.Step {
@@ -107,9 +134,9 @@ paths:
 	if got := get.Headers["Authorization"]; got != "Bearer {{.token}}" {
 		t.Errorf("GET /items Authorization = %q, want Bearer {{.token}}", got)
 	}
-	// The whole thing must expand into a runnable spec (after the user fills the secret;
-	// REPLACE_ME placeholders are inert template-free strings so expand succeeds).
-	if _, err := scenariofile.Expand(s); err != nil {
+	// The whole thing must expand into a runnable spec once the user fills the secret
+	// (Expand now rejects an unfilled REPLACE_ME placeholder — fill it in first).
+	if _, err := scenariofile.Expand(fillAuthPlaceholders(s)); err != nil {
 		t.Errorf("expand imported scenario: %v", err)
 	}
 }
@@ -463,7 +490,9 @@ paths:
 		t.Errorf("a query apiKey must not inject a header, got %+v", get.Headers)
 	}
 	assertTemplateSafe(t, "query apiKey path", get.Request)
-	if _, err := scenariofile.Expand(s); err != nil {
+	// Expands into a runnable spec once the REPLACE_ME token is filled (Expand now
+	// rejects an unfilled placeholder).
+	if _, err := scenariofile.Expand(fillAuthPlaceholders(s)); err != nil {
 		t.Errorf("expand imported scenario: %v", err)
 	}
 }
