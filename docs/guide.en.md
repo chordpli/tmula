@@ -1137,6 +1137,33 @@ auth:
 
 > **Large pool files.** The external-source file cap is 512 MiB by default and parsed by streaming (a 300k-JWT JSONL of ~300–450 MB loads fine). `auth.source.maxBytes` moves the cap (positive only — the cap always stands). Login prewarm runs in parallel but bounded to `RateCap.MaxConcurrency` (at most 16) so it never load-tests the IdP.
 
+#### Taking a web-authored run to the CLI
+
+The browser cap is the signal to switch: when a pattern pool needs more than 10,000 rows (or you want the run in CI), carry the exact run you authored in the console over to a scenario file. The console's two JSON editors are already in scenario-file shape:
+
+1. Copy the **Scenario graph** editor's JSON into a file's `graph:` block and the **API templates** editor's JSON into `templates:` (the [graph-first scenario form](#graph-first-scenario-files)); copy the **Start node** and **Max steps** fields into `start:` / `maxSteps:`.
+2. Move the auth block: re-declare what the Auth card configured under `auth:` — for a pattern pool that is the `usersPattern` block, now free of the browser cap.
+3. Raise `usersPattern.count` past 10,000 (the file path materializes it server-side at Expand).
+4. `tmula run scenario.yaml`.
+
+```yaml
+target: http://localhost:9000        # the console's Base URL
+start: browse                        # the console's Start node
+maxSteps: 12                         # the console's Max steps
+graph: { }        # ← paste the Scenario graph editor's JSON here
+templates: { }    # ← paste the API templates editor's JSON here
+auth:
+  strategy: login
+  usersPattern: { subject: "user{{.userIndex}}", token: "pw-{{.userIndex}}", count: 100000 }
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+```
+
+Two differences from the console to remember: the file path **defaults the allowlist to the target's host** (the console makes you type it into both fields), and the pasted JSON is valid as-is inside the YAML file (YAML is a JSON superset).
+
 ### Strategy: login (mint a token at run time)
 
 Use when the service issues tokens through a login endpoint:

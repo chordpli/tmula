@@ -1002,6 +1002,33 @@ auth:
 
 > **대규모 풀 파일.** 외부 소스 파일 캡은 기본 512MiB이며 스트리밍으로 파싱합니다(30만 JWT JSONL ≈ 300–450MB도 무리 없이). `auth.source.maxBytes`로 캡을 조정할 수 있습니다(양수만, 캡 자체는 유지). login prewarm은 병렬로 실행되되 `RateCap.MaxConcurrency`(최대 16) 이하로 제한되어 IdP를 부하테스트하지 않습니다.
 
+#### 웹에서 만든 실행을 CLI로 옮기기
+
+브라우저 상한에 걸리는 순간이 전환 신호입니다: 패턴 풀에 10,000행 이상이 필요하거나 실행을 CI에 태우고 싶다면, 콘솔에서 만든 실행을 그대로 시나리오 파일로 옮기세요. 콘솔의 두 JSON 편집기는 이미 시나리오 파일 형태입니다.
+
+1. **Scenario graph** 편집기의 JSON을 파일의 `graph:` 블록에, **API templates** 편집기의 JSON을 `templates:`에 복사합니다([graph-first 시나리오 형식](#graph-first-시나리오-파일)). **Start node**와 **Max steps** 필드는 `start:` / `maxSteps:`로 옮깁니다.
+2. 인증 블록을 옮깁니다: Auth 카드에서 설정한 내용을 `auth:` 아래에 다시 선언합니다 — 패턴 풀이라면 브라우저 상한이 없는 `usersPattern` 블록입니다.
+3. `usersPattern.count`를 10,000 너머로 올립니다(파일 경로는 Expand 시 서버 쪽에서 실체화합니다).
+4. `tmula run scenario.yaml`.
+
+```yaml
+target: http://localhost:9000        # 콘솔의 Base URL
+start: browse                        # 콘솔의 Start node
+maxSteps: 12                         # 콘솔의 Max steps
+graph: { }        # ← Scenario graph 편집기의 JSON을 여기에 붙여넣기
+templates: { }    # ← API templates 편집기의 JSON을 여기에 붙여넣기
+auth:
+  strategy: login
+  usersPattern: { subject: "user{{.userIndex}}", token: "pw-{{.userIndex}}", count: 100000 }
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+```
+
+콘솔과 다른 점 두 가지만 기억하세요: 파일 경로는 **allowlist를 대상 호스트로 기본 설정**하고(콘솔은 두 필드에 직접 입력해야 합니다), 붙여넣은 JSON은 YAML 파일 안에서 그대로 유효합니다(YAML은 JSON의 상위 집합).
+
 ### 전략: login (실행 시 토큰 발급)
 
 서비스가 로그인 엔드포인트로 토큰을 발급할 때 사용합니다.
