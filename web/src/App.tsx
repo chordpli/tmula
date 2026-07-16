@@ -5,6 +5,7 @@ import {
   allowlistMatchesHost,
   assembleLoginBody,
   AUTH_FORM_DEFAULTS,
+  authFormFromCurl,
   authFormFromImport,
   authFormFromOAuth2Guide,
   buildRunSpec,
@@ -31,6 +32,7 @@ import {
   openIdConnectDiscoveryUrl,
   parseAllowlist,
   parseCredentials,
+  parseCurlCommand,
   parseLoginCredentials,
   placeholderLabel,
   poolExpiry,
@@ -1871,6 +1873,9 @@ function AuthLoginFields({
   }
   return (
     <div className="authpanel">
+      {/* Curl paste: the login your API docs hand you, applied in one click. */}
+      <CurlPastePanel set={set} />
+
       {simple ? (
         <>
           <div className="field-row field-row--2">
@@ -2111,6 +2116,86 @@ function AuthLoginFields({
 
       <AuthPreflight form={form} kind="login" />
     </div>
+  )
+}
+
+// CURL_PLACEHOLDER shows the shape the curl parser reads — a code sample, so it
+// stays identical in every language.
+const CURL_PLACEHOLDER =
+  'curl -X POST https://api.example.com/login -H \'Content-Type: application/json\' -d \'{"username":"alice","password":"secret"}\''
+
+// CurlPastePanel fills the login authoring from a pasted curl command: the one
+// your API docs already give you. parseCurlCommand reads -X/-H/-d/--url (and
+// tolerates the usual noise flags); authFormFromCurl maps the result onto the
+// simple mini-form — or onto a compiled advanced flow when the curl carries
+// headers, so nothing is silently dropped. Anything unparseable shows a friendly
+// line and touches NO state.
+function CurlPastePanel({
+  set,
+}: {
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const [text, setText] = useState('')
+  const [applied, setApplied] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  function apply() {
+    const parsed = parseCurlCommand(text)
+    if (!parsed) {
+      // Leave every login field exactly as it was — only the friendly note shows.
+      setFailed(true)
+      setApplied(false)
+      return
+    }
+    const patch = authFormFromCurl(parsed)
+    for (const [k, v] of Object.entries(patch)) {
+      set(k as keyof ExperimentForm, v as ExperimentForm[keyof ExperimentForm] as never)
+    }
+    setFailed(false)
+    setApplied(true)
+  }
+
+  return (
+    <details className="advanced">
+      <summary className="advanced__summary">
+        {t('auth.login.curl.toggle')}
+        <span className="field__badge">{t('badge.optional')}</span>
+      </summary>
+      <div className="stack advanced__body" style={{ gap: 16 }}>
+        <p className="card__hint">{t('auth.login.curl.hint')}</p>
+        <textarea
+          className="textarea"
+          rows={3}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value)
+            setApplied(false)
+            setFailed(false)
+          }}
+          placeholder={CURL_PLACEHOLDER}
+          spellCheck={false}
+        />
+        <div className="import__actions">
+          <button type="button" className="btn btn--ghost" onClick={apply} disabled={!text.trim()}>
+            <ImportIcon />
+            {t('auth.login.curl.apply')}
+          </button>
+          {applied && (
+            <span className="import__ok" role="status">
+              <CheckMini />
+              {t('auth.login.curl.applied')}
+            </span>
+          )}
+        </div>
+        {failed && (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{t('auth.login.curl.error')}</span>
+          </div>
+        )}
+      </div>
+    </details>
   )
 }
 

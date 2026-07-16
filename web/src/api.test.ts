@@ -5,6 +5,7 @@ import {
   assembleLoginBody,
   AUTH_FORM_DEFAULTS,
   applyReplaceMe,
+  authFormFromCurl,
   authFormFromImport,
   authFormFromOAuth2Guide,
   authFormFromSpec,
@@ -54,6 +55,7 @@ import {
   outcomeRates,
   outcomeSummary,
   parseCredentials,
+  parseCurlCommand,
   parseLoginCredentials,
   parseHeatFrame,
   parseLatencyFrame,
@@ -2281,6 +2283,82 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('curl paste (parseCurlCommand / authFormFromCurl)', () => {
+  it('parses the canonical docs curl: -X, -H, single-quoted -d JSON', () => {
+    const req = parseCurlCommand(
+      `curl -X POST https://api.example.com/login -H 'Content-Type: application/json' -d '{"username":"alice","password":"secret"}'`,
+    )
+    expect(req).toEqual({
+      method: 'POST',
+      url: 'https://api.example.com/login',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"username":"alice","password":"secret"}',
+    })
+  })
+
+  it('supports long flags, multiple data parts, --url, and backslash continuations', () => {
+    const req = parseCurlCommand(
+      'curl --request PUT \\\n  --url https://idp.example.com/oauth/token \\\n  --header "Accept: application/json" \\\n  --data grant_type=password --data-urlencode "username=al ice"',
+    )
+    expect(req?.method).toBe('PUT')
+    expect(req?.url).toBe('https://idp.example.com/oauth/token')
+    expect(req?.headers).toEqual({ Accept: 'application/json' })
+    expect(req?.body).toBe('grant_type=password&username=al ice')
+  })
+
+  it('defaults the method (POST with a body, GET without) and skips noise flags', () => {
+    const posty = parseCurlCommand("curl -s -k https://x.test/login -d 'a=1'")
+    expect(posty?.method).toBe('POST')
+    const getty = parseCurlCommand('curl -s https://x.test/me')
+    expect(getty?.method).toBe('GET')
+    // A value-taking flag we ignore must not swallow the URL slot.
+    const withUser = parseCurlCommand('curl -u admin:pw https://x.test/login -d a=1')
+    expect(withUser?.url).toBe('https://x.test/login')
+  })
+
+  it('returns null for anything it cannot make sense of (state stays untouched)', () => {
+    expect(parseCurlCommand('')).toBeNull()
+    expect(parseCurlCommand('wget https://x.test')).toBeNull()
+    expect(parseCurlCommand('curl -X POST')).toBeNull() // no URL
+    expect(parseCurlCommand("curl 'https://x.test/unbalanced")).toBeNull() // open quote
+  })
+
+  it('maps a headerless curl onto the simple mini-form, marking the body hand-authored', () => {
+    const patch = authFormFromCurl({
+      method: 'POST',
+      url: 'https://api.example.com/login',
+      headers: {},
+      body: '{"user":"a","pass":"b"}',
+    })
+    expect(patch.loginMode).toBe('simple')
+    expect(patch.loginUrlMethod).toBe('POST')
+    expect(patch.loginUrlPath).toBe('/login')
+    expect(patch.loginBodyTemplate).toBe('{"user":"a","pass":"b"}')
+    // A curl body is the operator's truth: the quick form must not clobber it.
+    expect(patch.loginBodyGenerated).toBe(false)
+  })
+
+  it('compiles a curl WITH headers into the single-step advanced flow (nothing dropped)', () => {
+    const patch = authFormFromCurl({
+      method: 'POST',
+      url: 'https://api.example.com/oauth/token',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Tenant': 'acme' },
+      body: 'grant_type=password',
+    })
+    expect(patch.loginMode).toBe('advanced')
+    const graph = JSON.parse(patch.loginGraphJSON!) as { nodes: { id: string }[] }
+    expect(graph.nodes).toHaveLength(1)
+    const templates = JSON.parse(patch.loginTemplatesJSON!) as Record<
+      string,
+      { method: string; path: string; headers: Record<string, string>; payloadTemplate: string }
+    >
+    expect(templates['t_login'].path).toBe('/oauth/token')
+    expect(templates['t_login'].headers['X-Tenant']).toBe('acme')
+    expect(templates['t_login'].payloadTemplate).toBe('grant_type=password')
+    expect(patch.loginStart).toBe('login')
   })
 })
 

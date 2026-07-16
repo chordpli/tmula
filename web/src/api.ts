@@ -815,6 +815,142 @@ function parseLoginCredsJSONL(body: string): CredentialEntry[] {
   return out
 }
 
+// --- Curl paste (fill the login mini-form from a pasted curl command) ------------
+
+// CurlRequest is what parseCurlCommand extracts from a pasted curl line: the
+// method, the URL, any -H headers, and the -d body (multiple data flags joined
+// with & — curl's own semantics).
+export interface CurlRequest {
+  method: string
+  url: string
+  headers: Record<string, string>
+  body: string
+}
+
+// CURL_VALUE_FLAGS are common curl flags that consume a value we do NOT use —
+// they must be skipped as pairs so their value is never mistaken for the URL.
+const CURL_VALUE_FLAGS = new Set([
+  '-u', '--user', '-A', '--user-agent', '-e', '--referer', '-b', '--cookie',
+  '-c', '--cookie-jar', '-o', '--output', '-m', '--max-time', '--connect-timeout',
+  '--cacert', '--cert', '--key', '-F', '--form', '--retry', '-w', '--write-out',
+])
+
+// parseCurlCommand parses a pasted `curl …` command into the pieces the login
+// mini-form needs. Supported: -X/--request, -H/--header, -d/--data/--data-raw/
+// --data-urlencode/--data-binary, --url, the bare URL, single/double quotes and
+// backslash-newline continuations; other flags are ignored (value-taking ones
+// from the known list are skipped as pairs). Anything it cannot make sense of —
+// not a curl command, unbalanced quotes, no URL — returns null so the caller
+// shows a friendly "fill the fields manually" and touches NOTHING.
+export function parseCurlCommand(text: string): CurlRequest | null {
+  const tokens = tokenizeShell(text.replace(/\\\r?\n/g, ' '))
+  if (!tokens || tokens.length === 0 || tokens[0].toLowerCase() !== 'curl') return null
+  let method = ''
+  let url = ''
+  const headers: Record<string, string> = {}
+  const dataParts: string[] = []
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]
+    if (tok === '-X' || tok === '--request') {
+      method = (tokens[++i] ?? '').toUpperCase()
+    } else if (tok === '-H' || tok === '--header') {
+      const h = tokens[++i] ?? ''
+      const colon = h.indexOf(':')
+      if (colon > 0) headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim()
+    } else if (
+      tok === '-d' || tok === '--data' || tok === '--data-raw' ||
+      tok === '--data-urlencode' || tok === '--data-binary'
+    ) {
+      dataParts.push(tokens[++i] ?? '')
+    } else if (tok === '--url') {
+      url = tokens[++i] ?? ''
+    } else if (CURL_VALUE_FLAGS.has(tok)) {
+      i++ // skip the flag's value so it is never mistaken for the URL
+    } else if (tok.startsWith('-')) {
+      /* boolean flag we don't use (-s, -k, -v, -L, --compressed, …): ignore */
+    } else if (!url) {
+      url = tok
+    }
+  }
+  if (!url.trim()) return null
+  const body = dataParts.filter((d) => d.length > 0).join('&')
+  // curl's own default: -d implies POST; otherwise GET unless -X said so.
+  if (!method) method = body ? 'POST' : 'GET'
+  return { method, url: url.trim(), headers, body }
+}
+
+// tokenizeShell splits a command line into shell-ish words: single quotes are
+// literal, double quotes honor \" and \\, a backslash escapes outside quotes.
+// Returns null on an unbalanced quote (the caller treats that as unparseable).
+function tokenizeShell(text: string): string[] | null {
+  const out: string[] = []
+  let cur = ''
+  let quote: "'" | '"' | null = null
+  let started = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else cur += ch
+    } else if (quote === '"') {
+      if (ch === '"') quote = null
+      else if (ch === '\\' && (text[i + 1] === '"' || text[i + 1] === '\\')) cur += text[++i]
+      else cur += ch
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+      started = true
+    } else if (ch === '\\' && i + 1 < text.length) {
+      cur += text[++i]
+      started = true
+    } else if (/\s/.test(ch)) {
+      if (started || cur) {
+        out.push(cur)
+        cur = ''
+        started = false
+      }
+    } else {
+      cur += ch
+      started = true
+    }
+  }
+  if (quote !== null) return null
+  if (started || cur) out.push(cur)
+  return out
+}
+
+// authFormFromCurl maps a parsed curl command onto the login form fields. Without
+// headers it fills the simple mini-form (method + path + body — the body counts
+// as hand-authored so the quick form never clobbers it). With headers it compiles
+// the same single-step ADVANCED flow the OAuth2 guide emits, because the simple
+// mini-form carries no header fields — nothing from the curl is dropped.
+export function authFormFromCurl(req: CurlRequest): Partial<ExperimentForm> {
+  const path = tokenPathFromUrl(req.url)
+  if (Object.keys(req.headers).length === 0) {
+    const patch: Partial<ExperimentForm> = {
+      loginMode: 'simple',
+      loginUrlMethod: req.method,
+      loginUrlPath: path,
+    }
+    if (req.body) {
+      patch.loginBodyTemplate = req.body
+      patch.loginBodyGenerated = false
+    }
+    return patch
+  }
+  const template: Record<string, unknown> = { method: req.method, path, headers: req.headers }
+  if (req.body) template.payloadTemplate = req.body
+  return {
+    loginMode: 'advanced',
+    loginGraphJSON: JSON.stringify(
+      { id: LOGIN_NODE_ID, nodes: [{ id: LOGIN_NODE_ID, apiTemplateId: LOGIN_TEMPLATE_ID }], edges: [] },
+      null,
+      2,
+    ),
+    loginTemplatesJSON: JSON.stringify({ [LOGIN_TEMPLATE_ID]: template }, null, 2),
+    loginStart: LOGIN_NODE_ID,
+  }
+}
+
 // --- Token paste intelligence (pool-mode JWT expiry feedback) --------------------
 
 // decodeJwtExp extracts the exp claim (seconds since epoch) from a JWT-shaped

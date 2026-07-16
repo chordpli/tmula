@@ -375,6 +375,14 @@ const en: Record<string, string> = {
     'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
   'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
 
+  // Auth · login · curl paste
+  'auth.login.curl.toggle': 'Paste a curl command',
+  'auth.login.curl.hint':
+    'Paste the login curl your API docs give you — tmula fills the URL, method, headers and body from it.',
+  'auth.login.curl.apply': 'Fill from curl',
+  'auth.login.curl.applied': 'Filled the login from the curl command.',
+  'auth.login.curl.error': 'Couldn’t parse this curl — fill the fields manually.',
+
   // Auth · login · quick form (no JSON authoring on first contact)
   'auth.login.quick.user': 'Username',
   'auth.login.quick.userHint': 'tmula builds the JSON login body from these two fields — no JSON needed.',
@@ -1093,6 +1101,14 @@ const ko: Record<string, string> = {
   'auth.login.body.multiTip':
     '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
   'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
+
+  // Auth · 로그인 · curl 붙여넣기
+  'auth.login.curl.toggle': 'curl 명령 붙여넣기',
+  'auth.login.curl.hint':
+    'API 문서에 있는 로그인 curl을 붙여넣으면 tmula가 URL·메서드·헤더·본문을 채웁니다.',
+  'auth.login.curl.apply': 'curl로 채우기',
+  'auth.login.curl.applied': 'curl 명령으로 로그인을 채웠습니다.',
+  'auth.login.curl.error': '이 curl을 해석하지 못했습니다 — 필드를 직접 채워 주세요.',
 
   // Auth · 로그인 · 퀵 폼 (첫 사용에 JSON 작성 불필요)
   'auth.login.quick.user': '아이디',
