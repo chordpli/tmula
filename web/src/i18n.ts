@@ -600,6 +600,7 @@ const en: Record<string, string> = {
   'run.noteOpen': '~**{rate}** users/sec for **{duration}s**',
   'run.noteClosed': '**{users}** virtual users · up to **{steps}** steps',
   'run.connLost': 'Connection lost while streaming progress.',
+  'run.blocked': 'Fix these before running:',
   // Friendly headlines for the known "the run died before any traffic flowed"
   // failure reasons (the raw backend reason is always shown beneath them).
   'run.failLoginPrewarm': 'Login failed before the run started — check the login URL and credentials.',
@@ -1241,6 +1242,7 @@ const ko: Record<string, string> = {
   'run.noteOpen': '약 초당 **{rate}**명씩 **{duration}초** 동안',
   'run.noteClosed': '가상 사용자 **{users}**명 · 최대 **{steps}**단계',
   'run.connLost': '진행 상황을 스트리밍하는 중 연결이 끊겼습니다.',
+  'run.blocked': '실행 전에 이 문제를 해결하세요:',
   // "트래픽이 흐르기도 전에 실행이 죽은" 알려진 실패 사유의 친절한 헤드라인
   // (원본 백엔드 사유는 항상 그 아래에 함께 표시됩니다).
   'run.failLoginPrewarm': '실행이 시작되기 전에 로그인에 실패했습니다 — 로그인 URL과 자격 증명을 확인하세요.',

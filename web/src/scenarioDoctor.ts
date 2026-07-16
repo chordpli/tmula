@@ -46,6 +46,15 @@ interface TemplateShape {
 
 type TemplateMap = Record<string, TemplateShape>
 
+// runBlockers returns the doctor issues that BLOCK a run (severity error), in
+// order. The run bar derives its displayed blockers from this on EVERY render —
+// never from a string captured at click time — so fixing the condition makes the
+// message disappear, a locale switch re-translates it (the issues carry i18n keys,
+// not rendered strings), and every current blocker shows, not just the first.
+export function runBlockers(issues: DoctorIssue[]): DoctorIssue[] {
+  return issues.filter((i) => i.severity === 'error')
+}
+
 export function doctorForm(form: ExperimentForm): DoctorIssue[] {
   const issues: DoctorIssue[] = []
   const baseHost = hostFromBaseUrl(form.baseUrl)

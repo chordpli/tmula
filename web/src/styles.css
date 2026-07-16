@@ -636,6 +636,13 @@ a:hover {
   flex: none;
   margin-top: 1px;
 }
+/* The live run-blockers list: one line per current doctor error. */
+.alert__list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
 /* The raw backend failure reason, shown in smaller type beneath the friendly
    translated headline so nothing the server said is hidden. */
 .alert__sub {

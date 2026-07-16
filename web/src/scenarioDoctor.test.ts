@@ -5,7 +5,8 @@ import {
   OAUTH2_GUIDE_DEFAULTS,
   type ExperimentForm,
 } from './api'
-import { doctorForm } from './scenarioDoctor'
+import { doctorForm, runBlockers } from './scenarioDoctor'
+import { dict, translate } from './i18n'
 
 const form: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
@@ -356,6 +357,40 @@ describe('doctorForm', () => {
   it('flags a mint run with no signing-key reference', () => {
     const got = codes({ ...form, authMode: 'mint', mintKeyEnv: '', mintKeyFile: '' })
     expect(got).toContain('auth-mint-key')
+  })
+
+  describe('runBlockers (the live run-bar error)', () => {
+    it('collects ALL current blockers and clears once the conditions are fixed', () => {
+      const broken = { ...form, baseUrl: 'http://other-host:9000', graphJSON: 'not json' }
+      const blockers = runBlockers(doctorForm(broken))
+      const blockerCodes = blockers.map((b) => b.code)
+      // Both problems show at once — not just the first.
+      expect(blockerCodes).toContain('allowlist-missing-host')
+      expect(blockerCodes).toContain('graph-json')
+      expect(blockers.every((b) => b.severity === 'error')).toBe(true)
+      // Fixing the form empties the derived list — the alert disappears.
+      expect(runBlockers(doctorForm(form))).toEqual([])
+    })
+
+    it('never blocks on warnings', () => {
+      // A closed-model persona mix is a warning, not a blocker.
+      const withWarning = { ...form, segmentsJSON: '[{"name":"buyer","weight":1}]' }
+      expect(doctorForm(withWarning).some((i) => i.severity === 'warning')).toBe(true)
+      expect(runBlockers(doctorForm(withWarning))).toEqual([])
+    })
+
+    it('re-localizes through the i18n key, not a stored string', () => {
+      const blockers = runBlockers(doctorForm({ ...form, baseUrl: 'http://other-host:9000' }))
+      expect(blockers).toHaveLength(1)
+      const b = blockers[0]
+      // The issue carries a key + vars; rendering in either language works off
+      // the SAME issue, so a locale switch re-renders the current language.
+      const enMsg = translate(dict, 'en', b.messageKey, b.vars)
+      const koMsg = translate(dict, 'ko', b.messageKey, b.vars)
+      expect(enMsg).toContain('other-host')
+      expect(koMsg).toContain('other-host')
+      expect(koMsg).not.toBe(enMsg)
+    })
   })
 
   it('does not flag a mint run that references a key, and flags malformed claims', () => {

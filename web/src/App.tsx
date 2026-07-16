@@ -72,7 +72,7 @@ import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
 import ReportView, { OutcomeView, StatsView } from './ReportView'
-import { doctorForm, type DoctorIssue } from './scenarioDoctor'
+import { doctorForm, runBlockers, type DoctorIssue } from './scenarioDoctor'
 import Viewer from './Viewer'
 
 // stringify renders a preset's graph/templates the same way the Scenario card's
@@ -194,6 +194,11 @@ function Operator() {
   const [outcome, setOutcome] = useState<OutcomeSummary | null>(null)
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
+  // showBlockers turns the live run-blockers alert on after a blocked Run click.
+  // ONLY the visibility bit is state — the blockers themselves are re-derived
+  // from the current doctor issues on every render, so fixing a condition makes
+  // its line disappear and a locale switch re-translates the text.
+  const [showBlockers, setShowBlockers] = useState(false)
   // loadedPresetKey is the nameKey of the template just applied from a chip, kept
   // (instead of a rendered string) so the "Loaded template" confirmation re-renders
   // in the active language when the operator switches EN/한국어.
@@ -376,18 +381,16 @@ function Operator() {
     setOutcome(null)
     setStatus('starting')
     try {
-      const blocking = doctorForm(form).find((i) => i.severity === 'error')
-      if (blocking) {
+      // Doctor errors block the run — but the DISPLAY derives from the current
+      // doctor state on every render (see the blockers alert below), never from
+      // a message captured here: only the "show it" bit is set on click. The
+      // allowlist gate is one of those doctor errors, so no separate check.
+      if (runBlockers(doctorForm(form)).length > 0) {
         setStatus('')
-        setError(t(blocking.messageKey, blocking.vars))
+        setShowBlockers(true)
         return
       }
-      const host = hostFromBaseUrl(form.baseUrl)
-      if (host && !allowlistMatchesHost(parseAllowlist(form.allowlist), host)) {
-        setStatus('')
-        setError(t('run.allowlistBlocked', { host }))
-        return
-      }
+      setShowBlockers(false)
       const spec = buildRunSpec(form)
       const workerCount = spec.workers?.length ?? 0
       setRunMode(
@@ -457,6 +460,7 @@ function Operator() {
   const baseHost = hostFromBaseUrl(form.baseUrl)
   const allowlistCoversBase = !baseHost || allowlistMatchesHost(parseAllowlist(form.allowlist), baseHost)
   const doctorIssues = doctorForm(form)
+  const blockers = runBlockers(doctorIssues)
   const sizeUnit = openModel ? t('unit.maxConcurrency') : t('unit.users')
   const liveCopy =
     liveMode === 'events'
@@ -830,6 +834,26 @@ function Operator() {
             </span>
           </div>
         </section>
+
+        {/* Live run blockers: shown after a blocked Run click, but the CONTENT is
+            derived from the current doctor state on every render — fix a
+            condition and its line disappears; switch language and it
+            re-translates; every current blocker is listed, not just the first. */}
+        {showBlockers && blockers.length > 0 && (
+          <div className="alert" role="alert">
+            <span className="alert__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>
+              <strong>{t('run.blocked')}</strong>
+              <ul className="alert__list">
+                {blockers.map((b, i) => (
+                  <li key={`${b.code}-${i}`}>{t(b.messageKey, b.vars)}</li>
+                ))}
+              </ul>
+            </span>
+          </div>
+        )}
 
         {error && (
           <div className="alert" role="alert">
