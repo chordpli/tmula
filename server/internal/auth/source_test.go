@@ -350,9 +350,46 @@ func TestFileSourceOversizeKeepsErrorMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("a file over MaxBytes must be rejected")
 	}
-	want := `auth: file credential source "big.jsonl" exceeds the 10-byte limit`
+	want := `auth: file credential source "big.jsonl" exceeds the 10 B limit — raise it with auth.source.maxBytes`
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestHumanizeBytesRendersExactBinaryUnits pins the cap-error humanizer: the default
+// 512 MiB cap reads "512 MiB" (not "536870912-byte"), and a raw custom cap stays exact.
+func TestHumanizeBytesRendersExactBinaryUnits(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{credSourceMaxBytes, "512 MiB"},
+		{1 << 30, "1 GiB"},
+		{1 << 20, "1 MiB"},
+		{9 << 20, "9 MiB"},
+		{1 << 10, "1 KiB"},
+		{10, "10 B"},
+		{0, "0 B"},
+	}
+	for _, tc := range cases {
+		if got := humanizeBytes(tc.n); got != tc.want {
+			t.Errorf("humanizeBytes(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestGeneratorCapErrorSuggestsAlternatives proves the generator's over-cap error
+// points the operator at the two ways to run a bigger pool (a source file, or a
+// distributed run) rather than just stating the ceiling.
+func TestGeneratorCapErrorSuggestsAlternatives(t *testing.T) {
+	_, err := NewGeneratorSource("u{{.userIndex}}", "pw-{{.userIndex}}", generatorMaxCount+1)
+	if err == nil {
+		t.Fatal("a count over the cap must be rejected")
+	}
+	for _, needle := range []string{"auth.source", "distribute the run across workers"} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Errorf("cap error should suggest %q, got %q", needle, err.Error())
+		}
 	}
 }
 

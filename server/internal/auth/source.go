@@ -291,7 +291,7 @@ func (s FileSource) Load(_ context.Context) ([]domain.Credential, error) {
 	cr := &countingReader{r: io.LimitReader(f, limit+1)}
 	creds, perr := ParseReader(s.Format, cr)
 	if cr.n > limit {
-		return nil, fmt.Errorf("auth: file credential source %q exceeds the %d-byte limit", s.Path, limit)
+		return nil, fmt.Errorf("auth: file credential source %q exceeds the %s limit — raise it with auth.source.maxBytes", s.Path, humanizeBytes(limit))
 	}
 	if perr != nil {
 		return nil, fmt.Errorf("auth: file credential source %q: %w", s.Path, perr)
@@ -341,7 +341,7 @@ func NewGeneratorSource(subjectTemplate, secretTemplate string, count int) (*Gen
 		return nil, fmt.Errorf("auth: pattern credential source needs a positive count")
 	}
 	if count > generatorMaxCount {
-		return nil, fmt.Errorf("auth: pattern credential source count %d exceeds the %d limit", count, generatorMaxCount)
+		return nil, fmt.Errorf("auth: pattern credential source count %d exceeds the %d limit — load the pool from a source file (auth.source) or distribute the run across workers", count, generatorMaxCount)
 	}
 	if strings.TrimSpace(secretTemplate) == "" {
 		return nil, fmt.Errorf("auth: pattern credential source needs a secret (token/password) template")
@@ -406,6 +406,28 @@ func SourceFromRef(ref domain.CredentialSourceRef, root string) (CredentialSourc
 		root = "."
 	}
 	return FileSource{Root: root, Path: ref.File, Format: format, MaxBytes: ref.MaxBytes}, nil
+}
+
+// humanizeBytes renders a byte count as the largest exact binary unit (B, KiB, MiB,
+// GiB) so a cap error reads "512 MiB" instead of "536870912-byte". A count that is
+// not an exact multiple of a larger unit falls back to the next unit down (a raw
+// custom cap of 10 renders "10 B"), so the number stays exact — never rounded.
+func humanizeBytes(n int64) string {
+	const (
+		kib = 1 << 10
+		mib = 1 << 20
+		gib = 1 << 30
+	)
+	switch {
+	case n >= gib && n%gib == 0:
+		return fmt.Sprintf("%d GiB", n/gib)
+	case n >= mib && n%mib == 0:
+		return fmt.Sprintf("%d MiB", n/mib)
+	case n >= kib && n%kib == 0:
+		return fmt.Sprintf("%d KiB", n/kib)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }
 
 // withinRoot reports whether path is root itself or lies inside it, comparing on
