@@ -696,7 +696,7 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 		pool, err := buildBootstrapCredentials(a)
 		return pool, nil, err
 	case domain.CredMint:
-		pool, err := buildMintCredentials(a)
+		pool, err := buildMintCredentials(a, dir, keepSourceRef)
 		return pool, nil, err
 	case domain.CredExec:
 		pool, err := buildExecCredentials(a)
@@ -824,7 +824,7 @@ func buildExecCredentials(a Auth) (domain.CredentialPool, error) {
 // parsed here; the full validation (signable alg, positive TTL, present key ref, HS
 // encoding) runs in domain.MintSpec.Validate via runspec.Validate, so this builder
 // only translates the authored block into the domain shape and parses the durations.
-func buildMintCredentials(a Auth) (domain.CredentialPool, error) {
+func buildMintCredentials(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, error) {
 	if len(a.Users) > 0 || a.Source != nil || a.UsersPattern != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy self-issues a JWT and takes no inline users or source", domain.CredMint)
 	}
@@ -862,6 +862,16 @@ func buildMintCredentials(a Auth) (domain.CredentialPool, error) {
 	// scenariofile-prefixed message — not deferred to the run path.
 	if err := spec.Validate(); err != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+	}
+	// Record the scenario file's directory as the ROOT a relative key.file resolves
+	// against at run time — the same way auth.source.file is rooted — so the documented
+	// "resolved against the scenario file's directory" contract holds instead of the key
+	// resolving against the process CWD. The key itself is still resolved lazily (the
+	// reference need not be present at expand time); keyRoot is non-secret and json:"-",
+	// so it never crosses the wire — a distributed worker resolves against its OWN root.
+	// keepSourceRef (a distributed engine) leaves keyRoot empty: the worker owns the root.
+	if !keepSourceRef {
+		spec = spec.WithKeyRoot(dir)
 	}
 	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredMint, Mint: &spec}, nil
 }

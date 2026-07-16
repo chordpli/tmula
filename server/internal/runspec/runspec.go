@@ -397,7 +397,12 @@ func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 		if r.CredentialPool.Mint == nil {
 			return nil, fmt.Errorf("api: a mint credential pool has no mint spec")
 		}
-		key, err := auth.ResolveMintKey(context.Background(), *r.CredentialPool.Mint, "")
+		// Resolve the signing key rooted at the scenario directory the CLI recorded on the
+		// spec (MintSpec.keyRoot, json:"-"), so a relative key.file resolves against the
+		// scenario file — NOT the process CWD (the documented contract). An empty keyRoot
+		// (an HTTP-posted spec, or a directly-built spec) falls back to the process working
+		// directory, the long-standing default.
+		key, err := auth.ResolveMintKey(context.Background(), *r.CredentialPool.Mint, r.CredentialPool.Mint.KeyRoot())
 		if err != nil {
 			return nil, fmt.Errorf("api: resolve mint signing key: %w", err)
 		}

@@ -105,6 +105,14 @@ type MintSpec struct {
 	// Credential.Secret. It is set by the layer that resolves the Key reference (the
 	// same layer pool entries are resolved), never authored on the wire.
 	resolvedKey []byte `json:"-"`
+
+	// keyRoot is the directory a relative Key.File is resolved against at run time — the
+	// scenario file's directory the CLI recorded at expand time, so key.file resolves
+	// beside the scenario rather than against the process CWD (the documented contract).
+	// It is a NON-SECRET path but carries json:"-" so it never crosses the wire: a
+	// distributed worker resolves the key against its OWN root, not the master's. An empty
+	// keyRoot falls back to the process working directory. Irrelevant to an env Key.
+	keyRoot string `json:"-"`
 }
 
 // Validate checks the mint spec is signable: a known alg, a positive TTL, a present
@@ -172,6 +180,20 @@ func (m MintSpec) WithResolvedKey(key []byte) MintSpec {
 // ResolvedKey returns the in-process raw signing-key bytes, or nil when none has been
 // resolved yet. The signer reads it; it is never serialized.
 func (m MintSpec) ResolvedKey() []byte { return m.resolvedKey }
+
+// WithKeyRoot returns a copy of the spec carrying root as the directory a relative
+// Key.File is resolved against at run time (the scenario file's directory). It is how
+// the CLI records the scenario root so key.file resolves beside the scenario, not the
+// process CWD; the value is non-secret and stays json:"-", so it never crosses the wire.
+// The receiver is unchanged.
+func (m MintSpec) WithKeyRoot(root string) MintSpec {
+	m.keyRoot = root
+	return m
+}
+
+// KeyRoot returns the directory a relative Key.File resolves against, or "" when none was
+// recorded (the resolver then falls back to the process working directory).
+func (m MintSpec) KeyRoot() string { return m.keyRoot }
 
 // DecodeKey turns a raw key BODY (the bytes read from the env var or file the key
 // reference points at) into the signing-key bytes the signer uses, validating that
