@@ -2563,11 +2563,13 @@ describe('discoverIssuer', () => {
         grantTypesSupported: ['password', 'client_credentials'],
       }),
     })
-    const res = await discoverIssuer('https://idp.example.com')
+    const res = await discoverIssuer('https://idp.example.com', ['localhost', 'idp.example.com'])
     expect(calls).toHaveLength(1)
     expect(calls[0].url).toBe('/api/auth/discover')
     expect(calls[0].init?.method).toBe('POST')
-    expect(calls[0].init?.body).toBe('{"issuer":"https://idp.example.com"}')
+    expect(calls[0].init?.body).toBe(
+      '{"issuer":"https://idp.example.com","allow":["localhost","idp.example.com"]}',
+    )
     expect(res.tokenEndpoint).toBe('https://idp.example.com/oauth/token')
     expect(res.grantTypesSupported).toEqual(['password', 'client_credentials'])
   })
@@ -2578,14 +2580,14 @@ describe('discoverIssuer', () => {
       status: 400,
       body: '{"error":"issuer host is not in the allowlist — add idp.example.com first"}',
     })
-    await expect(discoverIssuer('https://idp.example.com')).rejects.toThrow(/allowlist/)
+    await expect(discoverIssuer('https://idp.example.com', ['localhost'])).rejects.toThrow(/allowlist/)
   })
 
   it('falls back to the status code on an empty error body and propagates network failures', async () => {
     mockFetch({ ok: false, status: 502, body: '' })
-    await expect(discoverIssuer('https://x')).rejects.toThrow('502')
+    await expect(discoverIssuer('https://x', ['x'])).rejects.toThrow('502')
     vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
-    await expect(discoverIssuer('https://x')).rejects.toThrow('network down')
+    await expect(discoverIssuer('https://x', ['x'])).rejects.toThrow('network down')
   })
 })
 

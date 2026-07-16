@@ -2788,14 +2788,15 @@ export interface DiscoveryResult {
 
 // discoverIssuer resolves an IdP base URL (issuer) into its endpoints via the
 // server's discovery proxy — the answer to "I use Keycloak/Auth0/Cognito and
-// don't know my token URL". A non-2xx throws with the server's own actionable
-// message (e.g. an allowlist rejection), unwrapped from the { "error": … }
-// envelope like importScenario.
-export async function discoverIssuer(issuer: string): Promise<DiscoveryResult> {
+// don't know my token URL". The server SSRF-gates the fetch with the same target
+// allowlist a run uses, so the form's allowlist rides along. A non-2xx throws
+// with the server's own actionable message (e.g. an allowlist rejection),
+// unwrapped from the { "error": … } envelope like importScenario.
+export async function discoverIssuer(issuer: string, allow: string[]): Promise<DiscoveryResult> {
   const res = await fetch(`${API}/auth/discover`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ issuer }),
+    body: JSON.stringify({ issuer, allow }),
   })
   if (!res.ok) {
     const text = (await res.text()).trim()

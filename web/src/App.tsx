@@ -2395,7 +2395,7 @@ function AuthOAuth2GuideFields({
     setDiscOk(false)
     setDiscErr('')
     try {
-      const d = await discoverIssuer(guide.issuer.trim())
+      const d = await discoverIssuer(guide.issuer.trim(), parseAllowlist(form.allowlist))
       // Fill the Token URL (still editable) and recompile like a typed answer.
       update({ tokenUrl: d.tokenEndpoint })
       setDiscOk(true)
