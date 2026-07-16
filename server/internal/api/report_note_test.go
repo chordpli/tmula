@@ -3,7 +3,9 @@ package api
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/obs"
 )
 
@@ -65,5 +67,57 @@ func TestReportCarriesAuthExpiryNote(t *testing.T) {
 	clean.Notes = notesFor(clean.Stats)
 	if len(clean.Notes) != 0 {
 		t.Errorf("a clean run must carry no notes, got %v", clean.Notes)
+	}
+}
+
+// TestPoolWrapNote pins the pool-wrap note helper: a closed run with fewer pool entries
+// than users reports how many VUs share each credential; a pool that covers every user,
+// a per-VU strategy (no inline entries), and the open model each produce no note.
+func TestPoolWrapNote(t *testing.T) {
+	pool := func(n int) *domain.CredentialPool {
+		entries := make([]domain.Credential, n)
+		for i := range entries {
+			entries[i] = domain.Credential{Subject: "u", Secret: "t"}
+		}
+		return &domain.CredentialPool{ID: "p", Strategy: domain.CredPool, Entries: entries}
+	}
+
+	// 2 entries, 5 users → each entry serves ~3 VUs (ceil(5/2)).
+	s := specAuth("http://127.0.0.1:1", 5, pool(2))
+	note := poolWrapNote(s)
+	for _, needle := range []string{"2 entries", "5 users", "~3"} {
+		if !strings.Contains(note, needle) {
+			t.Errorf("wrap note should mention %q, got %q", needle, note)
+		}
+	}
+
+	// A pool that covers every user carries no note.
+	if n := poolWrapNote(specAuth("http://127.0.0.1:1", 2, pool(2))); n != "" {
+		t.Errorf("a fully-covered pool should produce no wrap note, got %q", n)
+	}
+	// A pool with more entries than users likewise carries no note.
+	if n := poolWrapNote(specAuth("http://127.0.0.1:1", 1, pool(2))); n != "" {
+		t.Errorf("a pool larger than the user count should produce no wrap note, got %q", n)
+	}
+	// No credential pool at all → no note.
+	if n := poolWrapNote(specAuth("http://127.0.0.1:1", 5, nil)); n != "" {
+		t.Errorf("an unauthenticated run should produce no wrap note, got %q", n)
+	}
+}
+
+// TestRunReportCarriesPoolWrapNote proves the wrap note rides on the assembled report of
+// a real run: a 3-user run against a 2-entry pool completes and its report carries the
+// wrap note (alongside any stats-derived note).
+func TestRunReportCarriesPoolWrapNote(t *testing.T) {
+	sut, _ := newAuthEchoSUT()
+	defer sut.Close()
+
+	rep := runInProcess(t, specAuth(sut.URL, 3, twoEntryPool()), 3*time.Second)
+	if rep.Run.Status != domain.RunCompleted {
+		t.Fatalf("status = %q, want completed", rep.Run.Status)
+	}
+	joined := strings.Join(rep.Notes, " ")
+	if !strings.Contains(joined, "credential pool has 2 entries for 3 users") {
+		t.Errorf("report notes should carry the pool-wrap note, got %v", rep.Notes)
 	}
 }

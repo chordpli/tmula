@@ -76,13 +76,51 @@ func (rs *runState) report() Report {
 	findings := append([]domain.Finding(nil), rs.findings...)
 	serverMetrics := append([]domain.MetricSeries(nil), rs.serverMetrics...)
 	metricsErr := rs.metricsErr
+	staticNotes := append([]string(nil), rs.staticNotes...)
 	rs.mu.Unlock()
 	stats := rs.stats()
+	// Static (spec-derived) notes come first — they are run-setup facts (a wrapped
+	// credential pool) — then the stats-derived notes (the 401/403 auth-expiry tell).
+	notes := append(staticNotes, notesFor(stats)...)
 	return Report{
 		Run: exec, Stats: stats, Findings: findings, Workers: exec.Workers,
-		Notes:         notesFor(stats),
+		Notes:         notes,
 		ServerMetrics: serverMetrics, MetricsError: metricsErr,
 	}
+}
+
+// poolWrapNote returns the "credential pool is shared across virtual users" note when a
+// closed run has FEWER pool entries than virtual users, so each entry authenticates
+// several VUs (the pool wraps around by index). It is a spec-derived setup fact — not a
+// finding and not a re-classification — surfaced so an operator knows a 200k-user run is
+// only exercising, say, 1000 distinct principals. It returns "" when the pool covers every
+// user, when there are no inline entries (a mint/bootstrap/exec run mints per-VU), or for
+// the open model (which has no fixed user count to compare against).
+func poolWrapNote(spec RunSpec) string {
+	if spec.IsOpen() || spec.CredentialPool == nil {
+		return ""
+	}
+	n := len(spec.CredentialPool.Entries)
+	if n == 0 {
+		return ""
+	}
+	m := spec.PoolSize()
+	if m <= n {
+		return ""
+	}
+	// Ceiling division: the busiest entry serves this many VUs.
+	k := (m + n - 1) / n
+	return fmt.Sprintf("credential pool has %d entries for %d users; each credential is shared by ~%d virtual users", n, m, k)
+}
+
+// startNotesFor collects the spec-derived run notes known before the run starts. It is
+// the single place StartRun assembles rs.staticNotes, so a new setup note is added here.
+func startNotesFor(spec RunSpec) []string {
+	var notes []string
+	if n := poolWrapNote(spec); n != "" {
+		notes = append(notes, n)
+	}
+	return notes
 }
 
 // reportFor returns a run's report and whether it was found. A live run in the

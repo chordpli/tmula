@@ -41,6 +41,14 @@ type runState struct {
 	// teardown all act on the same cached identities), and its teardown is deferred
 	// for the whole run. Nil for every non-bootstrap run.
 	bootstrap *bootstrapAuth
+	// staticNotes are non-failing, observability-only run remarks known at run START
+	// from the spec itself (not derived from the run's stats) — e.g. a credential pool
+	// with fewer entries than virtual users, where each credential is shared by several
+	// VUs. They are set once before the run is registered (so they need no lock at
+	// write time) and merged with the stats-derived notes in report(). Being spec-
+	// derived, they are a live-report extra: a report rebuilt from the store omits them,
+	// like serverMetrics.
+	staticNotes []string
 }
 
 // stats returns the run's stats: the final aggregate if one was produced

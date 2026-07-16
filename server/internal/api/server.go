@@ -297,6 +297,9 @@ func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 		guard:     guard,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		// Spec-derived setup notes (e.g. a credential pool shared across more users than
+		// it has entries), assembled before the run is registered so they need no lock.
+		staticNotes: startNotesFor(spec),
 	}
 	// Visualization opt-in: aggregate per-edge traffic (any scale) for the
 	// heatmap, and additionally buffer per-request events for the live-dot graph
