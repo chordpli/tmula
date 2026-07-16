@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -119,5 +120,60 @@ func TestRunReportCarriesPoolWrapNote(t *testing.T) {
 	joined := strings.Join(rep.Notes, " ")
 	if !strings.Contains(joined, "credential pool has 2 entries for 3 users") {
 		t.Errorf("report notes should carry the pool-wrap note, got %v", rep.Notes)
+	}
+}
+
+// TestSetupErrorNoteDocumentsAsymmetry pins the open-model auth-setup note: it counts the
+// skipped sessions, names a representative first error, and documents the open=skip vs
+// closed=abort asymmetry so an operator understands why the run still completed.
+func TestSetupErrorNoteDocumentsAsymmetry(t *testing.T) {
+	note := setupErrorNote(7, 20, errors.New("api: prewarm login token: 401"))
+	for _, needle := range []string{"7 of 20", "failed auth setup", "first error", "401", "open model skips", "closed model"} {
+		if !strings.Contains(note, needle) {
+			t.Errorf("setup note should contain %q, got %q", needle, note)
+		}
+	}
+
+	// A nil first error still produces a coherent note.
+	if n := setupErrorNote(1, 3, nil); !strings.Contains(n, "1 of 3") {
+		t.Errorf("note should handle a nil first error, got %q", n)
+	}
+}
+
+// TestSignificantSetupFailureThreshold pins the >10%-of-launched finding gate: a small
+// share of skips is a note only, a large share also warrants a finding.
+func TestSignificantSetupFailureThreshold(t *testing.T) {
+	if isSignificantSetupFailure(1, 100) {
+		t.Error("1/100 setup failures should NOT be significant (<=10%)")
+	}
+	if isSignificantSetupFailure(10, 100) {
+		t.Error("exactly 10/100 should NOT trip the strictly-greater-than-10% gate")
+	}
+	if !isSignificantSetupFailure(11, 100) {
+		t.Error("11/100 setup failures SHOULD be significant (>10%)")
+	}
+	if isSignificantSetupFailure(5, 0) {
+		t.Error("zero launched must never be significant (avoids div-by-zero)")
+	}
+}
+
+// TestAuthSetupFindingShape pins the finding raised past the threshold: a warning-severity
+// threshold finding keyed on the stable "auth-setup" metric identity, counting the skips.
+func TestAuthSetupFindingShape(t *testing.T) {
+	f := authSetupFinding("run-x", 15, 100, time.Unix(0, 0))
+	if f.Category != domain.FindingThreshold {
+		t.Errorf("category = %q, want threshold", f.Category)
+	}
+	if f.Severity != domain.SeverityWarning {
+		t.Errorf("severity = %q, want warning", f.Severity)
+	}
+	if f.EvidenceRef != "auth-setup" {
+		t.Errorf("evidenceRef = %q, want auth-setup", f.EvidenceRef)
+	}
+	if f.Count != 15 {
+		t.Errorf("count = %d, want 15", f.Count)
+	}
+	if !strings.Contains(f.Description, "authenticate") {
+		t.Errorf("description should explain the auth-setup shortfall, got %q", f.Description)
 	}
 }

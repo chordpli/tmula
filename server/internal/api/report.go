@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/obs"
@@ -65,6 +66,54 @@ func authExpiryNote(stats obs.Stats) string {
 		return ""
 	}
 	return fmt.Sprintf("auth may have expired or been rejected (%d response(s) were 401/403)", n)
+}
+
+// openSetupFailureThreshold is the fraction of launched open-model sessions whose auth
+// setup may fail before the run additionally raises a finding (not just a note). A few
+// skipped sessions are a note-worthy footnote; more than one in ten failing to
+// authenticate is a material result the run should flag.
+const openSetupFailureThreshold = 0.10
+
+// isSignificantSetupFailure reports whether the auth-setup failure count is large enough
+// (past openSetupFailureThreshold of launched) to warrant a finding, not just a note.
+func isSignificantSetupFailure(setupErrors, launched int) bool {
+	return launched > 0 && float64(setupErrors) > openSetupFailureThreshold*float64(launched)
+}
+
+// setupErrorNote renders the open-model auth-setup note: how many of the launched
+// sessions were skipped because they could not authenticate, one representative cause,
+// and the open=skip vs closed=abort asymmetry so an operator understands why the run
+// still completed instead of failing. The first error is a setup cause (a failed
+// credential acquire), never a secret.
+func setupErrorNote(setupErrors, launched int, firstErr error) string {
+	cause := "unknown"
+	if firstErr != nil {
+		cause = firstErr.Error()
+	}
+	return fmt.Sprintf("%d of %d sessions failed auth setup and were skipped; first error: %s "+
+		"(the open model skips a session it cannot authenticate and keeps going, unlike the closed model, which aborts the whole run on the first auth-setup failure)",
+		setupErrors, launched, cause)
+}
+
+// authSetupFinding builds the finding raised when a material fraction of open-model
+// sessions failed auth setup. It is a threshold-class finding keyed on the stable
+// "auth-setup" metric identity (like "error-rate"), so the same issue keys identically
+// across runs, at warning severity — the run produced data, but a large share of the
+// intended load never authenticated.
+func authSetupFinding(runID domain.ID, setupErrors, launched int, now time.Time) domain.Finding {
+	pct := 0.0
+	if launched > 0 {
+		pct = 100 * float64(setupErrors) / float64(launched)
+	}
+	return domain.Finding{
+		RunID:       runID,
+		Category:    domain.FindingThreshold,
+		Severity:    domain.SeverityWarning,
+		EvidenceRef: "auth-setup",
+		FirstSeen:   now,
+		Count:       setupErrors,
+		Description: fmt.Sprintf("%d of %d open-model sessions (%.1f%%) could not authenticate and were skipped; the load actually exercised is smaller than requested — check the credential pool/login flow", setupErrors, launched, pct),
+	}
 }
 
 // report assembles the report for a run (caller must not hold rs.mu). Workers is
