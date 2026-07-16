@@ -242,6 +242,13 @@ const en: Record<string, string> = {
     'Answer two questions \u2014 the token URL and how you log in \u2014 and tmula assembles the login flow for you.',
   'auth.oauth2.lead':
     'No OAuth2 knowledge needed: give the token URL, say how you log in, and tmula builds the token exchange (and keeps it refreshed mid-run).',
+  'auth.oauth2.issuer': 'Issuer URL (optional)',
+  'auth.oauth2.issuerHint':
+    'Don’t know your token URL? Paste your IdP’s base URL (the issuer) and fetch its endpoints from the discovery document.',
+  'auth.oauth2.discoverButton': 'Fetch endpoints',
+  'auth.oauth2.discovering': 'Fetching…',
+  'auth.oauth2.discovered': 'Token endpoint discovered — filled into the Token URL below (still editable).',
+  'auth.oauth2.discoverFailed': 'Could not discover the endpoints: {error}',
   'auth.oauth2.tokenUrl': 'Token URL',
   'auth.oauth2.tokenUrlHint':
     'The endpoint that issues tokens (e.g. https://idp.example.com/oauth/token). For an openIdConnect service, use the token_endpoint from its discovery document.',
@@ -933,6 +940,13 @@ const ko: Record<string, string> = {
   'auth.mode.oauth2.desc': '토큰 URL과 로그인 방식, 두 가지만 답하면 tmula가 로그인 흐름을 만들어 줍니다.',
   'auth.oauth2.lead':
     'OAuth2 지식이 없어도 됩니다: 토큰 URL을 넣고 로그인 방식을 고르면 tmula가 토큰 교환을 조립하고, 실행 중에도 갱신합니다.',
+  'auth.oauth2.issuer': '발급자(Issuer) URL (선택)',
+  'auth.oauth2.issuerHint':
+    '토큰 URL을 모르시나요? IdP의 기본 URL(발급자)을 붙여넣고 discovery 문서에서 엔드포인트를 가져오세요.',
+  'auth.oauth2.discoverButton': '엔드포인트 가져오기',
+  'auth.oauth2.discovering': '가져오는 중…',
+  'auth.oauth2.discovered': '토큰 엔드포인트를 찾았습니다 — 아래 토큰 URL에 채웠습니다(수정 가능).',
+  'auth.oauth2.discoverFailed': '엔드포인트를 가져오지 못했습니다: {error}',
   'auth.oauth2.tokenUrl': '토큰 URL',
   'auth.oauth2.tokenUrlHint':
     '토큰을 발급하는 엔드포인트입니다(예: https://idp.example.com/oauth/token). openIdConnect 서비스라면 discovery 문서의 token_endpoint를 넣으세요.',

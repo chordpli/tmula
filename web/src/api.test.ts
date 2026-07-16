@@ -16,6 +16,7 @@ import {
   buildRunSpec,
   classifyEdge,
   compareURL,
+  discoverIssuer,
   formatCount,
   formFromRunSpec,
   FormError,
@@ -2346,6 +2347,59 @@ describe('FormError / localizeError (i18n of api error messages)', () => {
 function buildMintSpecProbe(form: ExperimentForm) {
   return buildAuth(form)
 }
+
+describe('discoverIssuer', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      })
+    })
+    return calls
+  }
+
+  it('POSTs the issuer and returns the discovered endpoints', async () => {
+    const calls = mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        issuer: 'https://idp.example.com',
+        tokenEndpoint: 'https://idp.example.com/oauth/token',
+        grantTypesSupported: ['password', 'client_credentials'],
+      }),
+    })
+    const res = await discoverIssuer('https://idp.example.com')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/auth/discover')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.body).toBe('{"issuer":"https://idp.example.com"}')
+    expect(res.tokenEndpoint).toBe('https://idp.example.com/oauth/token')
+    expect(res.grantTypesSupported).toEqual(['password', 'client_credentials'])
+  })
+
+  it('surfaces the server error message (e.g. an allowlist rejection)', async () => {
+    mockFetch({
+      ok: false,
+      status: 400,
+      body: '{"error":"issuer host is not in the allowlist — add idp.example.com first"}',
+    })
+    await expect(discoverIssuer('https://idp.example.com')).rejects.toThrow(/allowlist/)
+  })
+
+  it('falls back to the status code on an empty error body and propagates network failures', async () => {
+    mockFetch({ ok: false, status: 502, body: '' })
+    await expect(discoverIssuer('https://x')).rejects.toThrow('502')
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
+    await expect(discoverIssuer('https://x')).rejects.toThrow('network down')
+  })
+})
 
 describe('preflightAuth', () => {
   afterEach(() => vi.unstubAllGlobals())

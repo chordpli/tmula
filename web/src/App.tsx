@@ -9,6 +9,7 @@ import {
   buildRunSpec,
   compareURL,
   createExperiment,
+  discoverIssuer,
   findReplaceMePlaceholders,
   formFromRunSpec,
   generateCredentialRows,
@@ -2152,6 +2153,27 @@ function AuthOAuth2GuideFields({
   const { t } = useI18n()
   const guide = form.oauth2Guide
   const canCompileOver = oauth2GuideCanCompileOver(form)
+  // Issuer discovery ("Fetch endpoints"): transient request state only — the
+  // issuer answer itself lives on the form like every other guide answer.
+  const [discBusy, setDiscBusy] = useState(false)
+  const [discOk, setDiscOk] = useState(false)
+  const [discErr, setDiscErr] = useState('')
+
+  async function fetchEndpoints() {
+    setDiscBusy(true)
+    setDiscOk(false)
+    setDiscErr('')
+    try {
+      const d = await discoverIssuer(guide.issuer.trim())
+      // Fill the Token URL (still editable) and recompile like a typed answer.
+      update({ tokenUrl: d.tokenEndpoint })
+      setDiscOk(true)
+    } catch (e) {
+      setDiscErr(localizeError(e, t))
+    } finally {
+      setDiscBusy(false)
+    }
+  }
 
   function applyCompiled(g: OAuth2GuideForm) {
     const compiled = authFormFromOAuth2Guide(g)
@@ -2196,6 +2218,41 @@ function AuthOAuth2GuideFields({
               {t('auth.oauth2.regenerate')}
             </button>
           </span>
+        </div>
+      )}
+
+      {/* Issuer discovery: for the operator who does NOT know their token URL.
+          Paste the IdP base URL, fetch its discovery document server-side, and
+          the Token URL below fills in (still editable). */}
+      <Field label={t('auth.oauth2.issuer')} help={t('auth.oauth2.issuerHint')}>
+        <input
+          className="input"
+          value={guide.issuer}
+          onChange={(e) => update({ issuer: e.target.value }, false)}
+          placeholder="https://idp.example.com"
+          spellCheck={false}
+        />
+      </Field>
+      <div className="import__actions">
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={fetchEndpoints}
+          disabled={discBusy || !guide.issuer.trim()}
+        >
+          {discBusy ? t('auth.oauth2.discovering') : t('auth.oauth2.discoverButton')}
+        </button>
+        {discOk && (
+          <span className="import__ok" role="status">
+            <CheckMini />
+            {t('auth.oauth2.discovered')}
+          </span>
+        )}
+      </div>
+      {discErr && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{t('auth.oauth2.discoverFailed', { error: discErr })}</span>
         </div>
       )}
 

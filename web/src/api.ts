@@ -2516,6 +2516,42 @@ export async function importScenario(
   return (await res.json()) as ImportResult
 }
 
+// --- Issuer discovery (the OAuth2 guide's "Fetch endpoints" button) --------------
+
+// DiscoveryResult is what POST /api/auth/discover returns with a 200: the resolved
+// issuer, its token endpoint (what belongs in the guide's Token URL field), and
+// optionally the grant types the IdP advertises.
+export interface DiscoveryResult {
+  issuer: string
+  tokenEndpoint: string
+  grantTypesSupported?: string[]
+}
+
+// discoverIssuer resolves an IdP base URL (issuer) into its endpoints via the
+// server's discovery proxy — the answer to "I use Keycloak/Auth0/Cognito and
+// don't know my token URL". A non-2xx throws with the server's own actionable
+// message (e.g. an allowlist rejection), unwrapped from the { "error": … }
+// envelope like importScenario.
+export async function discoverIssuer(issuer: string): Promise<DiscoveryResult> {
+  const res = await fetch(`${API}/auth/discover`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issuer }),
+  })
+  if (!res.ok) {
+    const text = (await res.text()).trim()
+    let message = text
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) message = parsed.error
+    } catch {
+      /* not JSON: keep the raw text */
+    }
+    throw new Error(message || `discovery failed: ${res.status}`)
+  }
+  return (await res.json()) as DiscoveryResult
+}
+
 // --- Auth preflight (the "Test login / Test token" button) ----------------------
 
 // PreflightResult is what POST /api/auth/preflight returns with a 200: ok reports
