@@ -348,13 +348,13 @@ func NewGeneratorSource(subjectTemplate, secretTemplate string, count int) (*Gen
 	}
 	g := &GeneratorSource{count: count}
 	if strings.TrimSpace(subjectTemplate) != "" {
-		t, err := parseClaimTemplate("pattern subject", subjectTemplate)
+		t, err := parseClaimTemplate("usersPattern", "subject", subjectTemplate)
 		if err != nil {
 			return nil, err
 		}
 		g.subject = t
 	}
-	sec, err := parseClaimTemplate("pattern secret", secretTemplate)
+	sec, err := parseClaimTemplate("usersPattern", "secret", secretTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -373,13 +373,13 @@ func (g *GeneratorSource) Load(_ context.Context) ([]domain.Credential, error) {
 		if g.subject != nil {
 			s, err := execTemplate(g.subject, data)
 			if err != nil {
-				return nil, fmt.Errorf("auth: pattern credential %d: render subject: %w", i, err)
+				return nil, fmt.Errorf("auth: usersPattern credential %d: render subject: %w (only {{.userIndex}} is available in usersPattern templates)", i, err)
 			}
 			subject = s
 		}
 		secret, err := execTemplate(g.secret, data)
 		if err != nil {
-			return nil, fmt.Errorf("auth: pattern credential %d: render secret: %w", i, err)
+			return nil, fmt.Errorf("auth: usersPattern credential %d: render secret: %w (only {{.userIndex}} is available in usersPattern templates)", i, err)
 		}
 		out = append(out, domain.Credential{Subject: subject, Secret: secret})
 	}
