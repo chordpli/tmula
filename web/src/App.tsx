@@ -20,7 +20,7 @@ import {
   MAX_TRACE_USERS,
   MAX_WEB_PATTERN_ROWS,
   mintManagedIdPAdvisory,
-  OAUTH2_GUIDE_DEFAULTS,
+  oauth2GuideCanCompileOver,
   openIdConnectDiscoveryUrl,
   parseAllowlist,
   parseCredentials,
@@ -54,9 +54,10 @@ import {
 } from './api'
 import {
   ADVANCED_AUTH_ENTRIES,
+  entryPatch,
   isAdvancedAuthMode,
-  modeForEntry,
   PRIMARY_AUTH_ENTRIES,
+  selectedEntry,
   type AuthEntry,
   type AuthEntryOption,
 } from './authEntryModel'
@@ -1284,16 +1285,17 @@ function AuthCard({
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
   const mintAdvisory = mintManagedIdPAdvisory(advisories)
-  // entry is the UI-layer selection; 'oauth2' is a pseudo-entry whose guide
-  // compiles onto the login wire mode, so it cannot be derived from form.authMode
-  // alone. It self-heals: whenever the remembered entry no longer maps onto the
-  // current wire mode (an import or a round-trip changed it), the wire mode wins.
-  const [entry, setEntry] = useState<AuthEntry | null>(null)
-  const selected: AuthEntry =
-    entry !== null && modeForEntry(entry) === form.authMode ? entry : form.authMode
+  // The UI-layer selection lives ON THE FORM (authEntryOAuth2): 'oauth2' is a
+  // pseudo-entry whose guide compiles onto the login wire mode, so it cannot be
+  // derived from form.authMode alone — and the scenario doctor needs to see it to
+  // speak the guide's language. selectedEntry self-heals: whenever the flag no
+  // longer maps onto the current wire mode (an import or a round-trip changed
+  // it), the wire mode wins.
+  const selected: AuthEntry = selectedEntry(form.authMode, form.authEntryOAuth2)
   function pickEntry(e: AuthEntry) {
-    setEntry(e)
-    set('authMode', modeForEntry(e))
+    const patch = entryPatch(e)
+    set('authEntryOAuth2', patch.authEntryOAuth2)
+    set('authMode', patch.authMode)
   }
   // Surface every REPLACE_ME_* placeholder the active flow's body still carries as a
   // highlighted input the operator must fill — so after an auto-detected import the ONLY
@@ -1969,11 +1971,16 @@ const OAUTH2_GRANTS: { grant: OAuth2Grant; labelKey: string; descKey: string }[]
 // service" entry): answer a token URL and "how do you log in?" and the guide
 // compiles the answers onto the existing login form fields via
 // authFormFromOAuth2Guide — a frontend assembly layer, not a new wire strategy.
-// The three token grants recompile live on every answer (the generated flow JSON
-// stays reviewable under Advanced); the access-token answer applies via an
-// explicit button because it switches the wire mode to pool (which unmounts this
-// panel). The guide's own answers are component state, so the wire form and
-// AUTH_FORM_DEFAULTS stay untouched.
+// The guide's answers live on the FORM (form.oauth2Guide), so switching entry
+// points and back preserves every answer. Compilation is guarded two ways:
+//   - No clobber: the compiled flow only overwrites loginGraphJSON /
+//     loginTemplatesJSON / loginCredText while those are the shipped default or
+//     were themselves guide-generated (oauth2GuideCanCompileOver). A hand-authored
+//     flow shows an explicit Regenerate button instead.
+//   - Credentials compile on blur/apply, not per keystroke, so a masked password
+//     never streams into the credential-list textarea in plaintext as it is typed.
+// The access-token answer applies via an explicit button because it switches the
+// wire mode to pool (which unmounts this panel).
 function AuthOAuth2GuideFields({
   form,
   set,
@@ -1987,7 +1994,8 @@ function AuthOAuth2GuideFields({
   discoveryUrl: string
 }) {
   const { t } = useI18n()
-  const [guide, setGuide] = useState<OAuth2GuideForm>(OAUTH2_GUIDE_DEFAULTS)
+  const guide = form.oauth2Guide
+  const canCompileOver = oauth2GuideCanCompileOver(form)
 
   function applyCompiled(g: OAuth2GuideForm) {
     const compiled = authFormFromOAuth2Guide(g)
@@ -1995,18 +2003,45 @@ function AuthOAuth2GuideFields({
       set(k as keyof ExperimentForm, v as ExperimentForm[keyof ExperimentForm] as never)
     }
   }
-  function update(patch: Partial<OAuth2GuideForm>) {
+  // update stores an answer; unless compile is false (the credential fields,
+  // which compile on blur) it also recompiles the flow — but ONLY over a default
+  // or guide-generated flow. The access-token answer never auto-compiles: it is
+  // applied via the explicit button below, so typing the token does not switch
+  // the mode mid-keystroke.
+  function update(patch: Partial<OAuth2GuideForm>, compile = true) {
     const next = { ...guide, ...patch }
-    setGuide(next)
-    // The access-token answer compiles to a pool patch — applied via the explicit
-    // button below, so typing the token does not switch the mode mid-keystroke.
-    if (next.grant !== 'accessToken') applyCompiled(next)
+    set('oauth2Guide', next)
+    if (compile && canCompileOver && next.grant !== 'accessToken') applyCompiled(next)
+  }
+  // compileNow flushes the current answers into the login flow (used on blur of
+  // the credential fields). Same guards as update().
+  function compileNow() {
+    if (canCompileOver && guide.grant !== 'accessToken') applyCompiled(guide)
   }
 
   const showClient = guide.grant !== 'accessToken'
   return (
     <div className="authpanel">
       <p className="card__hint">{t('auth.oauth2.lead')}</p>
+
+      {/* No-clobber guard: the flow below was hand-edited, so answers no longer
+          auto-compile. Regenerate is the explicit confirmation to overwrite. */}
+      {!canCompileOver && guide.grant !== 'accessToken' && (
+        <div className="authpanel__warn" role="status">
+          <AlertIcon />
+          <span>
+            <span className="authpanel__confirmLabel">{t('auth.oauth2.handAuthored')}</span>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              style={{ marginTop: 8, padding: '6px 12px', fontSize: 13 }}
+              onClick={() => applyCompiled(guide)}
+            >
+              {t('auth.oauth2.regenerate')}
+            </button>
+          </span>
+        </div>
+      )}
 
       <Field label={t('auth.oauth2.tokenUrl')} help={t('auth.oauth2.tokenUrlHint')}>
         <input
@@ -2051,7 +2086,8 @@ function AuthOAuth2GuideFields({
               <input
                 className="input"
                 value={guide.username}
-                onChange={(e) => update({ username: e.target.value })}
+                onChange={(e) => update({ username: e.target.value }, false)}
+                onBlur={compileNow}
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -2061,7 +2097,8 @@ function AuthOAuth2GuideFields({
                 className="input"
                 type="password"
                 value={guide.password}
-                onChange={(e) => update({ password: e.target.value })}
+                onChange={(e) => update({ password: e.target.value }, false)}
+                onBlur={compileNow}
                 autoComplete="off"
               />
             </Field>
@@ -2076,7 +2113,8 @@ function AuthOAuth2GuideFields({
                 <textarea
                   className="textarea"
                   value={guide.users}
-                  onChange={(e) => update({ users: e.target.value })}
+                  onChange={(e) => update({ users: e.target.value }, false)}
+                  onBlur={compileNow}
                   rows={5}
                   placeholder={'username,password\nalice,pw-a\nbob,pw-b'}
                   spellCheck={false}

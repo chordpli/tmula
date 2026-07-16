@@ -31,8 +31,10 @@ import {
   heatWidth,
   hostFromBaseUrl,
   importScenario,
+  isOAuth2GuideGeneratedFlow,
   mintManagedIdPAdvisory,
   OAUTH2_GUIDE_DEFAULTS,
+  oauth2GuideCanCompileOver,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
   latencyCellColor,
@@ -2267,6 +2269,63 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('oauth2 guide no-clobber (isOAuth2GuideGeneratedFlow / oauth2GuideCanCompileOver)', () => {
+  const guideForm = (patch: Partial<ExperimentForm>): ExperimentForm =>
+    ({ ...AUTH_FORM_DEFAULTS, ...patch }) as ExperimentForm
+
+  it('recognizes what the guide itself generated', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...OAUTH2_GUIDE_DEFAULTS,
+      tokenUrl: 'https://idp.example.com/oauth/token',
+      grant: 'clientCredentials',
+      clientId: 'web',
+    })
+    expect(isOAuth2GuideGeneratedFlow(patch.loginGraphJSON!, patch.loginTemplatesJSON!)).toBe(true)
+    expect(
+      oauth2GuideCanCompileOver(
+        guideForm({ loginGraphJSON: patch.loginGraphJSON!, loginTemplatesJSON: patch.loginTemplatesJSON! }),
+      ),
+    ).toBe(true)
+  })
+
+  it('allows compiling over the shipped default (both flow fields empty)', () => {
+    expect(oauth2GuideCanCompileOver(guideForm({}))).toBe(true)
+  })
+
+  it('refuses to compile over a hand-authored flow', () => {
+    // A two-step flow (or any non-guide shape) is the operator's work.
+    const graph = JSON.stringify({
+      id: 'login',
+      nodes: [
+        { id: 'csrf', apiTemplateId: 't_csrf' },
+        { id: 'login', apiTemplateId: 't_login' },
+      ],
+      edges: [{ from: 'csrf', to: 'login', weight: 1 }],
+    })
+    const templates = JSON.stringify({
+      t_csrf: { method: 'GET', path: '/csrf' },
+      t_login: { method: 'POST', path: '/login', payloadTemplate: '{"user":"a"}' },
+    })
+    expect(isOAuth2GuideGeneratedFlow(graph, templates)).toBe(false)
+    expect(oauth2GuideCanCompileOver(guideForm({ loginGraphJSON: graph, loginTemplatesJSON: templates }))).toBe(false)
+    // A JSON-body single-step login (no grant_type form body) is also hand work.
+    const jsonBody = JSON.stringify({
+      t_login: { method: 'POST', path: '/login', payloadTemplate: '{"user":"a","pass":"b"}' },
+    })
+    const singleNode = JSON.stringify({
+      id: 'login',
+      nodes: [{ id: 'login', apiTemplateId: 't_login' }],
+      edges: [],
+    })
+    expect(isOAuth2GuideGeneratedFlow(singleNode, jsonBody)).toBe(false)
+  })
+
+  it('treats malformed JSON as hand-authored (never clobber what it cannot read)', () => {
+    expect(isOAuth2GuideGeneratedFlow('{not json', '{}')).toBe(false)
+    expect(oauth2GuideCanCompileOver(guideForm({ loginGraphJSON: '{not json', loginTemplatesJSON: '{}' }))).toBe(false)
   })
 })
 

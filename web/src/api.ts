@@ -134,6 +134,18 @@ export interface ExperimentForm {
   // bodies right before sending, so the ONLY thing the operator must fill after an
   // auto-detected import is the highlighted secret. Empty for hand-authored flows.
   replaceMeValues: Record<string, string>
+
+  // --- UI-only fields (NEVER serialized into the RunSpec) ----------------------
+  // authEntryOAuth2 remembers that the operator's Auth-card entry is the OAuth2
+  // guide — a pseudo-entry that compiles onto the 'login' wire mode, so it cannot
+  // be derived from authMode alone. Living on the form (instead of component
+  // state) lets the scenario doctor speak the guide's language and survives any
+  // unmount. buildRunSpec never reads it.
+  authEntryOAuth2: boolean
+  // oauth2Guide holds the OAuth2 guide's answers. Hoisted onto the form so
+  // switching entry points and back preserves every answer; compiled onto the
+  // login/pool fields via authFormFromOAuth2Guide. buildRunSpec never reads it.
+  oauth2Guide: OAuth2GuideForm
 }
 
 // AuthAuthoringMode picks how the login / signup material is authored: 'simple' is the
@@ -251,6 +263,51 @@ export interface MintSpec {
   ttl: string // Go duration string (e.g. "1h0m0s") the backend parses into a time.Duration
 }
 
+// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
+// guide: a username+password (password grant), a client key (client_credentials),
+// a refresh token pasted from an app/browser session (refresh_token — the answer
+// for human-consent services like Auth0/Cognito/social login), or just an access
+// token (no grant at all — becomes a token pool).
+export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
+
+// OAuth2GuideForm is the OAuth2 guide's own input state: an optional issuer URL
+// (for endpoint discovery), a token URL, plus the grant's fields. It lives on
+// ExperimentForm as a UI-ONLY field (never serialized into the RunSpec) so guide
+// answers survive switching entry points; authFormFromOAuth2Guide compiles it
+// onto the existing login/pool form fields, so the wire payload is untouched.
+export interface OAuth2GuideForm {
+  // issuer is the optional IdP base URL the operator pastes when they do NOT know
+  // their token URL; "Fetch endpoints" resolves it via the server's discovery
+  // proxy and fills tokenUrl. It never crosses into the run spec itself.
+  issuer: string
+  tokenUrl: string
+  grant: OAuth2Grant
+  username: string
+  password: string
+  // users is an optional multi-user CSV (username,password header + rows); when
+  // non-empty it wins over the single username/password identity.
+  users: string
+  clientId: string
+  clientSecret: string
+  scope: string
+  refreshToken: string
+  accessToken: string
+}
+
+export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
+  issuer: '',
+  tokenUrl: '',
+  grant: 'password',
+  username: '',
+  password: '',
+  users: '',
+  clientId: '',
+  clientSecret: '',
+  scope: '',
+  refreshToken: '',
+  accessToken: '',
+}
+
 // AUTH_FORM_DEFAULTS is the off (anonymous) baseline for the form's auth fields, so
 // the initial form, presets, and tests can spread one shared default instead of
 // repeating the 18 fields. authMode 'none' means no credentialPool is attached and
@@ -300,6 +357,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'execEnvText'
   | 'execTimeoutSeconds'
   | 'replaceMeValues'
+  | 'authEntryOAuth2'
+  | 'oauth2Guide'
 > = {
   authMode: 'none',
   authPoolText: '',
@@ -344,6 +403,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   execEnvText: '',
   execTimeoutSeconds: 30,
   replaceMeValues: {},
+  authEntryOAuth2: false,
+  oauth2Guide: OAUTH2_GUIDE_DEFAULTS,
 }
 
 // CredentialPool is the wire shape the server reads to authenticate a run, matching
@@ -1040,45 +1101,6 @@ export function authFormFromImport(result: ImportResult): Partial<ExperimentForm
 
 // --- OAuth2 guide mode (a frontend ASSEMBLY layer, not a new server strategy) --
 
-// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
-// guide: a username+password (password grant), a client key (client_credentials),
-// a refresh token pasted from an app/browser session (refresh_token — the answer
-// for human-consent services like Auth0/Cognito/social login), or just an access
-// token (no grant at all — becomes a token pool).
-export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
-
-// OAuth2GuideForm is the guide's own input state: a token URL plus the grant's
-// fields. It is UI-local (NOT part of ExperimentForm) — authFormFromOAuth2Guide
-// compiles it onto the existing login/pool form fields, so the wire payload and
-// AUTH_FORM_DEFAULTS stay untouched.
-export interface OAuth2GuideForm {
-  tokenUrl: string
-  grant: OAuth2Grant
-  username: string
-  password: string
-  // users is an optional multi-user CSV (username,password header + rows); when
-  // non-empty it wins over the single username/password identity.
-  users: string
-  clientId: string
-  clientSecret: string
-  scope: string
-  refreshToken: string
-  accessToken: string
-}
-
-export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
-  tokenUrl: '',
-  grant: 'password',
-  username: '',
-  password: '',
-  users: '',
-  clientId: '',
-  clientSecret: '',
-  scope: '',
-  refreshToken: '',
-  accessToken: '',
-}
-
 // tokenPathFromUrl reduces a token URL (absolute or bare path) to the request
 // path the login flow POSTs — the run targets the scenario's base URL, so an
 // absolute URL keeps only its path (mirroring the importer's requestPathOf).
@@ -1163,6 +1185,36 @@ export function authFormFromOAuth2Guide(g: OAuth2GuideForm): Partial<ExperimentF
     loginCredText: credText,
     loginCredFormat: 'csv',
   }
+}
+
+// isOAuth2GuideGeneratedFlow reports whether a login flow's graph/templates JSON is
+// (structurally) something the OAuth2 guide generated: the single "login" node bound
+// to t_login whose payload is a grant_type form body. The guide uses it to decide
+// whether re-compiling may overwrite the fields — a hand-authored flow never
+// matches, so it is never silently clobbered. Any parse/shape surprise is a "no".
+export function isOAuth2GuideGeneratedFlow(graphJSON: string, templatesJSON: string): boolean {
+  try {
+    const g = JSON.parse(graphJSON) as { nodes?: { id?: unknown; apiTemplateId?: unknown }[] }
+    const t = JSON.parse(templatesJSON) as Record<string, { payloadTemplate?: unknown }>
+    if (!g || !Array.isArray(g.nodes) || g.nodes.length !== 1) return false
+    if (g.nodes[0]?.id !== LOGIN_NODE_ID || g.nodes[0]?.apiTemplateId !== LOGIN_TEMPLATE_ID) return false
+    const keys = Object.keys(t ?? {})
+    if (keys.length !== 1 || keys[0] !== LOGIN_TEMPLATE_ID) return false
+    const payload = t[LOGIN_TEMPLATE_ID]?.payloadTemplate
+    return typeof payload === 'string' && payload.includes('grant_type=')
+  } catch {
+    return false
+  }
+}
+
+// oauth2GuideCanCompileOver reports whether the OAuth2 guide may write its compiled
+// login flow (graph/templates/cred list) into the form without asking: only when
+// the flow fields are still the shipped default (empty) or were themselves
+// generated by the guide. A hand-authored flow returns false — the guide then
+// requires an explicit Regenerate instead of clobbering on every keystroke.
+export function oauth2GuideCanCompileOver(form: ExperimentForm): boolean {
+  if (!form.loginGraphJSON.trim() && !form.loginTemplatesJSON.trim()) return true
+  return isOAuth2GuideGeneratedFlow(form.loginGraphJSON, form.loginTemplatesJSON)
 }
 
 // loginFlowToSimpleForm tries to express a derived login flow as the simple mini-form

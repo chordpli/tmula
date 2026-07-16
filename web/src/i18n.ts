@@ -278,6 +278,9 @@ const en: Record<string, string> = {
   'auth.oauth2.advanced': 'Generated login flow (JSON)',
   'auth.oauth2.advancedHint':
     'This is what the guide assembled \u2014 the same raw flow the Login mode edits. Changing an answer above regenerates it.',
+  'auth.oauth2.handAuthored':
+    'The login flow JSON was hand-edited, so the guide no longer overwrites it automatically. Regenerate replaces it with a flow built from the answers above.',
+  'auth.oauth2.regenerate': 'Regenerate the login flow',
 
   // Auth · the Advanced fold hiding the expert strategies (mint / exec)
   'auth.advanced.modes': 'More ways to authenticate (expert)',
@@ -893,6 +896,10 @@ const ko: Record<string, string> = {
   'auth.oauth2.advanced': '생성된 로그인 흐름 (JSON)',
   'auth.oauth2.advancedHint':
     '가이드가 조립한 결과입니다 \u2014 로그인 모드가 편집하는 것과 같은 raw 흐름입니다. 위 답을 바꾸면 다시 생성됩니다.',
+
+  'auth.oauth2.handAuthored':
+    '로그인 흐름 JSON이 직접 수정된 상태라 가이드가 더 이상 자동으로 덮어쓰지 않습니다. 다시 생성을 누르면 위 답변으로 만든 흐름으로 교체합니다.',
+  'auth.oauth2.regenerate': '로그인 흐름 다시 생성',
 
   // Auth · 전문가 전략(mint / exec)을 감추는 Advanced 접힘
   'auth.advanced.modes': '다른 인증 방법 (전문가)',
