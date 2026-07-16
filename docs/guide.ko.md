@@ -135,7 +135,7 @@ make build   # Go binary only - fast, but the UI is a placeholder page
 
 ## 웹 콘솔, 필드별 설명
 
-콘솔(`make web` 이후 <http://localhost:8080>)에는 설정 카드 세 개(**Target**, **Load model**, **Scenario**)가 있고, 그 다음에 **Run** 버튼과 실시간 보기가 있습니다. 아래에 인용한 도움말 문구는 `web/src/i18n.ts`의 실제 UI 문구이며, `?` 도움말 툴팁을 그대로 옮겼습니다.
+콘솔(`make web` 이후 <http://localhost:8080>)에는 설정 카드 네 개(**Target**, **Load model**, **Scenario**, **Auth**)가 있고, 그 다음에 **Run** 버튼과 실시간 보기가 있습니다. 아래에 인용한 도움말 문구는 `web/src/i18n.ts`의 실제 UI 문구이며, `?` 도움말 툴팁을 그대로 옮겼습니다.
 
 **Scenario** 카드에서 **Start from a template**를 누르고 **Branching shop**, **Concert tickets**, **Health check**, **API read flow** 중 하나를 고르면 가장 빠르게 시작할 수 있습니다. 그래프, 템플릿, 시작 노드, 최대 단계가 자동으로 채워집니다(ticketing 프리셋은 Base URL도 `http://localhost:9100`으로 바꿉니다). 그다음 손보고 Run 하면 됩니다.
 
@@ -179,6 +179,46 @@ make build   # Go binary only - fast, but the UI is a placeholder page
 | **Scenario graph** (JSON) | 노드 + 가중치 엣지. *고급.* | 프리셋 사용 | 의존 엣지는 대상이 실행되기 전에 먼저 완료되어야 합니다. [시나리오 그래프](#시나리오-그래프) 참고. |
 | **API templates** (JSON) | 각 노드가 보내는 요청: 메서드, 경로, 선택적 페이로드. *고급.* | 프리셋 사용 | [API 템플릿](#api-템플릿) 참고. |
 | **Import** | OpenAPI 명세·HAR 기록·액세스 로그를 그래프 + 템플릿으로 변환(로그는 [임포트 커버리지 리포트](#액세스-로그에서-그래프-학습하기)가 함께 옵니다). | 업로드 또는 붙여넣기 | [OpenAPI / HAR 가져오기](#openapi--har-가져오기) 참고. |
+
+### 카드: Auth
+
+> *"시뮬레이션 트래픽이 인증하는 방식입니다. 끄면 익명으로 실행하고, 토큰 풀을 제공하거나, 로그인 흐름으로 토큰을 발급받거나, 일회용 계정을 생성할 수 있습니다."*
+
+라디오 그룹 하나입니다: 일상적인 진입점이 먼저 오고, 전문가용 경로는 **Advanced** 접힘 뒤에 있습니다. 각 진입점은 [자격 증명 전략](#인증이-필요한-실행) 중 하나로 컴파일되며, 템플릿은 배정된 자격 증명을 `{{.token}}`으로 참조합니다(tmula가 헤더를 자동으로 추가해 주지는 않습니다).
+
+| UI 라벨 | 전략 | 이럴 때 고르세요 |
+|---------|------|-------------------|
+| **없음** | — | 익명으로 실행 — 자격 증명을 보내지 않습니다. |
+| **이미 토큰이 있어요** | [pool](#전략-pool-미리-공급된-자격-증명) | 사전 발급 bearer 토큰 / API 키가 있을 때 — 하나든 목록이든 붙여넣거나 파일을 업로드합니다. |
+| **로그인해서 토큰을 받아요** | [login](#전략-login-실행-시-토큰-발급) | 서비스에 로그인 엔드포인트가 있을 때. 심플 폼이 **아이디** / **비밀번호** 입력으로 로그인 본문을 조립해 주므로(본문의 필드 이름은 재정의 가능) 처음에는 JSON을 쓸 필요가 없습니다. 원시 본문은 Advanced 뒤에 있습니다. |
+| **OAuth2 서비스예요** | login(가이드 조립) | IdP가 OAuth2를 쓸 때 — 질문 두 개에 답하면 가이드가 flow를 조립합니다([아래](#oauth2-가이드-모드)). |
+| **계정을 만들어서 테스트해요** | [bootstrap-signup](#전략-bootstrap-signup-실제-계정-프로비저닝) | 가상 사용자마다 실제로 새로 가입한 계정이 필요한 비프로덕션 샌드박스일 때(실행 후 정리). |
+| **토큰을 로컬에서 서명(자체 발급 JWT)** *(Advanced)* | [mint](#전략-mint-로컬-jwt-자체-발급) | JWT 서명 키를 직접 보유할 때. Auth0/Cognito/Firebase에는 안 됩니다 — 키를 IdP가 쥐고 있고, import한 스펙이 그렇다고 하면 콘솔이 경고합니다. |
+| **명령으로 토큰 가져오기(탈출구)** *(Advanced)* | [exec](#전략-exec-직접-가져온-토큰--탈출구) | 최후의 수단 — 로컬 명령이 토큰을 출력할 때. 서버의 `--allow-exec` 게이트 뒤에 있습니다. |
+
+카드에는 도우미 세 개가 있습니다.
+
+- **패턴으로 계정 생성**(pool/login 패널): subject/secret 템플릿에 `{{.userIndex}}`와 개수를 채우면 자격 증명 상자에 행이 바로 생성됩니다. **브라우저에서** 실체화되므로 **10,000행**까지입니다 — 더 큰 풀은 CLI 시나리오 파일의 [`usersPattern`](#파일-없이-계정-패턴으로-생성-userspattern)(서버에서 생성)을 쓰세요. [웹에서 만든 실행을 CLI로 옮기기](#웹에서-만든-실행을-cli로-옮기기)도 참고.
+- **Test login**: 실행에 들어가기 전에 인증 설정을 **한 번** 실행해 보는 사전 점검입니다 — 로그인 flow를 한 번 돌리고, pool 항목을 파싱하고, mint 키를 해석해 토큰을 서명합니다(`POST /api/auth/preflight`). HTTP 상태, 토큰이 감지된 위치(본문 키 또는 쿠키), 마스킹된 토큰 접두사를 보여 주므로, 안 채운 비밀이나 실패한 캡처가 401투성이 실행이 아니라 클릭 한 번으로 드러납니다.
+- **토큰 만료 피드백**(pool): 토큰 상자에 JWT를 붙여넣으면 브라우저에서 디코딩해, 등록 시점에 이미 만료된 토큰 — 또는 설정한 실행 시간이 끝나기 전에 만료될 토큰 — 을 경고합니다.
+
+#### OAuth2 가이드 모드
+
+가이드는 두 가지를 묻고 로그인 flow를 조립합니다(Advanced의 **Generated login flow (JSON)**에서 검토할 수 있고, 답을 바꾸면 다시 생성됩니다).
+
+1. **토큰 URL** — 토큰을 발급하는 엔드포인트(예: `https://idp.example.com/oauth/token`). 자동으로 채우는 지름길이 둘 있습니다.
+   - **Issuer URL → Fetch endpoints**: IdP의 기본 URL을 붙여넣으면 tmula가 `<issuer>/.well-known/openid-configuration`을 **서버 쪽에서** 가져와 그 `token_endpoint`로 토큰 URL을 채웁니다. issuer 호스트는 실행의 allowlist에 있어야 합니다.
+   - import한 `openIdConnect` 스펙은 **discovery URL**을 바로 여기서 알려 줍니다 — 같은 `token_endpoint` 경로입니다.
+2. **어떻게 로그인하나요?** — 네 가지 답이 있고, 각각 OAuth2 grant로 매핑됩니다.
+
+| 답 | OAuth2 grant | tmula가 하는 일 |
+|----|--------------|------------------|
+| **아이디/비밀번호로** | `password` | 가상 사용자마다 자기 계정으로(또는 한 계정을 공유해서) 로그인합니다. 선택적 `username,password` CSV로 여러 계정 로그인이 됩니다. |
+| **클라이언트 키로 (서버 간)** | `client_credentials` | 머신 토큰 하나(client_id + client_secret)를 모든 세션이 공유합니다(`scope: shared`). |
+| **앱/브라우저에서 이미 로그인했어요** | `refresh_token` | 앱/개발자도구에서 1회 복사한 refresh token을 붙여넣으면 tmula가 실행 내내 새 access token으로 교환합니다. **authorization-code / 동의 화면이 필요한 서비스**(Auth0, Cognito, 소셜 로그인)의 정답입니다 — 사람의 동의는 tmula 밖에서 한 번 끝났고, refresh token이 그 결과물입니다. |
+| **access token만 있어요** | — (pool이 됨) | **Use as a token pool** 버튼으로 항목 하나짜리 토큰 풀이 됩니다. 갱신이 없으므로 긴 실행은 만료 시점부터 실패하기 시작합니다. |
+
+선택 필드: **Client ID** / **Client secret**(`client_id`/`client_secret`으로 전송; secret은 다른 로그인 본문처럼 실행 스펙에 저장되므로 일회용 테스트 클라이언트를 권장)과 **Scope**(공백 구분). refresh token이 실행 중에 어떻게 동작하는지 — 사용 시 회전 포함 — 는 [refresh token은 어떻게 동작하나](#refresh-token은-어떻게-동작하나)를 참고하세요.
 
 **Run**을 누르면 콘솔이 [RunSpec](#전체-runspec)을 조립해 POST 합니다. 콘솔이 자동으로 처리하는 두 가지가 있습니다. 첫째, 클로즈드 실행에서는 `users: []`와 `userCount`를 보내므로 거대한 실행도 작은 요청 본문이 됩니다(서버가 `u0..uN-1`을 합성). 둘째, 안전 `rateCap`을 설정한 부하에 맞춰 크기 조정합니다. 이 둘은 UI에서 직접 쓸 일이 없습니다.
 

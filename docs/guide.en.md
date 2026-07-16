@@ -135,7 +135,7 @@ make build   # Go binary only - fast, but the UI is a placeholder page
 
 ## The web console, field by field
 
-The console (<http://localhost:8080> after `make web`) has three configuration cards: **Target**, **Load model**, and **Scenario**, then a **Run** button and a live view. The help text quoted below is the actual UI copy from `web/src/i18n.ts`. Every `?` Help tooltip is reproduced where relevant.
+The console (<http://localhost:8080> after `make web`) has four configuration cards: **Target**, **Load model**, **Scenario**, and **Auth**, then a **Run** button and a live view. The help text quoted below is the actual UI copy from `web/src/i18n.ts`. Every `?` Help tooltip is reproduced where relevant.
 
 The fastest start: in the **Scenario** card click **Start from a template** and pick **Branching shop**, **Concert tickets**, **Health check**, or **API read flow**. That fills the graph, templates, start node, and max steps for you (the ticketing preset also switches the Base URL to `http://localhost:9100`). Then tweak and Run.
 
@@ -179,6 +179,46 @@ The fastest start: in the **Scenario** card click **Start from a template** and 
 | **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
 | **API templates** (JSON) | The request each node sends: method, path, optional payload. *Advanced.* | use a preset | See [API templates](#api-templates). |
 | **Import** | Turn an OpenAPI spec, a HAR recording, or an access log into the graph + templates (logs come with an [import coverage report](#learning-a-graph-from-an-access-log)). | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
+
+### Card: Auth
+
+> *"How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts."*
+
+One radio group: the everyday entry points first, the expert paths folded behind an **Advanced** disclosure. Every entry compiles onto one of the [credential strategies](#authenticated-runs); templates reference the assigned credential as `{{.token}}` (tmula never auto-adds a header).
+
+| UI label | Strategy | Pick it when |
+|----------|----------|--------------|
+| **None** | — | Run anonymously — no credentials are sent. |
+| **I already have tokens** | [pool](#strategy-pool-pre-supplied-credentials) | You hold pre-issued bearer tokens / API keys — paste one, a list, or upload a file. |
+| **Log in to get tokens** | [login](#strategy-login-mint-a-token-at-run-time) | The service has a login endpoint. The simple form assembles the login body from **Username** / **Password** inputs (the body's field names are overridable), so first contact needs no JSON authoring; the raw body lives behind Advanced. |
+| **It's an OAuth2 service** | login, guided | Your IdP speaks OAuth2 — answer two questions and the guide assembles the flow ([below](#the-oauth2-guided-mode)). |
+| **Create test accounts** | [bootstrap-signup](#strategy-bootstrap-signup-provision-real-accounts) | A non-production sandbox where each virtual user should be a real, freshly provisioned account (torn down after). |
+| **Sign a token locally (self-issued JWT)** *(Advanced)* | [mint](#strategy-mint-self-issue-a-jwt-locally) | You hold the JWT signing key. Not for Auth0/Cognito/Firebase — the IdP holds the key, and the console warns when an imported spec says so. |
+| **Run a command for the token (escape hatch)** *(Advanced)* | [exec](#strategy-exec-bring-your-own-token--escape-hatch) | Last resort — a local command prints the token. Gated behind the server's `--allow-exec`. |
+
+Three helpers live on the card:
+
+- **Generate accounts from a pattern** (on the pool/login panels): fill a subject and secret template with `{{.userIndex}}` plus a count, and the rows are generated straight into the credential box. This materializes **in the browser**, so it is capped at **10,000 rows** — for a larger pool declare [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) in a CLI scenario file (generated server-side) and see [Taking a web-authored run to the CLI](#taking-a-web-authored-run-to-the-cli).
+- **Test login**: a preflight that executes the auth config **once** before you commit to a run — the login flow runs once, a pool entry is parsed, a mint key is resolved and a token signed (`POST /api/auth/preflight`). It reports the HTTP status, where the token was detected (a body key or a cookie), and a redacted token prefix — so an unfilled secret or a failed capture costs one click, not a run full of 401s.
+- **Token expiry feedback** (pool): pasting JWTs into the token box decodes them in the browser and warns, as you register them, when a token is already expired — or will expire before the configured run duration ends.
+
+#### The OAuth2 guided mode
+
+The guide asks for two things and assembles the login flow (reviewable as **Generated login flow (JSON)** under Advanced; changing an answer regenerates it):
+
+1. **Token URL** — the endpoint that issues tokens (e.g. `https://idp.example.com/oauth/token`). Two shortcuts fill it for you:
+   - **Issuer URL → Fetch endpoints**: paste the IdP's base URL and tmula fetches `<issuer>/.well-known/openid-configuration` **server-side** and fills the token URL from its `token_endpoint`. The issuer's host must be on the run's allowlist.
+   - An imported `openIdConnect` spec surfaces its **discovery URL** right here — same `token_endpoint` route.
+2. **How do you log in?** — four answers, each mapping onto an OAuth2 grant:
+
+| Answer | OAuth2 grant | What tmula does |
+|--------|--------------|-----------------|
+| **With a username and password** | `password` | Each virtual user logs in with its own account (or one shared account); an optional `username,password` CSV logs in many distinct users. |
+| **With a client key (server-to-server)** | `client_credentials` | One machine token (client_id + client_secret) shared by every session (`scope: shared`). |
+| **I'm already logged in on an app or browser** | `refresh_token` | Paste a refresh token copied once from the app/devtools; tmula exchanges it for fresh access tokens all run long. **This is the answer for authorization-code / consent-screen services** (Auth0, Cognito, social login) — the human consent happened once, outside tmula, and the refresh token is what it left behind. |
+| **I only have an access token** | — (becomes a pool) | Applied as a one-entry token pool via **Use as a token pool**. No refresh: a long run starts failing when it expires. |
+
+Optional fields: **Client ID** / **Client secret** (sent as `client_id`/`client_secret`; the secret is stored in the run's spec like any login body — prefer a throwaway test client) and **Scope** (space-separated). What a refresh token does mid-run — including rotation-on-use — is covered in [What happens with a refresh token](#what-happens-with-a-refresh-token).
 
 When you press **Run**, the console assembles a [RunSpec](#the-full-runspec) and POSTs it. Two things happen automatically: it sends `users: []` plus a `userCount` for closed runs (so a huge run is a tiny request body, and the server synthesizes `u0..uN-1`), and it sizes the safety `rateCap` to your configured load. You never write those by hand in the UI.
 
