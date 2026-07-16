@@ -268,6 +268,8 @@ A **map** keyed by template id, in the console's "API templates" editor and the 
 - `{{.var}}`: a value from a virtual user's own `vars` map (when you supply per-user objects in a RunSpec).
 - `{{.token}}`: the credential secret assigned to this user/session (only present on an [authenticated run](#authenticated-runs)).
 - `{{.subject}}`: the credential's non-sensitive subject (e.g. a username).
+- `{{.username}}` / `{{.password}}`: **login-flow bodies only** — the credential row the current virtual user is logging in as (`subject` = username, `token` = password). See [Log in N distinct accounts](#log-in-n-distinct-accounts-rows-as-credentials).
+- `{{.userIndex}}`: the virtual user's number, in the **auth templates** — login/signup flow bodies, mint `subject`/`claims`, exec `command`/`env`, and `usersPattern` — for predictable per-user identities like `user{{.userIndex}}`.
 
 A common authenticated header is `"Authorization": "Bearer {{.token}}"`.
 
@@ -525,7 +527,7 @@ findings:
 | `thinkMs` | `[min, max]` | Think-time range (must be exactly two ints, else `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | Back-pressure cap. |
 
-**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, `bootstrap-signup`, `mint`, or `exec`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }`, or `usersPattern: { subject, token, count }` (the three are mutually exclusive). For `login`: `login.flow`, `login.capture.token` (required), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool). For `mint`: the [mint block](#strategy-mint-self-issue-a-jwt-locally). For `exec`: the [exec block](#strategy-exec-bring-your-own-token--escape-hatch) (opt-in gated).
+**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, `bootstrap-signup`, `mint`, or `exec`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }`, or `usersPattern: { subject, token, count }` (the three are mutually exclusive). For `login`: `login.flow`, `login.capture.token` (optional; empty = auto-detected), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool). For `mint`: the [mint block](#strategy-mint-self-issue-a-jwt-locally). For `exec`: the [exec block](#strategy-exec-bring-your-own-token--escape-hatch) (opt-in gated).
 
 **`findings` fields** (every field optional; a `0`/omitted value keeps its default)
 
@@ -1149,12 +1151,52 @@ auth:
         body: '{"username":"u1","password":"p1"}'
         extract: { tok: "$.access_token" }
     capture:
-      token: tok          # required: which extracted variable becomes {{.token}}
+      token: tok          # optional: which extracted variable becomes {{.token}} (empty/omitted = auto-detected)
       subject: uid        # optional: which variable becomes {{.subject}}
     scope: per-user       # per-user (default) | shared (client_credentials)
 ```
 
-tmula walks the login flow once per virtual user (`per-user`) or once for all sessions (`shared`), captures the token, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (re-runs the login) and retries; that refresh traffic is excluded from findings. Login runs are **in-process only** — rejected against a remote `--engine` and distributed workers.
+tmula walks the login flow once per virtual user (`per-user`) or once for all sessions (`shared`), captures the token, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (a real refresh-token exchange when one can be derived, else a re-login — see [What happens with a refresh token](#what-happens-with-a-refresh-token)) and retries; that refresh traffic is excluded from findings. Login runs are **in-process only** — rejected against a remote `--engine` and distributed workers.
+
+> **Login prewarm and your IdP.** All per-user logins run up front (the *prewarm*), in parallel but bounded to the run's `RateCap.MaxConcurrency` capped at **16 concurrent logins** — so a 10,000-user run never turns into a login load test against your IdP. If the IdP still rate-limits, see the [FAQ entry on 429s during prewarm](#troubleshooting--faq).
+
+#### Log in N distinct accounts (rows as credentials)
+
+The block above logs in **one** identity. To make every virtual user a *different* account, add credential **rows** — for the login strategy a row is a login *input*: `subject` = username, `token` = password. Virtual user *i* logs in with row *i* (wrapping), and the login body references the row via `{{.username}}` / `{{.password}}`:
+
+```yaml
+auth:
+  strategy: login
+  source:
+    file: users.csv         # rows of subject,token → username,password
+    format: csv
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+    # capture omitted: the token is auto-detected from the response
+```
+
+No file? [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) generates the rows instead — its `subject`/`token` templates become the username/password here (`user{{.userIndex}}` / `pw-{{.userIndex}}`), so "50,000 patterned accounts, each really logging in" is three lines of YAML.
+
+#### client_credentials (shared machine token)
+
+For a service principal (server-to-server) there is one identity for the whole run: a **form-encoded** `grant_type=client_credentials` exchange with `scope: shared`, so tmula logs in once and every session reuses that token:
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: token
+        request: POST /oauth/token
+        headers: { Content-Type: application/x-www-form-urlencoded }
+        body: "grant_type=client_credentials&client_id=REPLACE_ME_CLIENT_ID&client_secret=REPLACE_ME_CLIENT_SECRET"
+    scope: shared
+```
+
+Add `&scope=read+write` when your IdP scopes the token. Some IdPs require extra parameters — **Auth0 requires `audience`** (`&audience=https://api.example.com`) or it returns an error instead of a token.
 
 ### Strategy: bootstrap-signup (provision real accounts)
 
