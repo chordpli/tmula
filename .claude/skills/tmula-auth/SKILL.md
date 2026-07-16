@@ -30,7 +30,12 @@ importer now does all of that from the spec itself:
 | oauth2 **clientCredentials** flow | `login` strategy, **shared** scope, `grant_type=client_credentials` + `REPLACE_ME_CLIENT_ID/SECRET` |
 | `http` **bearer** + a discoverable login op | `login` strategy from that operation's method/path/body |
 | `http` bearer, **no** login op | `pool` placeholder (paste a token, or wire a login by hand) |
+| `http` **basic** | an `Authorization: Basic {{basicAuth .subject .token}}` header + a username/password `pool` placeholder |
 | `apiKey` in header | `pool` placeholder + the header name |
+| `apiKey` in **query** | `pool` placeholder + `?name={{.token\|urlquery}}` appended to each secured path |
+| `apiKey` in **cookie** | `pool` placeholder + a `Cookie: name={{.token}}` header |
+| an `openIdConnect` scheme | an **`openidconnect-discovery` advisory** carrying the discovery URL — read its `token_endpoint` (or paste it into the web console's OAuth2 guide) |
+| a managed-IdP issuer (Auth0/Cognito/Firebase/Okta, any openIdConnect issuer) | a **`mint-managed-idp` advisory** — do NOT mint; the IdP holds the signing key, so use login / the OAuth2 guide |
 | a `POST /register` (or signup) op | an advisory **`suggestedSignup`** block (per-VU unique identity) |
 | a **HAR** with `Authorization`/auth cookie | the captured token + the login request (refreshable) |
 | no security scheme at all | no auth block (fall back to tmula-enrich for manual wiring) |
@@ -124,8 +129,15 @@ Artifacts (under `json/`):
 
    For the login strategy a `users`/`source` row is a login **input**: `subject` = username, `token` =
    password. The body references `{{.username}}` / `{{.password}}` (the row) and `{{.userIndex}}` (the VU
-   number — use `user{{.userIndex}}` for a predictable account pattern with no list). Same in the web
-   console: the login mode's "log in multiple users" list.
+   number). With no list at all, declare **`usersPattern`** instead and the rows are generated at Expand:
+
+   ```json
+   "usersPattern": { "subject": "user{{.userIndex}}", "token": "pw-{{.userIndex}}", "count": 100000 }
+   ```
+
+   (mutually exclusive with `users`/`source`). Same in the web console: the login mode's "log in multiple
+   users" list, or its pattern panel — browser-side, capped at 10,000 rows; the scenario-file
+   `usersPattern` is the path beyond that.
 
 ## Iron Laws
 
@@ -140,7 +152,8 @@ Artifacts (under `json/`):
 ## Failure modes
 
 - init derived **no** auth (no `securitySchemes`, no login op) → say so; either paste a token as a `pool`,
-  or wire a login by hand with **tmula-enrich** (it documents all four strategies).
+  or wire a login by hand with **tmula-enrich** (it documents every credential strategy, mint and exec
+  included).
 - init *"could not determine a target URL… pass --target"* → relative/absent `servers`; derive from the
   spec/URL origin and pass `--target`.
 - Fetched bytes start with `<`/`<!DOCTYPE` → got the Swagger-UI page; the fetcher probes common spec paths

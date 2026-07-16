@@ -50,7 +50,7 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
    - API-key header (e.g. `api_key`): `"headers": { "api_key": "{{.token}}" }`
    - OAuth2 / bearer: `"headers": { "Authorization": "Bearer {{.token}}" }`
 
-   There are four ways to supply credentials — pick the one that fits:
+   There are seven ways to supply credentials — pick the one that fits:
 
    **(a) Inline users (simplest, token in file):**
    ```json
@@ -89,9 +89,13 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
    ```
    tmula walks the login flow once per virtual user (scope `per-user`, the default) or once for all
    sessions (scope `shared`, client_credentials style), captures `$.access_token` into the `tok`
-   variable, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (re-runs the login) and
-   retries; that refresh traffic is excluded from findings. Login runs are in-process only — rejected
-   against a remote `--engine` and distributed workers.
+   variable, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (a derived
+   `grant_type=refresh_token` exchange for an OAuth2 form login, else a re-login) and retries; that
+   refresh traffic is excluded from findings. Login runs are in-process only — rejected against a
+   remote `--engine` and distributed workers. **Session-cookie services:** if the login answers with a
+   `Set-Cookie` instead of a body token, omit the capture — the session cookie
+   (`session`/`token`/`jwt`/`auth`/`sid`-style names) is auto-captured; replay it with a step header
+   `"Cookie": "session={{.token}}"`.
 
    **(d) Bootstrap signup (provision real accounts):**
    ```json
@@ -109,6 +113,35 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
    Provisions one real account per virtual user before the run, then **tears all accounts down after**
    (even on kill/timeout). Requires a teardown flow OR `--keep-accounts`. Bootstrap runs are in-process
    only. **Only use against a confirmed non-production sandbox** — this creates and deletes real accounts.
+
+   **(e) Pattern-generated accounts (`usersPattern`, no file):**
+   ```json
+   "auth": { "strategy": "pool",
+     "usersPattern": { "subject": "user{{.userIndex}}", "token": "pw-{{.userIndex}}", "count": 100000 } }
+   ```
+   Generates the credential rows from a subject/token template pair at Expand time — tens of thousands
+   of accounts with no file. Mutually exclusive with `users` and `source`. Works for `login` too (there
+   `subject` = username, `token` = password). Not for opaque JWTs — that's mint.
+
+   **(f) Mint (self-issue a JWT locally):**
+   ```json
+   "auth": { "strategy": "mint",
+     "mint": { "alg": "HS256", "secretEncoding": "raw", "key": { "env": "MINT_SIGNING_KEY" },
+               "subject": "user-{{.userIndex}}", "ttl": "1h" } }
+   ```
+   Signs a fresh JWT per virtual user with a key the operator holds — no login traffic. The key is a
+   **reference** (env/file), never inlined. **Never for Auth0/Cognito/Firebase** — a managed IdP holds
+   the signing key, so a self-minted token is rejected; use login instead. Mint may fan out to
+   distributed workers (only the key reference ships).
+
+   **(g) Exec (bring your own token — escape hatch):**
+   ```json
+   "auth": { "strategy": "exec",
+     "exec": { "command": ["vault", "token", "create", "-field=token"], "timeout": "10s" } }
+   ```
+   Runs a local command per virtual user; its stdout becomes `{{.token}}` (argv may reference
+   `{{.userIndex}}`). **Gated**: the run is rejected unless the operator passes `--allow-exec`, and the
+   command's egress bypasses the allowlist/rate cap. Last resort only.
 
 5. **Shape the flow (optional but valuable):**
    - **Step ids**: rename cryptic/colliding ids to stable human-readable ones *before* wiring `dependsOn`
@@ -132,8 +165,9 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
 
 `target` · `allow` (reachable hosts; default = target host, fail-closed) · per-step `id`/`request`/`body`/
 `headers`/`dependsOn`/`weight` · `users` (closed model) · `open`+`maxSteps` (open model) · `seed` ·
-`deviationRate` · `auth` (pool with inline `users` or external `source`; `login` strategy; `bootstrap-signup`
-strategy) · `findings` (`errorRate`, `p95LatencyMs`, `availabilityStreak`).
+`deviationRate` · `auth` (pool with inline `users`, external `source`, or generated `usersPattern`; `login` —
+incl. session-cookie auto-capture; `bootstrap-signup`; `mint`; `exec`, gated behind `--allow-exec`) ·
+`findings` (`errorRate`, `p95LatencyMs`, `availabilityStreak`).
 
 ## Iron Laws
 
@@ -147,6 +181,8 @@ strategy) · `findings` (`errorRate`, `p95LatencyMs`, `availabilityStreak`).
 - Run later shows 404/400 with `{param}` in logs → a brace was missed; re-scan the whole flow.
 - `template: …` error / request won't send → used `{{token}}` without the dot; it must be `{{.token}}`.
 - Protected endpoints still 401 → header not wired for that scheme, or the placeholder token is unfilled.
+- Run refuses to start naming a `REPLACE_ME` field → scenario expand rejects an auth block still carrying
+  a literal `REPLACE_ME`; fill the secret or supply it via `--auth-source file:…/env:…`.
 - Duplicate/cryptic ids, `dependsOn` unresolved → rename to stable ids before wiring edges.
 - Graph-first scenario (from access-log import) → enrich `templates` (they carry the per-node request +
   `headers`), not a linear `flow`; keep the `graph`/`start`.
