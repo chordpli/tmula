@@ -100,11 +100,11 @@ func TestCredentialPoolCharacterization(t *testing.T) {
 			want: "api: the \"login\" strategy needs a loginFlow describing how to mint a token",
 		},
 		{
-			name:    "login pool + workers rejected (generic inline message)",
+			name:    "login pool + workers rejected (login-specific message)",
 			pool:    &domain.CredentialPool{ID: "p", Strategy: domain.CredLogin, LoginFlowID: &loginID},
 			flow:    loginFlow(),
 			workers: true,
-			want:    "api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)",
+			want:    "api: the \"login\" strategy is not supported with distributed workers (a login flow may carry secrets the fan-out cannot ship); use the \"mint\" strategy (a key reference each worker resolves locally) or a pre-issued credential source pool",
 		},
 		{
 			name: "bootstrap with teardown, no workers",
