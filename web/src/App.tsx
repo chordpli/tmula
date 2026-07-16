@@ -56,8 +56,8 @@ import {
 } from './api'
 import {
   ADVANCED_AUTH_ENTRIES,
+  advancedFoldOpen,
   entryPatch,
-  isAdvancedAuthMode,
   PRIMARY_AUTH_ENTRIES,
   selectedEntry,
   type AuthEntry,
@@ -1319,6 +1319,8 @@ function AuthCard({
 }) {
   const { t } = useI18n()
   const authIssues = authDoctorIssues(issues)
+  // advOpened: the operator opened the expert fold this session — keep it open.
+  const [advOpened, setAdvOpened] = useState(false)
   // The managed-IdP mint footgun: when the imported spec's token issuer holds the
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
@@ -1374,8 +1376,16 @@ function AuthCard({
         {/* Expert strategies fold behind Advanced (auto-open when one is selected,
             e.g. a round-tripped exec/mint spec): a normal operator never needs mint
             or exec, and surfacing them beside the entry points invited the
-            managed-IdP mint footgun. */}
-        <details className="advanced" open={isAdvancedAuthMode(form.authMode)}>
+            managed-IdP mint footgun. Once the operator opens the fold themselves
+            it stays open for the session — leaving mint/exec must not snap it
+            shut under their cursor (advOpened tracks the user's open). */}
+        <details
+          className="advanced"
+          open={advancedFoldOpen(form.authMode, advOpened)}
+          onToggle={(e) => {
+            if ((e.target as HTMLDetailsElement).open) setAdvOpened(true)
+          }}
+        >
           <summary className="advanced__summary">
             {t('auth.advanced.modes')}
             <span className="field__badge">{t('badge.advanced')}</span>
