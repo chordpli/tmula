@@ -1323,6 +1323,8 @@ The domain `Credential.Secret` field carries `json:"-"`, so the secret is **neve
 
 **Constraints** (from validation): a credential pool **cannot** be combined with distributed workers unless the pool is an external source or the mint strategy (both ship only a secret-free reference). Inline `users`, usersPattern, login, bootstrap-signup, and exec are all rejected with workers. The open workload model is in-process only regardless of auth strategy.
 
+**What IS stored: login-flow bodies.** The `json:"-"` guarantee covers the *captured or minted* credential secret. It does **not** cover secrets you author into a flow body: a `client_credentials` client_secret, a pasted refresh token, or a username/password login body is part of the run spec like any other template body — it rides in the RunSpec, lives in engine memory for the run's lifetime, and is visible in the spec stored on the control plane (the web OAuth2 guide says as much next to its Client secret field). Keep the blast radius small: use a **throwaway test client** for client_credentials, keep per-user passwords out of the file with `--auth-source env:VAR` / an external `source`, or generate them with [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) (the secret template materializes at Expand, and the materialized secrets are `json:"-"`-masked).
+
 ### Web OAuth2 guide · basic/apiKey import · what's deferred
 
 - **OAuth2 web guide.** For a service that only speaks OAuth2, the web console's "It's an OAuth2 service" entry assembles the login flow for you: answer the token URL and how you log in (username/password · client key · paste a refresh token · access token only). For services that need a human consent screen (Auth0/Cognito/social login), the right path is to copy a refresh token once from the app/devtools and paste it. (Note: a client_secret or pasted refresh token is stored in the run's spec like any login body, so prefer a throwaway test client for client_credentials.)
@@ -1369,6 +1371,8 @@ Because tmula deliberately concentrates traffic, a misfire would be a self-infli
 - **Environment class.** `envClass` is `dev`, `staging`, or `prod-locked`. A `prod-locked` target is refused unless explicitly unlocked (`safety: target env is prod-locked; explicit unlock required (policy §1)`).
 
 Together these mean a run cannot reach a host you did not list, cannot exceed the rate/concurrency you set, can always be stopped, and cannot accidentally hit production.
+
+For how **credentials** are treated — what never serializes, and what *does* ride in a run spec (login-flow bodies such as a client_secret or password) — see [Why secrets stay in-process](#why-secrets-stay-in-process) and its "What IS stored" caveat. Note also that the [exec strategy](#strategy-exec-bring-your-own-token--escape-hatch)'s command egress runs outside these guards, behind its own `--allow-exec` opt-in.
 
 ---
 
