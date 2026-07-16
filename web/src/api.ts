@@ -1892,6 +1892,18 @@ export interface StreamFrame {
   stats?: Stats
 }
 
+// runFailureHintKey maps a run's kill/fail reason onto a friendly i18n key for the
+// known prewarm failures — the cases where the run died BEFORE any traffic flowed
+// because auth could not be established. The raw reason is still shown beneath the
+// friendly line; anything unrecognized returns null and callers show only the raw
+// reason.
+export function runFailureHintKey(reason: string | undefined): string | null {
+  if (!reason) return null
+  if (reason.startsWith('api: prewarm login token')) return 'run.failLoginPrewarm'
+  if (reason.startsWith('api: prewarm bootstrap accounts')) return 'run.failBootstrapPrewarm'
+  return null
+}
+
 // parseSSEData parses a single SSE "data:" line, returning null for anything
 // else (comments, blank lines, malformed payloads).
 export function parseSSEData(line: string): StreamFrame | null {

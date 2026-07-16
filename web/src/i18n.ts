@@ -563,6 +563,10 @@ const en: Record<string, string> = {
   'run.noteOpen': '~**{rate}** users/sec for **{duration}s**',
   'run.noteClosed': '**{users}** virtual users · up to **{steps}** steps',
   'run.connLost': 'Connection lost while streaming progress.',
+  // Friendly headlines for the known "the run died before any traffic flowed"
+  // failure reasons (the raw backend reason is always shown beneath them).
+  'run.failLoginPrewarm': 'Login failed before the run started — check the login URL and credentials.',
+  'run.failBootstrapPrewarm': 'Account creation failed before the run started — check the signup URL and body.',
   'mode.local': 'local',
   'mode.distributed': 'distributed ({count} worker{plural})',
   'live.events': 'animating each request (≤{max} {unit})',
@@ -585,6 +589,7 @@ const en: Record<string, string> = {
   // Report links
   'report.viewHtml': 'View full HTML report',
   'report.compare': 'Compare with previous run',
+  'report.killReason': 'The run ended early',
 
   // Stats (StatsView)
   'stat.requests': 'Requests',
@@ -1161,6 +1166,10 @@ const ko: Record<string, string> = {
   'run.noteOpen': '약 초당 **{rate}**명씩 **{duration}초** 동안',
   'run.noteClosed': '가상 사용자 **{users}**명 · 최대 **{steps}**단계',
   'run.connLost': '진행 상황을 스트리밍하는 중 연결이 끊겼습니다.',
+  // "트래픽이 흐르기도 전에 실행이 죽은" 알려진 실패 사유의 친절한 헤드라인
+  // (원본 백엔드 사유는 항상 그 아래에 함께 표시됩니다).
+  'run.failLoginPrewarm': '실행이 시작되기 전에 로그인에 실패했습니다 — 로그인 URL과 자격 증명을 확인하세요.',
+  'run.failBootstrapPrewarm': '실행이 시작되기 전에 계정 생성에 실패했습니다 — 가입 URL과 본문을 확인하세요.',
   'mode.local': '로컬',
   'mode.distributed': '분산 (워커 {count}대)',
   'live.events': '요청마다 애니메이션 (≤{max} {unit})',
@@ -1183,6 +1192,7 @@ const ko: Record<string, string> = {
   // Report links
   'report.viewHtml': '전체 HTML 보고서 보기',
   'report.compare': '이전 실행과 비교',
+  'report.killReason': '실행이 일찍 종료되었습니다',
 
   // Stats (StatsView)
   'stat.requests': '요청 수',

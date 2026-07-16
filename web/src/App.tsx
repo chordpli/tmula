@@ -29,6 +29,7 @@ import {
   probeRun,
   reportHTMLURL,
   runDisabled,
+  runFailureHintKey,
   runIdFromQuery,
   shareTokenFromQuery,
   startRun,
@@ -49,6 +50,7 @@ import {
   type OutcomeSummary,
   type Report,
   type Stats,
+  type StreamFrame,
 } from './api'
 import {
   ADVANCED_AUTH_ENTRIES,
@@ -177,6 +179,11 @@ function Operator() {
   const [runId, setRunId] = useState<string>('')
   const [runMode, setRunMode] = useState<string>('')
   const [status, setStatus] = useState<string>('')
+  // runReason is the terminal frame's failure reason (SSE `reason`, mirroring the
+  // report's run.killReason): WHY a run died, e.g. "api: prewarm login token …".
+  // Kept as the raw backend string — the friendly line above it is derived via
+  // runFailureHintKey at render time so it follows the active language.
+  const [runReason, setRunReason] = useState<string>('')
   const [stats, setStats] = useState<Stats | null>(null)
   // outcome is the journey-outcome headline (completion/drop-off rates) the live
   // graph streams up while a traced run flows; it outlives the stream so the
@@ -264,6 +271,7 @@ function Operator() {
         } else {
           // Already terminal: converge straight on the post-run state the stream
           // path would have produced.
+          setRunReason(rep.run.killReason ?? '')
           setStats(rep.stats)
           setHistory((h) => (h.includes(id) ? h : [...h, id]))
           setReport(rep)
@@ -359,6 +367,7 @@ function Operator() {
 
   async function run() {
     setError('')
+    setRunReason('')
     setReport(null)
     setStats(null)
     setOutcome(null)
@@ -400,8 +409,12 @@ function Operator() {
     esRef.current = es
     es.onmessage = (ev) => {
       try {
-        const frame = JSON.parse(ev.data) as { status?: string; stats?: Stats }
+        const frame = JSON.parse(ev.data) as StreamFrame
         if (frame.status) setStatus(frame.status)
+        // The terminal frame carries WHY a run died (mirrors run.killReason) —
+        // e.g. a prewarm login failure. Keep it so the alert region can explain
+        // the failure instead of leaving a bare "failed" pill.
+        if (frame.reason) setRunReason(frame.reason)
         if (frame.stats) setStats(frame.stats)
         if (frame.status && frame.status !== 'running' && frame.status !== 'pending') {
           doneRef.current = true
@@ -821,6 +834,28 @@ function Operator() {
               <AlertIcon />
             </span>
             <span>{error}</span>
+          </div>
+        )}
+
+        {/* Failure reason (why the run died): the terminal SSE frame's `reason`.
+            Known prewarm failures get a friendly, translated headline (derived at
+            render time so it follows the language); the raw backend reason always
+            shows beneath so nothing is hidden. */}
+        {runReason && statusKind(status) === 'danger' && (
+          <div className="alert" role="alert">
+            <span className="alert__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>
+              {runFailureHintKey(runReason) ? (
+                <>
+                  <strong>{t(runFailureHintKey(runReason)!)}</strong>
+                  <span className="alert__sub">{runReason}</span>
+                </>
+              ) : (
+                runReason
+              )}
+            </span>
           </div>
         )}
 

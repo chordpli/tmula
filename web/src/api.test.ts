@@ -54,6 +54,7 @@ import {
   reportHTMLURL,
   requestTotal,
   runDisabled,
+  runFailureHintKey,
   runIdFromQuery,
   shareTokenFromQuery,
   terminalNodeIds,
@@ -63,6 +64,7 @@ import {
   type ExperimentForm,
   type RunSpec,
 } from './api'
+import { dict } from './i18n'
 
 // expParams unwraps the experiment params for assertions (experiment is typed
 // `unknown` on the wire so the UI never depends on its shape elsewhere).
@@ -1123,6 +1125,39 @@ describe('parseSSEData', () => {
     expect(parseSSEData(': comment')).toBeNull()
     expect(parseSSEData('data: {bad json')).toBeNull()
     expect(parseSSEData('event: ping')).toBeNull()
+  })
+
+  it('carries the terminal frame failure reason through', () => {
+    const frame = parseSSEData('data: {"status":"failed","reason":"api: prewarm login token: 401"}')
+    expect(frame?.status).toBe('failed')
+    expect(frame?.reason).toBe('api: prewarm login token: 401')
+  })
+})
+
+describe('runFailureHintKey', () => {
+  it('maps the prewarm-login failure onto the friendly login hint', () => {
+    expect(runFailureHintKey('api: prewarm login token: request "login" returned status 401')).toBe(
+      'run.failLoginPrewarm',
+    )
+  })
+
+  it('maps the prewarm-bootstrap failure onto the friendly signup hint', () => {
+    expect(runFailureHintKey('api: prewarm bootstrap accounts: signup step "signup" failed')).toBe(
+      'run.failBootstrapPrewarm',
+    )
+  })
+
+  it('returns null for unknown or empty reasons (only the raw reason is shown)', () => {
+    expect(runFailureHintKey('worker 2 disconnected')).toBeNull()
+    expect(runFailureHintKey('')).toBeNull()
+    expect(runFailureHintKey(undefined)).toBeNull()
+  })
+
+  it('has en and ko dictionary lines for every hint it can return', () => {
+    for (const key of ['run.failLoginPrewarm', 'run.failBootstrapPrewarm']) {
+      expect(dict.en[key]).toBeTruthy()
+      expect(dict.ko[key]).toBeTruthy()
+    }
   })
 })
 
