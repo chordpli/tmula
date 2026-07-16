@@ -1,6 +1,36 @@
 // API helpers for the tmula control plane. Pure functions live here (and are
 // unit-tested) so the React component stays thin.
 
+import { dict, translate } from './i18n'
+
+// FormError is an Error that carries an i18n key (+ vars) alongside its message,
+// so the finite set of credential-parser / pattern-generator / auth-builder
+// errors can be rendered in the operator's language instead of surfacing as
+// hardcoded English in the ko UI. The message is the ENGLISH rendering of the
+// key, byte-identical to what these sites always threw, so non-UI callers
+// (tests, logs) read exactly what they always did. UI sites use localizeError.
+export class FormError extends Error {
+  key: string
+  vars?: Record<string, string | number>
+  constructor(key: string, vars?: Record<string, string | number>) {
+    super(translate(dict, 'en', key, vars))
+    this.name = 'FormError'
+    this.key = key
+    this.vars = vars
+  }
+}
+
+// localizeError renders an error for the UI: a FormError re-translates through
+// its i18n key with the ACTIVE language's t; anything else falls back to its
+// message (server errors are data and shown verbatim).
+export function localizeError(
+  e: unknown,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (e instanceof FormError) return t(e.key, e.vars)
+  return e instanceof Error ? e.message : String(e)
+}
+
 export interface ExperimentForm {
   baseUrl: string
   allowlist: string // comma-separated
@@ -528,7 +558,7 @@ export function parseCredentials(format: CredFormat, body: string): CredentialEn
     case 'tokens':
       return parseCredsTokens(body)
     default:
-      throw new Error(`unknown credential format "${format}"`)
+      throw new FormError('err.credFormatUnknown', { format })
   }
 }
 
@@ -542,20 +572,20 @@ function parseCredsCSV(body: string): CredentialEntry[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map(splitCSVRow)
-  if (rows.length === 0) throw new Error('CSV credential text is empty')
+  if (rows.length === 0) throw new FormError('err.credCsvEmpty')
   const header = rows[0].map((h) => h.trim())
   const subjectIdx = header.indexOf('subject')
   const tokenIdx = header.indexOf('token')
-  if (tokenIdx < 0) throw new Error('CSV credentials need a "token" column header')
+  if (tokenIdx < 0) throw new FormError('err.credCsvNoTokenCol')
   const out: CredentialEntry[] = []
   for (const rec of rows.slice(1)) {
     if (tokenIdx >= rec.length || !rec[tokenIdx].trim()) {
-      throw new Error('a CSV row is missing its token column')
+      throw new FormError('err.credCsvRowMissingToken')
     }
     const subject = subjectIdx >= 0 && subjectIdx < rec.length ? rec[subjectIdx] : ''
     out.push(subject ? { subject, token: rec[tokenIdx] } : { token: rec[tokenIdx] })
   }
-  if (out.length === 0) throw new Error('CSV credentials have no data rows (need at least one credential)')
+  if (out.length === 0) throw new FormError('err.credCsvNoRows')
   return out
 }
 
@@ -604,16 +634,16 @@ function parseCredsJSONL(body: string): CredentialEntry[] {
     try {
       parsed = JSON.parse(line)
     } catch {
-      throw new Error('a JSONL credential line is not valid JSON')
+      throw new FormError('err.credJsonlBadJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('each JSONL credential line must be a {subject, token} object')
+      throw new FormError('err.credJsonlShape')
     }
     const { subject, token } = parsed as { subject?: unknown; token?: unknown }
-    if (typeof token !== 'string' || !token) throw new Error('a JSONL credential is missing its token')
+    if (typeof token !== 'string' || !token) throw new FormError('err.credJsonlMissingToken')
     out.push(subject ? { subject: String(subject), token } : { token })
   }
-  if (out.length === 0) throw new Error('JSONL credentials have no rows (need at least one credential)')
+  if (out.length === 0) throw new FormError('err.credJsonlNoRows')
   return out
 }
 
@@ -629,7 +659,7 @@ function parseCredsTokens(body: string): CredentialEntry[] {
     out.push({ token: line })
   }
   if (out.length === 0) {
-    throw new Error('token credentials have no non-blank line (need at least one credential)')
+    throw new FormError('err.credTokensEmpty')
   }
   return out
 }
@@ -656,7 +686,7 @@ export function parseLoginCredentials(format: LoginCredFormat, body: string): Cr
     case 'jsonl':
       return parseLoginCredsJSONL(body)
     default:
-      throw new Error(`unknown login credential format "${format}"`)
+      throw new FormError('err.loginCredFormatUnknown', { format })
   }
 }
 
@@ -669,23 +699,23 @@ function parseLoginCredsCSV(body: string): CredentialEntry[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map(splitCSVRow)
-  if (rows.length === 0) throw new Error('login credential text is empty')
+  if (rows.length === 0) throw new FormError('err.loginCredEmpty')
   const header = rows[0].map((h) => h.trim())
   const userIdx = header.indexOf('username')
   const passIdx = header.indexOf('password')
   if (userIdx < 0 || passIdx < 0) {
-    throw new Error('login credentials need a header with "username" and "password" columns')
+    throw new FormError('err.loginCredCsvHeader')
   }
   const out: CredentialEntry[] = []
   for (const rec of rows.slice(1)) {
     const username = userIdx < rec.length ? rec[userIdx].trim() : ''
     const password = passIdx < rec.length ? rec[passIdx] : ''
-    if (!username) throw new Error('a login credential row is missing its username')
-    if (!password) throw new Error('a login credential row is missing its password')
+    if (!username) throw new FormError('err.loginCredRowMissingUsername')
+    if (!password) throw new FormError('err.loginCredRowMissingPassword')
     out.push({ subject: username, token: password })
   }
   if (out.length === 0) {
-    throw new Error('login credentials have no data rows (need at least one username,password)')
+    throw new FormError('err.loginCredCsvNoRows')
   }
   return out
 }
@@ -701,22 +731,22 @@ function parseLoginCredsJSONL(body: string): CredentialEntry[] {
     try {
       parsed = JSON.parse(line)
     } catch {
-      throw new Error('a login credential line is not valid JSON')
+      throw new FormError('err.loginCredJsonlBadJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('each login credential line must be a {username, password} object')
+      throw new FormError('err.loginCredJsonlShape')
     }
     const { username, password } = parsed as { username?: unknown; password?: unknown }
     if (typeof username !== 'string' || !username) {
-      throw new Error('a login credential is missing its username')
+      throw new FormError('err.loginCredJsonlMissingUsername')
     }
     if (typeof password !== 'string' || !password) {
-      throw new Error('a login credential is missing its password')
+      throw new FormError('err.loginCredJsonlMissingPassword')
     }
     out.push({ subject: username, token: password })
   }
   if (out.length === 0) {
-    throw new Error('login credentials have no rows (need at least one username/password)')
+    throw new FormError('err.loginCredJsonlNoRows')
   }
   return out
 }
@@ -903,13 +933,11 @@ export function generateCredentialRows(
   count: number,
   format: 'csv' | 'tokens',
 ): string {
-  if (!(count > 0)) throw new Error('pattern needs a positive count')
+  if (!(count > 0)) throw new FormError('err.patternCount')
   if (count > MAX_WEB_PATTERN_ROWS) {
-    throw new Error(
-      `pattern count ${count} exceeds the browser limit of ${MAX_WEB_PATTERN_ROWS} — use the CLI scenario file's usersPattern for a larger pool`,
-    )
+    throw new FormError('err.patternOverCap', { count, max: MAX_WEB_PATTERN_ROWS })
   }
-  if (!tokenTemplate.trim()) throw new Error('pattern needs a token (or password) template')
+  if (!tokenTemplate.trim()) throw new FormError('err.patternTokenEmpty')
   const render = (tmpl: string, i: number) => tmpl.replace(/\{\{\.userIndex\}\}/g, String(i))
   const lines: string[] = []
   if (format === 'tokens') {
@@ -953,7 +981,7 @@ const LOGIN_TEMPLATE_ID = 't_login'
 export function simpleLoginFlow(form: ExperimentForm): LoginFlowSpec {
   const method = form.loginUrlMethod.trim() || 'POST'
   const path = form.loginUrlPath.trim()
-  if (!path) throw new Error('login needs a request path (e.g. /login)')
+  if (!path) throw new FormError('err.loginPathMissing')
   const body = applyReplaceMe(form.loginBodyTemplate, form.replaceMeValues)
   const template: Record<string, unknown> = { method, path }
   if (body.trim()) template.payloadTemplate = body
@@ -980,7 +1008,7 @@ export function simpleLoginFlow(form: ExperimentForm): LoginFlowSpec {
 export function simpleSignupFlow(form: ExperimentForm): SignupFlowSpec {
   const method = form.signupUrlMethod.trim() || 'POST'
   const path = form.signupUrlPath.trim()
-  if (!path) throw new Error('signup needs a request path (e.g. /register)')
+  if (!path) throw new FormError('err.signupPathMissing')
   const body = applyReplaceMe(form.signupBodyTemplate, form.replaceMeValues)
   const signupStep: SignupStepSpec = { id: 'signup', method, path }
   if (body.trim()) signupStep.body = body
@@ -1352,13 +1380,13 @@ export function buildMintSpec(form: ExperimentForm): MintSpec {
   const env = form.mintKeyEnv.trim()
   const file = form.mintKeyFile.trim()
   if (!env && !file) {
-    throw new Error('mint needs a signing-key reference — set an environment variable or a file path')
+    throw new FormError('err.mintKeyMissing')
   }
   if (env && file) {
-    throw new Error('mint takes either a key environment variable or a key file, not both')
+    throw new FormError('err.mintKeyBoth')
   }
   if (!(form.mintTtlSeconds > 0)) {
-    throw new Error('mint needs a token lifetime (ttl) greater than zero seconds')
+    throw new FormError('err.mintTtl')
   }
   const mint: MintSpec = {
     alg: form.mintAlg,
@@ -1375,10 +1403,10 @@ export function buildMintSpec(form: ExperimentForm): MintSpec {
     try {
       parsed = JSON.parse(claimsText)
     } catch {
-      throw new Error('mint claims must be a JSON object of string values')
+      throw new FormError('err.mintClaimsJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('mint claims must be a JSON object (e.g. {"role":"tester"})')
+      throw new FormError('err.mintClaimsObject')
     }
     const claims: Record<string, string> = {}
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -1413,17 +1441,17 @@ const CRED_POOL_ID = 'web-pool'
 // exec stays minimal. maxOutputBytes is left to the backend default.
 export function buildExecSpec(form: ExperimentForm): ExecSpec {
   if (!form.execConfirmed) {
-    throw new Error('exec runs a local command per virtual user — confirm you allow it before running')
+    throw new FormError('err.execUnconfirmed')
   }
   const command = form.execCommandText
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
   if (command.length === 0) {
-    throw new Error('exec needs a command (argv) — one element per line, the first is the program')
+    throw new FormError('err.execCommandEmpty')
   }
   if (!(form.execTimeoutSeconds > 0)) {
-    throw new Error('exec needs a per-invocation timeout greater than zero seconds')
+    throw new FormError('err.execTimeout')
   }
   const exec: ExecSpec = {
     command,
@@ -1435,7 +1463,7 @@ export function buildExecSpec(form: ExperimentForm): ExecSpec {
     if (!line) continue
     const eq = line.indexOf('=')
     if (eq <= 0) {
-      throw new Error(`exec env must be KEY=VALUE lines (got ${JSON.stringify(line)})`)
+      throw new FormError('err.execEnvLine', { line: JSON.stringify(line) })
     }
     env[line.slice(0, eq).trim()] = line.slice(eq + 1)
   }
@@ -1502,9 +1530,7 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
     }
     case 'bootstrap': {
       if (!form.authBootstrapConfirmed) {
-        throw new Error(
-          'confirm this targets a non-production system before running bootstrap (it creates/deletes real accounts)',
-        )
+        throw new FormError('err.bootstrapUnconfirmed')
       }
       // The simple mini-form compiles a method+path+body into the single-step signup
       // flow (with optional teardown). Advanced authors the raw steps array.

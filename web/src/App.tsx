@@ -19,6 +19,7 @@ import {
   killRun,
   MAX_TRACE_USERS,
   MAX_WEB_PATTERN_ROWS,
+  localizeError,
   mintManagedIdPAdvisory,
   oauth2GuideCanCompileOver,
   openIdConnectDiscoveryUrl,
@@ -404,7 +405,7 @@ function Operator() {
       listen(id)
     } catch (e) {
       setStatus('')
-      setError(String(e instanceof Error ? e.message : e))
+      setError(localizeError(e, t))
     }
   }
 
@@ -1512,7 +1513,7 @@ function AuthPreflight({ form, kind }: { form: ExperimentForm; kind: 'login' | '
       const spec = buildRunSpec(form)
       setResult(await preflightAuth(spec))
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(localizeError(e, t))
     } finally {
       setBusy(false)
     }
@@ -1585,7 +1586,7 @@ function AuthPoolFields({
     try {
       count = parseCredentials(form.authPoolFormat, form.authPoolText).length
     } catch (e) {
-      parseError = e instanceof Error ? e.message : String(e)
+      parseError = localizeError(e, t)
     }
   }
 
@@ -1699,7 +1700,7 @@ function PatternGenerator({
       onGenerated(text)
       setNote(t('auth.pattern.generated', { count }))
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(localizeError(e, t))
     }
   }
 
@@ -1994,7 +1995,7 @@ function AuthLoginCredList({
     try {
       count = parseLoginCredentials(form.loginCredFormat, form.loginCredText).length
     } catch (e) {
-      parseError = e instanceof Error ? e.message : String(e)
+      parseError = localizeError(e, t)
     }
   }
 

@@ -18,6 +18,7 @@ import {
   compareURL,
   formatCount,
   formFromRunSpec,
+  FormError,
   generateCredentialRows,
   MAX_WEB_PATTERN_ROWS,
   getExperimentSpec,
@@ -41,6 +42,7 @@ import {
   latencyHeatmapURL,
   layoutGraph,
   lerpColor,
+  localizeError,
   outcomeRates,
   outcomeSummary,
   parseCredentials,
@@ -67,7 +69,7 @@ import {
   type ExperimentForm,
   type RunSpec,
 } from './api'
-import { dict } from './i18n'
+import { dict, translate } from './i18n'
 
 // expParams unwraps the experiment params for assertions (experiment is typed
 // `unknown` on the wire so the UI never depends on its shape elsewhere).
@@ -2272,6 +2274,78 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
   })
 })
+
+describe('FormError / localizeError (i18n of api error messages)', () => {
+  const tko = (key: string, vars?: Record<string, string | number>) => translate(dict, 'ko', key, vars)
+
+  it('parser errors carry an i18n key and keep the exact English message', () => {
+    let caught: unknown
+    try {
+      parseCredentials('csv', 'subject,secret\nalice,tok')
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    const fe = caught as FormError
+    expect(fe.message).toBe('CSV credentials need a "token" column header')
+    expect(fe.key).toBe('err.credCsvNoTokenCol')
+    // The ko rendering comes from the dictionary, not the stored message.
+    expect(localizeError(fe, tko)).toBe(dict.ko['err.credCsvNoTokenCol'])
+    expect(localizeError(fe, tko)).not.toBe(fe.message)
+  })
+
+  it('the pattern over-cap error localizes with its count and the real cap', () => {
+    let caught: unknown
+    try {
+      generateCredentialRows('u{{.userIndex}}', 'pw', MAX_WEB_PATTERN_ROWS + 1, 'csv')
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    const fe = caught as FormError
+    expect(fe.message).toContain(String(MAX_WEB_PATTERN_ROWS + 1))
+    expect(fe.message).toContain(String(MAX_WEB_PATTERN_ROWS))
+    const ko = localizeError(fe, tko)
+    expect(ko).toContain(String(MAX_WEB_PATTERN_ROWS))
+    expect(ko).toContain('usersPattern')
+  })
+
+  it('builder errors (mint / exec / bootstrap) are FormErrors too', () => {
+    const base: ExperimentForm = {
+      ...({} as ExperimentForm),
+      ...AUTH_FORM_DEFAULTS,
+      authMode: 'mint',
+    } as ExperimentForm
+    let caught: unknown
+    try {
+      buildMintSpecProbe(base)
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    expect((caught as FormError).key).toBe('err.mintKeyMissing')
+    expect(localizeError(caught, tko)).toBe(dict.ko['err.mintKeyMissing'])
+  })
+
+  it('localizeError falls back to the raw message for non-Form errors', () => {
+    expect(localizeError(new Error('server said no'), tko)).toBe('server said no')
+    expect(localizeError('plain string', tko)).toBe('plain string')
+  })
+
+  it('every err.* key exists in both dictionaries', () => {
+    const enErr = Object.keys(dict.en).filter((k) => k.startsWith('err.'))
+    expect(enErr.length).toBeGreaterThan(20)
+    for (const key of enErr) {
+      expect(dict.ko[key], `ko ${key}`).toBeTruthy()
+    }
+  })
+})
+
+// buildMintSpecProbe just calls buildAuth on a mint form so the builder-error test
+// exercises the same path the UI does.
+function buildMintSpecProbe(form: ExperimentForm) {
+  return buildAuth(form)
+}
 
 describe('preflightAuth', () => {
   afterEach(() => vi.unstubAllGlobals())
