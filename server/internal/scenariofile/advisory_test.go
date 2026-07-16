@@ -65,8 +65,8 @@ func TestAuthSourceMaxBytesOverride(t *testing.T) {
 		Auth:   &Auth{Strategy: "pool", Source: &AuthSource{File: "pool.tokens", Format: "tokens", MaxBytes: 3}},
 	}
 	_, err := ExpandFrom(s, dir)
-	if err == nil || !strings.Contains(err.Error(), "exceeds the 3-byte limit") {
-		t.Fatalf("err = %v, want the 3-byte cap error", err)
+	if err == nil || !strings.Contains(err.Error(), "exceeds the 3 B limit") {
+		t.Fatalf("err = %v, want the 3 B cap error", err)
 	}
 
 	// A generous override loads fine.

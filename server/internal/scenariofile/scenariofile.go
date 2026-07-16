@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -674,6 +675,13 @@ func nodeExists(g domain.ScenarioGraph, id string) bool {
 // still-unresolved Source never reaches the run path. Either way the domain type
 // keeps the secret out of any serialization.
 func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+	// An importer-scaffolded auth block ships REPLACE_ME_* placeholders where a real
+	// secret must go. Reject a still-unfilled placeholder HERE — at expand time, before
+	// a run boots — naming the exact location, so a scenario never silently authenticates
+	// with the literal "REPLACE_ME_PASSWORD" and fails deep in the login flow instead.
+	if err := checkNoReplaceMe(a); err != nil {
+		return domain.CredentialPool{}, nil, err
+	}
 	strategy := domain.CredentialStrategy(a.Strategy)
 	if a.Strategy == "" {
 		strategy = domain.CredPool
@@ -696,6 +704,78 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 	default:
 		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, %q with a login flow, %q with a signup flow, %q to self-issue a JWT, or %q to mint a token from a command)", strategy, domain.CredPool, domain.CredLogin, domain.CredBootstrapSignup, domain.CredMint, domain.CredExec)
 	}
+}
+
+// replaceMePlaceholderRE matches an unfilled importer placeholder — the literal
+// REPLACE_ME plus any trailing SCREAMING_SNAKE suffix (REPLACE_ME_PASSWORD,
+// REPLACE_ME_TOKEN, …) — so the guard can name the exact token an operator forgot
+// to fill instead of a bare "REPLACE_ME".
+var replaceMePlaceholderRE = regexp.MustCompile(`REPLACE_ME[A-Z0-9_]*`)
+
+// firstReplaceMe returns the first REPLACE_ME* placeholder token in s, or "".
+func firstReplaceMe(s string) string { return replaceMePlaceholderRE.FindString(s) }
+
+// firstReplaceMeInSteps scans each step's body and header values for an unfilled
+// placeholder, returning the owning step id and the exact token found (or "","").
+func firstReplaceMeInSteps(steps []Step) (stepID, token string) {
+	for _, st := range steps {
+		if tok := firstReplaceMe(st.Body); tok != "" {
+			return st.ID, tok
+		}
+		for _, hv := range st.Headers {
+			if tok := firstReplaceMe(hv); tok != "" {
+				return st.ID, tok
+			}
+		}
+	}
+	return "", ""
+}
+
+// checkNoReplaceMe rejects an auth block that still carries an importer REPLACE_ME_*
+// placeholder anywhere a secret belongs — inline pool tokens, a usersPattern token, a
+// login/signup flow body or header, or an exec command argv/env value. The error names
+// the exact location and the placeholder token, so an operator sees precisely what to
+// fill (or that --auth-source can supply the credential without editing the file). The
+// non-secret key REFERENCES (auth.mint.key, auth.source) are intentionally NOT scanned —
+// a REPLACE_ME there is a reference name, not a leaked-through secret placeholder.
+func checkNoReplaceMe(a Auth) error {
+	const hint = " — fill it in or pass --auth-source"
+	for i, u := range a.Users {
+		if tok := firstReplaceMe(u.Token); tok != "" {
+			return fmt.Errorf("scenariofile: auth.users[%d].token still contains %s%s", i, tok, hint)
+		}
+		if tok := firstReplaceMe(u.Subject); tok != "" {
+			return fmt.Errorf("scenariofile: auth.users[%d].subject still contains %s%s", i, tok, hint)
+		}
+	}
+	if a.UsersPattern != nil {
+		if tok := firstReplaceMe(a.UsersPattern.Token); tok != "" {
+			return fmt.Errorf("scenariofile: auth.usersPattern.token still contains %s%s", tok, hint)
+		}
+	}
+	if a.Login != nil {
+		if id, tok := firstReplaceMeInSteps(a.Login.Flow); tok != "" {
+			return fmt.Errorf("scenariofile: auth.login.flow step %q still contains %s%s", id, tok, hint)
+		}
+	}
+	if a.Signup != nil {
+		if id, tok := firstReplaceMeInSteps(a.Signup.Flow); tok != "" {
+			return fmt.Errorf("scenariofile: auth.signup.flow step %q still contains %s%s", id, tok, hint)
+		}
+	}
+	if a.Exec != nil {
+		for _, arg := range a.Exec.Command {
+			if tok := firstReplaceMe(arg); tok != "" {
+				return fmt.Errorf("scenariofile: auth.exec.command still contains %s%s", tok, hint)
+			}
+		}
+		for k, v := range a.Exec.Env {
+			if tok := firstReplaceMe(v); tok != "" {
+				return fmt.Errorf("scenariofile: auth.exec.env[%q] still contains %s%s", k, tok, hint)
+			}
+		}
+	}
+	return nil
 }
 
 // buildExecCredentials maps the exec authoring block onto an exec pool carrying a

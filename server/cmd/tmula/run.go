@@ -159,6 +159,14 @@ func runScenario(args []string) error {
 	if file != "" {
 		scenarioDir = filepath.Dir(file)
 	}
+	// --auth-source supplies the whole credential pool from the flag, so the scenario's
+	// own auth block is ignored entirely. Drop it BEFORE Expand: an importer-scaffolded
+	// scenario still carries REPLACE_ME_* placeholders that Expand would reject, and the
+	// operator asked to supply the credential via the flag instead of editing them — so
+	// the placeholder must not fail the expand the flag was meant to sidestep.
+	if *authSource != "" {
+		sc.Auth = nil
+	}
 	// Against a remote --engine, a source-backed pool ships its reference-only
 	// SourceRef (the engine's workers resolve it locally) instead of being read
 	// into entries here: only the reference crosses the wire, and the CLI need not
