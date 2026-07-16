@@ -72,7 +72,7 @@ import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
 import ReportView, { OutcomeView, StatsView } from './ReportView'
-import { doctorForm, runBlockers, type DoctorIssue } from './scenarioDoctor'
+import { authDoctorIssues, doctorForm, runBlockers, type DoctorIssue } from './scenarioDoctor'
 import Viewer from './Viewer'
 
 // stringify renders a preset's graph/templates the same way the Scenario card's
@@ -805,7 +805,13 @@ function Operator() {
         </section>
 
         {/* ---- Auth (P5 / P7) ---- */}
-        <AuthCard form={form} set={set} imported={authImported} advisories={authAdvisories} />
+        <AuthCard
+          form={form}
+          set={set}
+          imported={authImported}
+          advisories={authAdvisories}
+          issues={doctorIssues}
+        />
 
         {/* ---- Run ---- */}
         <section className="card">
@@ -1300,13 +1306,19 @@ function AuthCard({
   set,
   imported,
   advisories,
+  issues,
 }: {
   form: ExperimentForm
   set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
   imported: '' | AuthMode
   advisories: AuthAdvisory[]
+  // The full doctor issue list; the card echoes only the auth-scoped ones so a
+  // misconfiguration is visible NEXT TO the fields that caused it, not just in
+  // the far-away Scenario card.
+  issues: DoctorIssue[]
 }) {
   const { t } = useI18n()
+  const authIssues = authDoctorIssues(issues)
   // The managed-IdP mint footgun: when the imported spec's token issuer holds the
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
@@ -1374,6 +1386,24 @@ function AuthCard({
         </details>
 
         {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
+
+        {/* Auth-scoped doctor issues, echoed here next to the panel that caused
+            them (the Scenario card's doctor panel still shows the full list). */}
+        {authIssues.length > 0 && (
+          <div
+            className={`doctor doctor--${authIssues.some((i) => i.severity === 'error') ? 'error' : 'warning'}`}
+            role="status"
+          >
+            <ul className="doctor__list">
+              {authIssues.map((item, i) => (
+                <li key={`${item.code}-${i}`} className={`doctor__item doctor__item--${item.severity}`}>
+                  <span className="doctor__severity">{t(`doctor.severity.${item.severity}`)}</span>
+                  <span>{t(item.messageKey, item.vars)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
         {selected === 'oauth2' && (

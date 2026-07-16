@@ -55,6 +55,14 @@ export function runBlockers(issues: DoctorIssue[]): DoctorIssue[] {
   return issues.filter((i) => i.severity === 'error')
 }
 
+// authDoctorIssues returns the doctor issues that belong to the Auth card — every
+// auth check's code starts with "auth-" by convention — so the card can echo them
+// right next to the panel that caused them. The Scenario card's doctor panel
+// keeps showing the full list; this is an echo, not a move.
+export function authDoctorIssues(issues: DoctorIssue[]): DoctorIssue[] {
+  return issues.filter((i) => i.code.startsWith('auth-'))
+}
+
 export function doctorForm(form: ExperimentForm): DoctorIssue[] {
   const issues: DoctorIssue[] = []
   const baseHost = hostFromBaseUrl(form.baseUrl)

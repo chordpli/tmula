@@ -5,7 +5,7 @@ import {
   OAUTH2_GUIDE_DEFAULTS,
   type ExperimentForm,
 } from './api'
-import { doctorForm, runBlockers } from './scenarioDoctor'
+import { authDoctorIssues, doctorForm, runBlockers } from './scenarioDoctor'
 import { dict, translate } from './i18n'
 
 const form: ExperimentForm = {
@@ -377,6 +377,24 @@ describe('doctorForm', () => {
       const withWarning = { ...form, segmentsJSON: '[{"name":"buyer","weight":1}]' }
       expect(doctorForm(withWarning).some((i) => i.severity === 'warning')).toBe(true)
       expect(runBlockers(doctorForm(withWarning))).toEqual([])
+    })
+
+    it('authDoctorIssues echoes exactly the auth-scoped issues into the Auth card', () => {
+      const broken = {
+        ...form,
+        baseUrl: 'http://other-host:9000', // scenario-scoped error (allowlist)
+        authMode: 'pool' as const, // auth-scoped error (empty pool) + token-wiring warning
+      }
+      const all = doctorForm(broken)
+      const auth = authDoctorIssues(all)
+      const authCodes = auth.map((i) => i.code)
+      expect(authCodes).toContain('auth-pool-empty')
+      expect(authCodes).toContain('auth-token-unreferenced')
+      expect(authCodes).not.toContain('allowlist-missing-host')
+      expect(auth.every((i) => i.code.startsWith('auth-'))).toBe(true)
+      // It is an echo, not a move: the full list still carries both scopes.
+      expect(all.map((i) => i.code)).toContain('allowlist-missing-host')
+      expect(all.map((i) => i.code)).toContain('auth-pool-empty')
     })
 
     it('re-localizes through the i18n key, not a stored string', () => {
