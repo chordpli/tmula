@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/chordpli/tmula/server/internal/api"
+	"github.com/chordpli/tmula/server/internal/domain"
 )
 
 // fakeEngine emulates the slice of the control-plane API that driveRun calls
@@ -761,5 +766,48 @@ func TestRunInlinePoolStillRejectedAgainstEngine(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "credential pool is not supported against a remote") {
 		t.Errorf("rejection should explain the secret cannot cross the wire, got: %v", err)
+	}
+}
+
+// TestEnrichTimeoutErrForPrewarmingAuth pins the timeout-hint shape: when the run
+// deadline fires on a login/bootstrap scenario, the error names the account count, the
+// 16-way prewarm bound, and --timeout. A non-timeout error, or a non-prewarming
+// strategy, passes through unchanged.
+func TestEnrichTimeoutErrForPrewarmingAuth(t *testing.T) {
+	deadCtx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	time.Sleep(time.Millisecond) // ensure the deadline has passed
+
+	loginSpec := api.RunSpec{
+		CredentialPool: &domain.CredentialPool{ID: "p", Strategy: domain.CredLogin},
+		UserCount:      5000,
+	}
+	base := fmt.Errorf("run did not finish within the timeout")
+	got := enrichTimeoutErr(deadCtx, base, loginSpec, 30*time.Second)
+	for _, needle := range []string{"5000 account", "16 at a time", "--timeout", "30s", "login"} {
+		if !strings.Contains(got.Error(), needle) {
+			t.Errorf("enriched timeout should mention %q, got %q", needle, got.Error())
+		}
+	}
+
+	// bootstrap-signup also prewarms — it gets the hint too.
+	bootSpec := api.RunSpec{
+		CredentialPool: &domain.CredentialPool{ID: "p", Strategy: domain.CredBootstrapSignup},
+		UserCount:      200,
+	}
+	if got := enrichTimeoutErr(deadCtx, base, bootSpec, time.Minute); !strings.Contains(got.Error(), "200 account") {
+		t.Errorf("bootstrap timeout should name the account count, got %q", got.Error())
+	}
+
+	// A non-timeout error (ctx not expired) is not enriched.
+	liveCtx := context.Background()
+	if got := enrichTimeoutErr(liveCtx, base, loginSpec, time.Minute); got.Error() != base.Error() {
+		t.Errorf("a non-timeout error must pass through unchanged, got %q", got.Error())
+	}
+
+	// A non-prewarming strategy (pool) is not enriched even on timeout.
+	poolSpec := api.RunSpec{CredentialPool: &domain.CredentialPool{ID: "p", Strategy: domain.CredPool}, UserCount: 100}
+	if got := enrichTimeoutErr(deadCtx, base, poolSpec, time.Minute); got.Error() != base.Error() {
+		t.Errorf("a pool run should not get the prewarm timeout hint, got %q", got.Error())
 	}
 }

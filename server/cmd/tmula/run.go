@@ -240,7 +240,7 @@ func runScenario(args []string) error {
 			defer stop()
 			report, err = driveRun(ctx, base, spec)
 			if err != nil {
-				return err
+				return enrichTimeoutErr(ctx, err, spec, *timeout)
 			}
 		} else {
 			srv := api.NewServer(load.NewRESTAdapter(30*time.Second), api.WithAllowExec(*allowExec))
@@ -251,7 +251,7 @@ func runScenario(args []string) error {
 			}()
 			report, err = driveRunInProcess(ctx, srv, spec)
 			if err != nil {
-				return err
+				return enrichTimeoutErr(ctx, err, spec, *timeout)
 			}
 		}
 	} else {
@@ -267,7 +267,7 @@ func runScenario(args []string) error {
 		}
 		report, err = driveRun(ctx, *engine, spec)
 		if err != nil {
-			return err
+			return enrichTimeoutErr(ctx, err, spec, *timeout)
 		}
 	}
 	if *asJSON {
@@ -395,6 +395,49 @@ func buildScenario(file, target, get, post string) (scenariofile.Scenario, error
 		sc.Target = target
 	}
 	return sc, nil
+}
+
+// loginPrewarmConcurrencyBound mirrors the engine's login/bootstrap prewarm cap
+// (api.loginMaxPrewarmConcurrency / bootstrapMaxConcurrency = 16) so the CLI's timeout
+// hint names the same bound the server enforces. It is a copy, not an import, to keep the
+// CLI decoupled — the two must stay in step (both are "16 concurrent to protect the IdP").
+const loginPrewarmConcurrencyBound = 16
+
+// enrichTimeoutErr rewrites a run-timeout error into an actionable one WHEN the deadline
+// actually fired AND the scenario uses a prewarming auth strategy (login/bootstrap-signup):
+// those strategies acquire one credential per virtual user up front — bounded to 16 at a
+// time to protect the IdP/signup endpoint — so a large account pool can spend the whole
+// budget priming before any load is generated. The enriched message names the account
+// count, the 16-way bound, and the --timeout flag to raise. Any non-timeout error, or a
+// non-prewarming strategy, passes through unchanged.
+func enrichTimeoutErr(ctx context.Context, err error, spec api.RunSpec, timeout time.Duration) error {
+	if err == nil || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return err
+	}
+	n, name, ok := prewarmInfo(spec)
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%w — the %q strategy prewarms one credential per virtual user (%d account(s)) before any load, at most %d at a time to protect the auth endpoint, which can consume the whole run budget; raise --timeout (currently %s)",
+		err, name, n, loginPrewarmConcurrencyBound, timeout)
+}
+
+// prewarmInfo reports the account count and strategy name for a scenario that prewarms
+// credentials up front (login or bootstrap-signup), or ok=false for any strategy that does
+// not (pool/mint/exec acquire lazily or need no prewarm). The count is the virtual-user
+// pool size — one credential is primed per user.
+func prewarmInfo(spec api.RunSpec) (count int, name string, ok bool) {
+	if spec.CredentialPool == nil {
+		return 0, "", false
+	}
+	switch spec.CredentialPool.Strategy {
+	case domain.CredLogin:
+		return spec.PoolSize(), string(domain.CredLogin), true
+	case domain.CredBootstrapSignup:
+		return spec.PoolSize(), string(domain.CredBootstrapSignup), true
+	default:
+		return 0, "", false
+	}
 }
 
 // warnMintManagedIdP prints a stderr warning when a mint run coexists with a

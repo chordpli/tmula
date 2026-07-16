@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // prewarmAcquire provisions/authenticates the credential for one index. It is the
@@ -28,12 +31,20 @@ func prewarmBounded(ctx context.Context, n, concurrency int, acquire prewarmAcqu
 	}
 	sem := make(chan struct{}, concurrency)
 	var (
-		wg       sync.WaitGroup
-		errOnce  sync.Once
-		firstErr error
+		wg        sync.WaitGroup
+		errOnce   sync.Once
+		firstErr  error
+		completed int64
 	)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// Progress cadence: log roughly every 10% of the burst (never per-credential),
+	// so a large prewarm (hundreds of thousands of accounts) shows it is making
+	// headway instead of looking hung. A small prewarm (< progressDecile) logs no
+	// progress — it completes near-instantly. The log carries only COUNTS and a rate,
+	// never a token value.
+	step := int64(n) / prewarmProgressDeciles
+	start := time.Now()
 	for i := 0; i < n; i++ {
 		if ctx.Err() != nil {
 			break
@@ -53,11 +64,36 @@ func prewarmBounded(ctx context.Context, n, concurrency int, acquire prewarmAcqu
 					firstErr = err
 					cancel() // stop the rest of the burst on the first failure
 				})
+				return
 			}
+			logPrewarmProgress(atomic.AddInt64(&completed, 1), int64(n), step, start)
 		}(i)
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// prewarmProgressDeciles sets the progress cadence: a burst is logged at each ~1/10th
+// of its total (plus completion). A prewarm smaller than this logs no progress.
+const prewarmProgressDeciles = 10
+
+// logPrewarmProgress emits a single slog.Info line at each ~10% boundary of a prewarm
+// burst (and at completion), carrying the completed count, the total, and the effective
+// acquisition rate. It NEVER logs a token or credential value — only counts and a rate —
+// so the progress trail is safe. A step of 0 (a burst too small to have deciles) logs
+// nothing.
+func logPrewarmProgress(done, total, step int64, start time.Time) {
+	if step < 1 {
+		return
+	}
+	if done%step != 0 && done != total {
+		return
+	}
+	rate := 0.0
+	if elapsed := time.Since(start).Seconds(); elapsed > 0 {
+		rate = float64(done) / elapsed
+	}
+	slog.Info("auth prewarm progress", "acquired", done, "total", total, "perSec", int(rate))
 }
 
 // prewarmConcurrencyFor resolves the prewarm burst width from a rate cap:

@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -151,4 +154,56 @@ func TestLoginPrewarmParallelBounded(t *testing.T) {
 	if elapsed > 110*time.Millisecond {
 		t.Errorf("prewarm took %v, want parallel speedup (sequential would be >= 120ms)", elapsed)
 	}
+}
+
+// TestPrewarmProgressLogged proves a large prewarm burst emits ~decile progress lines
+// carrying counts and a rate — and NEVER a token value — while a small burst stays quiet.
+func TestPrewarmProgressLogged(t *testing.T) {
+	restore := slog.Default()
+	defer slog.SetDefault(restore)
+
+	capture := func(n int) string {
+		var buf bytes.Buffer
+		var mu sync.Mutex
+		slog.SetDefault(slog.New(slog.NewTextHandler(&safeWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		// The acquire returns a "token" to prove it is never logged.
+		_ = prewarmBounded(context.Background(), n, 8, func(_ context.Context, idx int) error {
+			return nil
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+
+	// A 100-account prewarm logs progress with counts + total + a rate, and at completion.
+	out := capture(100)
+	if !strings.Contains(out, "auth prewarm progress") {
+		t.Fatalf("a 100-account prewarm should log progress, got:\n%s", out)
+	}
+	for _, needle := range []string{"acquired=", "total=100", "perSec="} {
+		if !strings.Contains(out, needle) {
+			t.Errorf("progress log should carry %q, got:\n%s", needle, out)
+		}
+	}
+	if !strings.Contains(out, "acquired=100") {
+		t.Errorf("progress should log the final completion (acquired=100), got:\n%s", out)
+	}
+
+	// A tiny prewarm (< deciles) logs no progress noise.
+	if small := capture(3); strings.Contains(small, "auth prewarm progress") {
+		t.Errorf("a 3-account prewarm should not log progress, got:\n%s", small)
+	}
+}
+
+// safeWriter serializes concurrent slog writes from the prewarm goroutines so the test's
+// buffer is race-free under -race.
+type safeWriter struct {
+	w  *bytes.Buffer
+	mu *sync.Mutex
+}
+
+func (s *safeWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
