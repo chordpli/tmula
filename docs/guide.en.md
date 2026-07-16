@@ -25,6 +25,10 @@ You do not need to read this top to bottom. If you only want to *run something*,
 7. [Reading the results](#reading-the-results)
 8. [Importing OpenAPI / HAR](#importing-openapi--har)
 9. [Authenticated runs](#authenticated-runs)
+   - [Which auth strategy? (start here)](#which-auth-strategy-start-here)
+   - Strategies: [pool](#strategy-pool-pre-supplied-credentials) · [login](#strategy-login-mint-a-token-at-run-time) · [bootstrap-signup](#strategy-bootstrap-signup-provision-real-accounts) · [mint](#strategy-mint-self-issue-a-jwt-locally) · [exec](#strategy-exec-bring-your-own-token--escape-hatch)
+   - [Session-cookie auth](#session-cookie-auth) · [Why secrets stay in-process](#why-secrets-stay-in-process)
+   - [Web OAuth2 guide · basic/apiKey import · what's deferred](#web-oauth2-guide--basicapikey-import--whats-deferred) · [What happens with a refresh token](#what-happens-with-a-refresh-token)
 10. [Distributed mode](#distributed-mode)
 11. [Safety](#safety)
 12. [The example domains](#the-example-domains)
@@ -1085,6 +1089,26 @@ use the defaults (auto-detection included).
 To make simulated traffic carry real auth material, attach a **credential pool**. Each closed virtual user (by **user index**) or open session (by **session/arrival index**) is assigned a credential, wrapping around when there are more users than entries. Reference it from a template header (`"Authorization": "Bearer {{.token}}"`), or use `{{.subject}}` for the non-sensitive principal.
 
 There are five credential strategies. Pick the one that fits your service.
+
+### Which auth strategy? (start here)
+
+Key the choice on what you already **have**:
+
+| You have… | Strategy | Realism | Setup cost | IdP load | Distributed workers | Web-console path |
+|-----------|----------|---------|------------|----------|---------------------|------------------|
+| **A pile of tokens** (pre-issued bearer tokens / API keys) | [pool](#strategy-pool-pre-supplied-credentials) | Medium — static tokens, no issuance traffic | Lowest — paste or point at a file | None | ✅ via an external `source` (file/env reference) | **I already have tokens** |
+| **A login endpoint + accounts** | [login](#strategy-login-mint-a-token-at-run-time) | High — every token is really issued | Low — one flow step + credentials | Prewarm, parallel but bounded (≤ 16 concurrent) | ❌ in-process only | **Log in to get tokens** |
+| **The JWT signing key** (self-issued tokens) | [mint](#strategy-mint-self-issue-a-jwt-locally) | High — real per-user JWTs, no login traffic | Medium — key reference + claims | None | ✅ ships only the key reference | **Sign a token locally** (Advanced) |
+| **An OAuth2 IdP** | login, assembled by the [web OAuth2 guide](#web-oauth2-guide--basicapikey-import--whats-deferred) | High | Low — answer two questions | Prewarm, bounded (≤ 16) | ❌ in-process only | **It's an OAuth2 service** |
+| **Only a CLI that prints tokens** | [exec](#strategy-exec-bring-your-own-token--escape-hatch) | Depends on the command | Medium — `--allow-exec` opt-in | None (unless the command calls one) | ❌ in-process only | **Run a command for the token** (Advanced) |
+
+And by **goal**:
+
+- **Auth0 client-credentials (machine token)** → the web [OAuth2 guided mode](#web-oauth2-guide--basicapikey-import--whats-deferred), answering "With a client key" — or the [client_credentials worked example](#client_credentials-shared-machine-token).
+- **Log in a 50k-user CSV** → [login + `source` rows](#log-in-n-distinct-accounts-rows-as-credentials) (one row = one account).
+- **The login sets a session cookie, not a body token** → [Session-cookie auth](#session-cookie-auth).
+- **Per-user JWTs without an IdP** → [mint](#strategy-mint-self-issue-a-jwt-locally) (you must hold the signing key).
+- **I only have an issuer URL** → the OAuth2 guide's issuer discovery (**Fetch endpoints** fills the token URL from `/.well-known/openid-configuration`).
 
 ### Strategy: pool (pre-supplied credentials)
 
