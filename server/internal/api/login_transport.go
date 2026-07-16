@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
@@ -134,7 +135,7 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 		}
 		captured, final, err := runner.RunOnceCapture(ctx, flow.Graph, nodeTmpl, flow.Start, maxSteps, user, baseSeed+int64(userIndex))
 		if err != nil {
-			return domain.Credential{}, fmt.Errorf("api: login user %d: %w", userIndex, err)
+			return domain.Credential{}, enrichLoginError(flow, userIndex, row, err)
 		}
 		// Explicit capture is authoritative; auto-detect only fills what was not
 		// explicitly captured. Detect once so the token and (when not explicitly
@@ -174,6 +175,48 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 		cred.Refresh, cred.ExpiresIn = load.DetectRefresh(final.Body)
 		return cred, nil
 	}, nil
+}
+
+// enrichLoginError turns a bare "runOnce node ... returned status 401" login failure
+// into an actionable one: it names the request target (method + path of the login token
+// node) and the row SUBJECT that failed to authenticate (never the password), and — when
+// the login flow still carries a REPLACE_ME_* placeholder (the scenariofile guard would
+// normally catch this at expand time, but a programmatically-built or web-authored flow
+// bypasses it) — appends the fill-it-in hint. The user INDEX is supplied by the enclosing
+// LoginProvider.Acquire wrap, so it need not be repeated here. No secret is included: the
+// subject is non-sensitive and the body/headers are never echoed, only their placeholder
+// presence is reported.
+func enrichLoginError(flow LoginFlow, userIndex int, row domain.Credential, cause error) error {
+	target := ""
+	if tmpl, ok := loginTokenTemplate(flow); ok && tmpl.Method != "" {
+		target = " at " + tmpl.Method + " " + tmpl.Path
+	}
+	who := fmt.Sprintf("user %d", userIndex)
+	if row.Subject != "" {
+		who = fmt.Sprintf("user %d subject %q", userIndex, row.Subject)
+	}
+	err := fmt.Errorf("api: login flow failed for %s%s: %w", who, target, cause)
+	if loginFlowHasPlaceholder(flow) {
+		return fmt.Errorf("%w — the login flow still contains a REPLACE_ME_* placeholder; fill the secret or pass --auth-source", err)
+	}
+	return err
+}
+
+// loginFlowHasPlaceholder reports whether any login template body or header value still
+// carries an unfilled REPLACE_ME placeholder. It only tests for presence — it never
+// returns or logs the value — so the secret surface stays out of the error.
+func loginFlowHasPlaceholder(flow LoginFlow) bool {
+	for _, tmpl := range flow.Templates {
+		if strings.Contains(tmpl.PayloadTemplate, "REPLACE_ME") {
+			return true
+		}
+		for _, hv := range tmpl.Headers {
+			if strings.Contains(hv, "REPLACE_ME") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // refreshNodeID and refreshGraphID label the synthetic single-node graph the refresh
