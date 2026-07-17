@@ -80,10 +80,11 @@ const prewarmProgressDeciles = 10
 // logPrewarmProgress emits a single slog.Info line at each ~10% boundary of a prewarm
 // burst (and at completion), carrying the completed count, the total, and the effective
 // acquisition rate. It NEVER logs a token or credential value — only counts and a rate —
-// so the progress trail is safe. A step of 0 (a burst too small to have deciles) logs
-// nothing.
+// so the progress trail is safe. A step below 2 (a burst too small to have deciles —
+// under 20 accounts) logs nothing: with step 1 every acquisition would log, which is
+// exactly the per-credential noise this cadence exists to avoid.
 func logPrewarmProgress(done, total, step int64, start time.Time) {
-	if step < 1 {
+	if step < 2 {
 		return
 	}
 	if done%step != 0 && done != total {
