@@ -2131,6 +2131,31 @@ describe('authFormFromImport (import → Auth auto-fill)', () => {
     expect(patch.loginMode).toBe('simple')
     expect(patch.loginUrlPath).toBe('/oauth/token')
     expect(patch.loginBodyTemplate).toBe('grant_type=password')
+    // The import must clear a stale OAuth2-guide selection so the imported login flow is
+    // shown and validated, not blocked by the guide's empty token URL.
+    expect(patch.authEntryOAuth2).toBe(false)
+  })
+
+  it('clears the OAuth2-guide entry flag for every import shape (login/pool/bootstrap)', () => {
+    const login = authFormFromImport({
+      ...base,
+      loginFlow: {
+        graph: { id: 'login', nodes: [{ id: 'login', apiTemplateId: 't_login' }], edges: [] },
+        templates: { t_login: { method: 'POST', path: '/oauth/token', payloadTemplate: 'grant_type=password' } },
+        start: 'login',
+      },
+    })
+    const pool = authFormFromImport({
+      ...base,
+      credentialPool: { id: 'p', strategy: 'pool', entries: [{ subject: 'alice', token: '' }] },
+    })
+    const boot = authFormFromImport({
+      ...base,
+      suggestedSignup: { steps: [{ id: 'signup', method: 'POST', path: '/register' }], capture: {} },
+    })
+    expect(login.authEntryOAuth2).toBe(false)
+    expect(pool.authEntryOAuth2).toBe(false)
+    expect(boot.authEntryOAuth2).toBe(false)
   })
 
   it('maps secret-omitted pool entries onto pre-filled JSONL the operator completes', () => {

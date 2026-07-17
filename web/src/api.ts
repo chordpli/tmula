@@ -1358,9 +1358,15 @@ export function placeholderLabel(placeholder: string): string {
 // fall back to advanced (raw JSON) so nothing is lost.
 export function authFormFromImport(result: ImportResult): Partial<ExperimentForm> {
   const { credentialPool, loginFlow, suggestedSignup } = result
+  // An import authors a concrete NON-guide auth mode, so clear the OAuth2-guide entry
+  // flag: without this, importing a login flow while the guide entry was selected keeps
+  // the guide panel showing and the doctor blocking the run on the guide's empty token
+  // URL (selectedEntry only self-heals when the wire mode leaves 'login', which an
+  // imported login flow does not).
+  const reset: Partial<ExperimentForm> = { authEntryOAuth2: false }
   // A derived login flow is the headline easy path: drop it into login mode.
   if (loginFlow) {
-    const patch: Partial<ExperimentForm> = { authMode: 'login' }
+    const patch: Partial<ExperimentForm> = { ...reset, authMode: 'login' }
     const simple = loginFlowToSimpleForm(loginFlow)
     if (simple) {
       Object.assign(patch, simple, { loginMode: 'simple' })
@@ -1380,18 +1386,19 @@ export function authFormFromImport(result: ImportResult): Partial<ExperimentForm
       // A HAR import can carry captured (secret-omitted) entries; surface them as
       // pre-filled JSONL the operator completes with the bearer token.
       return {
+        ...reset,
         authMode: 'pool',
         authPoolFormat: 'jsonl',
         authPoolText: credentialPool.entries.map((e) => JSON.stringify(e)).join('\n'),
       }
     }
     if (credentialPool.strategy === 'bootstrap-signup' && credentialPool.signupFlow) {
-      return signupFormPatch(credentialPool.signupFlow, credentialPool.keepAccounts === true)
+      return { ...reset, ...signupFormPatch(credentialPool.signupFlow, credentialPool.keepAccounts === true) }
     }
   }
   // Only a suggested signup: offer "create test accounts" pre-filled, gate unconfirmed.
   if (suggestedSignup) {
-    return signupFormPatch(suggestedSignup, false)
+    return { ...reset, ...signupFormPatch(suggestedSignup, false) }
   }
   return {}
 }
@@ -2082,6 +2089,11 @@ export function formFromRunSpec(spec: unknown): Partial<ExperimentForm> | null {
   // operator re-supplies the credentials. The login/bootstrap flow shapes carry no
   // secret (tokens are minted at run time), so their structure round-trips; only the
   // live-minted secrets are absent.
+  // A round-trip restores a concrete non-guide auth mode, so clear the UI-only OAuth2
+  // guide flag (same reason as authFormFromImport): a stale flag would keep the guide
+  // panel selected over a restored login/pool/mint flow and block the run on its empty
+  // token URL.
+  patch.authEntryOAuth2 = false
   Object.assign(patch, authFormFromSpec(s))
 
   return patch
