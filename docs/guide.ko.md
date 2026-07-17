@@ -469,12 +469,14 @@ segments:
   - { name: browser, weight: 0.7, start: browse }
   - { name: buyer,   weight: 0.3, start: cart }
 
-# Optional auth - see "Authenticated runs":
+# Optional auth - see "인증이 필요한 실행":
 auth:
-  strategy: pool                  # only "pool" is supported here today
+  strategy: pool                  # pool(미리 공급) | login(실행 시 발급) | bootstrap-signup(계정 프로비저닝)
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
+  # 또는 비밀을 파일 밖에 두려면:
+  # source: { file: creds.csv, format: csv }   # csv | jsonl | tokens
 
 # Optional finding thresholds - see "Findings explained":
 findings:
@@ -523,7 +525,7 @@ findings:
 | `thinkMs` | `[min, max]` | 생각 시간 범위(정확히 정수 두 개여야 함, 아니면 `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | 백프레셔 상한. |
 
-**`auth` 필드.** [인증이 필요한 실행](#인증이-필요한-실행) 참고. `strategy`는 `pool`로 기본 설정됩니다(여기서는 `pool`만 허용). `users`는 `{ subject, token }` 목록입니다(`token`이 비밀이며, 템플릿에는 `{{.token}}`으로 노출).
+**`auth` 필드.** [인증이 필요한 실행](#인증이-필요한-실행) 참고. `strategy`는 `pool`(기본), `login`, `bootstrap-signup` 중 하나입니다. `pool`일 때: `users`는 `{ subject, token }` 목록이거나, `source: { file, env, format }`(상호 배타적)을 씁니다. `login`일 때: `login.flow`, `login.capture.token`(필수), `login.capture.subject`(선택), `login.scope`(`per-user` | `shared`). `bootstrap-signup`일 때: `signup.flow`, `signup.capture.token`, `signup.teardown`(선택), `keepAccounts`(bool).
 
 **`findings` 필드**(모든 필드 선택; `0`이거나 생략된 값은 기본값을 유지)
 
@@ -607,6 +609,9 @@ tmula demo [--addr :8080] [--duration 60s] [--no-browser]
 | `--ramp-to <rate>` | 0 | 오픈 모델: 램프 최고 비율(`--open`을 시작값으로 사용). |
 | `--seed <n>` | 1 | 난수 시드. |
 | `--engine <url>` | - | in-process 대신 기존 엔진에 HTTP로 실행. |
+| `--auth-source <ref>` | - | 시나리오 수정 없이 외부 자격증명 풀 연결: `file:./pool.csv` 또는 `env:VAR`. in-process로 해석(비밀은 wire를 건너지 않음)하며, 시나리오의 `auth` 블록을 덮어씁니다. [인증된 실행](#인증된-실행) 참고. |
+| `--auth-format <fmt>` | (추론) | `--auth-source`의 본문 형식: `csv` \| `jsonl` \| `tokens`. `.csv`/`.jsonl` 확장자에서 추론, 없으면 `tokens`. |
+| `--keep-accounts` | false | bootstrap-signup 전용: 프로비저닝한 계정을 그대로 둡니다(teardown 옵트아웃). 없으면 teardown 플로가 없는 signup 풀은 거부됩니다. |
 | `--json` | false | 요약 대신 원시 보고서 JSON 출력. |
 | `--fail-on-findings` | false | finding이 하나라도 감지되면 비정상 종료(CI 게이트). |
 | `--fail-on-severity <s>` | - | `warning` 또는 `critical` 이상 finding에 대해서만 게이트. |
@@ -942,27 +947,100 @@ OpenAPI는 *어떤* 엔드포인트가 있는지만 알고, HAR는 한 세션의
 
 시뮬레이션 트래픽이 진짜 인증 정보를 운반하게 하려면 **자격 증명 풀**(credential pool)을 붙이세요. 각 클로즈드 가상 사용자(**사용자 인덱스** 기준) 또는 오픈 세션(**세션/도착 인덱스** 기준)에 자격 증명이 배정되며, 항목보다 사용자가 많으면 돌아가며 재사용합니다. 템플릿 헤더에서 `"Authorization": "Bearer {{.token}}"`로 참조하거나, 비민감 주체에는 `{{.subject}}`를 쓰세요.
 
-가장 쉬운 방법은 시나리오 파일의 `auth:` 블록입니다.
+자격 증명 전략은 네 가지입니다. 서비스에 맞는 것을 고르세요.
+
+### 전략: pool (미리 공급된 자격 증명)
+
+가장 단순한 형태 — 토큰을 시나리오 파일에 직접 씁니다.
 
 ```yaml
 auth:
-  strategy: pool          # only "pool" (pre-supplied entries) is supported on this path
+  strategy: pool          # auth:가 있을 때 기본값; 생략해도 됩니다
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
 ```
 
-```bash
-tmula run examples/shop/scenario.yaml --users 50   # with the auth: block above
+비밀을 파일 밖에 두려면 `users` 대신 **외부 소스**를 씁니다.
+
+```yaml
+auth:
+  strategy: pool
+  source:
+    file: creds.csv       # 시나리오 파일 기준 상대 경로; 또는 env:로 환경 변수를 지정
+    format: csv           # csv | jsonl | tokens
 ```
 
-**비밀이 in-process에만 머무는 이유.** 도메인 `Credential.Secret` 필드에는 `json:"-"`가 붙어 있어 비밀이 **직렬화되지 않습니다**. HTTP/SSE/저장소 와이어를 건널 수 없고 영속화되지도 않습니다(`String()`도 로그에서 비밀을 가립니다). 구체적으로 다음과 같습니다.
+`source`와 `users`는 상호 배타적입니다. 지원 형식:
+
+| 형식 | 본문 형태 | Subject |
+|------|-----------|---------|
+| `csv` | 헤더 행 `subject,token`, 한 줄에 자격 증명 하나 | `subject` 열에서 |
+| `jsonl` | 한 줄에 `{"subject":"…","token":"…"}` 객체 하나 | `subject` 필드에서 |
+| `tokens` | 한 줄에 원시 비밀 하나 | **없음** — `{{.subject}}`는 빈 문자열로 렌더링 |
+
+> **`tokens` 형식 주의.** subject 열이 없으므로 헤더나 본문 템플릿의 `{{.subject}}`는 빈 문자열로 렌더링됩니다. teardown 또는 경로 템플릿에 `{{.subject}}`가 필요하다면 `csv` 또는 `jsonl`을 쓰세요.
+
+외부 소스 풀은 **분산 워커**로 팬아웃할 수 있습니다 — 각 워커가 로컬에서 자기 슬라이스를 해석하며, 와이어를 건너는 것은 비밀 없는 참조뿐입니다. 인라인 `users` 풀과 login/bootstrap-signup 전략은 워커로 팬아웃할 수 없습니다.
+
+### 전략: login (실행 시 토큰 발급)
+
+서비스가 로그인 엔드포인트로 토큰을 발급할 때 사용합니다.
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"u1","password":"p1"}'
+        extract: { tok: "$.access_token" }
+    capture:
+      token: tok          # 필수: {{.token}}이 될 추출 변수
+      subject: uid        # 선택: {{.subject}}가 될 변수
+    scope: per-user       # per-user(기본) | shared(client_credentials)
+```
+
+tmula는 가상 사용자마다(`per-user`) 또는 모든 세션이 공유하는 방식으로(`shared`) 로그인 플로를 실행해 토큰을 캡처하고 `{{.token}}`으로 전송합니다. 실행 중 401이 발생하면 한 번 갱신(로그인 재실행)하고 재시도하며, 그 갱신 트래픽은 finding에서 제외됩니다. 로그인 실행은 **in-process 전용**으로, 원격 `--engine`과 분산 워커에서는 거부됩니다.
+
+### 전략: bootstrap-signup (실제 계정 프로비저닝)
+
+가상 사용자마다 실제 계정을 미리 만들고 실행 후 삭제해야 할 때 사용합니다.
+
+```yaml
+auth:
+  strategy: bootstrap-signup
+  signup:
+    flow:
+      - id: register
+        request: POST /users
+        body: '{"email":"tester@example.com"}'
+        extract: { tok: "$.token", uid: "$.id" }
+    capture:
+      token: tok          # 필수
+      subject: uid        # 선택, {{.subject}} 템플릿 teardown에 필요
+    teardown:
+      - id: delete
+        request: DELETE /users/{{.subject}}
+```
+
+부하 테스트가 끝나면 teardown이 실행됩니다(킬/타임아웃 시에도 최선(best-effort)으로 실행). signup 블록에 teardown 플로가 없으면 `--keep-accounts`를 전달하지 않는 한 실행이 **거부**됩니다. bootstrap-signup 실행은 **in-process 전용**으로, 원격 `--engine`과 분산 워커에서는 거부됩니다. **반드시 비운영(non-production) 환경에서만 사용하세요.**
+
+```bash
+tmula run scenario.yaml --users 20                 # signup + run + teardown
+tmula run scenario.yaml --users 20 --keep-accounts # signup + run, 계정은 남겨 둠
+```
+
+### 비밀이 in-process에만 머무는 이유
+
+도메인 `Credential.Secret` 필드에는 `json:"-"`가 붙어 있어 비밀이 **직렬화되지 않습니다**. HTTP/SSE/저장소 와이어를 건널 수 없고 영속화되지도 않습니다(`String()`도 로그에서 비밀을 가립니다). 구체적으로 다음과 같습니다.
 
 - `auth:` 블록이 있는 `tmula run`은 비밀이 마샬링될 일이 없도록 컨트롤 플레인을 **in-process**로(자체 Go API를 통해) 실행합니다. 비인증 경로는 동등성을 위해 여전히 HTTP로 실제 루프백 엔진을 부팅합니다.
 - HTTP로 POST 하려는 `users[].cred`는 **조용히 무시됩니다**. 비밀이 `json:"-"`로 제거되므로 HTTP 제출은 인증을 운반할 수 없습니다.
-- 원격 `--engine`은 인증 실행을 **거부합니다**: `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`.
+- 원격 `--engine`은 인라인 풀·login·bootstrap-signup 실행을 **거부합니다**: `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`. **외부 소스** 풀은 예외입니다. 와이어를 건너는 것은 비밀 없는 참조뿐이고, 워커가 파일이나 환경 변수를 로컬에서 해석합니다.
 
-**제약**(검증 기준): 현재 실행 경로에서는 미리 공급된 `pool` 전략만 동작합니다. `bootstrap-signup`은 "not yet supported via this run path (follow-up)" 메시지로 거부됩니다. 자격 증명 풀은 분산 워커와 **결합할 수 없습니다**(워커 팬아웃이 자체 비인증 사용자를 합성하기 때문).
+**제약**(검증 기준): 분산 워커와 자격 증명 풀을 함께 쓸 수 있는 것은 외부 소스 풀뿐입니다. 오픈 워크로드 모델은 인증 전략에 무관하게 in-process 전용입니다.
 
 ---
 

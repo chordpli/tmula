@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/chordpli/tmula/server/internal/domain"
+	"github.com/chordpli/tmula/server/internal/runspec"
 )
 
 // ImportFunc converts an uploaded API description (OpenAPI or HAR) in the given
@@ -76,13 +79,33 @@ type ImportSkippedSample struct {
 // importResult is the form-relevant slice of a converted RunSpec the UI needs to
 // prefill an experiment: the behavior graph, the per-node API templates, the
 // entry node, and a suggested step bound — plus, when the importer reports it,
-// the coverage stats behind the import.
+// the coverage stats behind the import, and (P7) the auth the importer derived so
+// the UI can prefill credentials instead of discarding them.
+//
+// FROZEN CONTRACT (the web codes against exactly these field names): the auth
+// fields are all omitempty, so an unauthenticated import returns the exact
+// pre-P7 shape. None of them ever carries a real secret — domain.Credential.Secret
+// is json:"-", so a captured pool secret (E3 HAR) is dropped here too (AD-011);
+// login/signup flows carry only REPLACE_ME placeholders, never a minted token.
 type importResult struct {
 	Graph     any          `json:"graph"`
 	Templates any          `json:"templates"`
 	Start     string       `json:"start"`
 	MaxSteps  int          `json:"maxSteps"`
 	Stats     *ImportStats `json:"stats,omitempty"`
+	// CredentialPool is the Expanded spec's pool (strategy + entries + loginFlowId +
+	// loginScope + signupFlow + keepAccounts). Its entries' secrets are dropped by
+	// domain.Credential's json:"-" tag, so a captured pool secret never crosses to
+	// the browser. Present when the import derived auth.
+	CredentialPool *domain.CredentialPool `json:"credentialPool,omitempty"`
+	// LoginFlow is the standalone login flow (graph/templates/start/tokenVar/
+	// subjectVar) the UI prefills when the pool's strategy is "login". It carries
+	// only the form body's REPLACE_ME placeholders, never a token.
+	LoginFlow *runspec.LoginFlowSpec `json:"loginFlow,omitempty"`
+	// SuggestedSignup is the signup flow the importer derived from a register/signup
+	// operation, offered as a "create test accounts" suggestion independent of the
+	// primary pool. Present when a register op was detected.
+	SuggestedSignup *domain.SignupFlow `json:"suggestedSignup,omitempty"`
 }
 
 // importMaxBytes bounds an uploaded API description. It is larger than a normal
@@ -133,5 +156,13 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		Start:     string(spec.Start),
 		MaxSteps:  spec.MaxSteps,
 		Stats:     stats,
+		// Surface the auth the importer derived (P7). These come straight off the
+		// Expanded spec: the pool (login/pool/bootstrap), the standalone login flow
+		// for a login pool, and the advisory signup suggestion. All omitempty, so an
+		// unauthenticated import returns the pre-P7 shape. No secret crosses here —
+		// the pool's entry secrets are json:"-" and the flows carry only placeholders.
+		CredentialPool:  spec.CredentialPool,
+		LoginFlow:       spec.LoginFlow,
+		SuggestedSignup: spec.SuggestedSignup,
 	})
 }

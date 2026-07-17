@@ -186,11 +186,19 @@ func TestValidateLoginPool(t *testing.T) {
 		t.Error("a login pool with no login flow must be rejected")
 	}
 
-	// A login pool with a malformed login flow (no token capture) is rejected.
+	// A login pool with no explicit token capture is ACCEPTED: an empty tokenVar
+	// means the runner auto-detects the token from the login response.
+	autoDetect := loginSpec("http://127.0.0.1:1")
+	autoDetect.LoginFlow.TokenVar = ""
+	if err := autoDetect.Validate(); err != nil {
+		t.Errorf("a login flow with no explicit token capture (auto-detect) should be valid: %v", err)
+	}
+
+	// A login pool with a malformed login flow (no start node) is still rejected.
 	badFlow := loginSpec("http://127.0.0.1:1")
-	badFlow.LoginFlow.TokenVar = ""
+	badFlow.LoginFlow.Start = ""
 	if err := badFlow.Validate(); err == nil {
-		t.Error("a login flow with no token capture var must be rejected")
+		t.Error("a login flow with no start node must be rejected")
 	}
 
 	// Invariant 8: login + workers is rejected (a minted token is still a secret).
@@ -206,6 +214,25 @@ func TestValidateLoginPool(t *testing.T) {
 	agg.AggregateWorkers = true
 	if err := agg.Validate(); err == nil {
 		t.Error("a login pool with aggregate workers must be rejected")
+	}
+
+	// P8: a login pool carrying login-INPUT rows (entries) is valid on the in-process
+	// path — the rows are usernames/passwords each VU logs in with, not secrets that
+	// must fan out.
+	withRows := loginSpec("http://127.0.0.1:1")
+	withRows.CredentialPool.Entries = []domain.Credential{{Subject: "alice", Secret: "pw-a"}, {Subject: "bob", Secret: "pw-b"}}
+	if err := withRows.Validate(); err != nil {
+		t.Errorf("a login pool carrying login-input rows should validate in-process (P8): %v", err)
+	}
+
+	// P8: login + entries + workers stays REJECTED — the inline passwords (and the
+	// minted token) are secrets the worker fan-out cannot resolve. Distributed
+	// multi-user login is a follow-up.
+	rowsDist := loginSpec("http://127.0.0.1:1")
+	rowsDist.CredentialPool.Entries = []domain.Credential{{Subject: "alice", Secret: "pw-a"}}
+	rowsDist.Workers = []string{"127.0.0.1:65535"}
+	if err := rowsDist.Validate(); err == nil {
+		t.Error("a login pool carrying login-input rows with distributed workers must be rejected (the inline passwords cannot cross the wire)")
 	}
 }
 
@@ -226,10 +253,25 @@ func sourcePool(ref *domain.CredentialSourceRef) *domain.CredentialPool {
 	return &domain.CredentialPool{ID: "p", Strategy: domain.CredPool, Source: ref}
 }
 
-// bootstrapPool returns a bootstrap-signup pool naming a signup flow.
+// bootstrapPool returns a runnable bootstrap-signup pool: a well-formed signup
+// flow that provisions an account and a teardown that deprovisions it. It is
+// runnable in-process, so a rejection with workers proves the WORKERS gate fires
+// (not a missing-flow gate).
 func bootstrapPool() *domain.CredentialPool {
-	flowID := domain.ID("signup")
-	return &domain.CredentialPool{ID: "p", Strategy: domain.CredBootstrapSignup, BootstrapFlowID: &flowID}
+	return &domain.CredentialPool{
+		ID:       "p",
+		Strategy: domain.CredBootstrapSignup,
+		SignupFlow: &domain.SignupFlow{
+			Steps: []domain.SignupStep{{
+				ID: "register", Method: "POST", Path: "/signup",
+				Extract: map[string]string{"token": "accessToken", "uid": "id"},
+			}},
+			Start:         "register",
+			Capture:       domain.SignupCapture{Token: "token", Subject: "uid"},
+			Teardown:      []domain.SignupStep{{ID: "remove", Method: "DELETE", Path: "/accounts/{{.subject}}"}},
+			TeardownStart: "remove",
+		},
+	}
 }
 
 // TestValidateDistributedSourceAuth pins the P3 D1 reconciliation — the run

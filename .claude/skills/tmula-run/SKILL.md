@@ -30,6 +30,10 @@ HTTP traffic**, so it enforces a safety gate first, smokes with one user, then r
 tmula keeps `envClass=dev`, `allow` = target host (fail-closed), `rateCap`={maxRps:10000,maxConcurrency:1000}
 by default — keep them; never widen `allow` blindly.
 
+**Bootstrap-signup runs** (`auth.strategy: bootstrap-signup`) create and delete **real accounts** in the
+target. They must never run against production. Teardown runs even on kill/timeout (best-effort). If the
+signup flow declares no teardown, pass `--keep-accounts` to opt out — without it the run is rejected.
+
 A deterministic guard hook (`.claude/hooks/tmula-guard`) backs this up: it **blocks** a `tmula run` whose
 target is not loopback/private, or whose scenario file is missing. If a run is blocked for a host you're
 genuinely allowed to load, confirm with the user, then `export TMULA_ALLOW_TARGET="host"` (or add it to a
@@ -72,8 +76,12 @@ genuinely allowed to load, confirm with the user, then `export TMULA_ALLOW_TARGE
    ```
 
    Other flags: `--target <url>` (override), `--seed N`, `--timeout`, `--fail-on-severity warning|critical`,
+   `--auth-source file:./pool.csv|env:VAR` (+ `--auth-format csv|jsonl|tokens`) to attach a credential pool without editing the scenario,
    `--json` (raw report — save it as `json/report.json`; that's what tmula-triage consumes as `--baseline-file`):
    `./bin/tmula run json/scenario.json --json > json/report.json`.
+
+   `--keep-accounts`: bootstrap-signup only. Skips teardown and leaves provisioned accounts in place. Required
+   when the `auth.signup` block declares no teardown flow.
 
    **If you intend to triage by `reproduce` afterward, run on a live engine:** start the engine with
    `./bin/tmula` (bare, :8080), then `./bin/tmula run json/scenario.json --engine http://localhost:8080 ...`.
@@ -115,6 +123,7 @@ Notes:
 
 - **Never run against a host the user hasn't confirmed is non-production.**
 - **Never run a flow containing DELETE / mutating ops** without explicit opt-in on a confirmed sandbox.
+- **Never run `bootstrap-signup` against production** — it provisions and tears down real accounts.
 - **Exit 0 ≠ success.** Read and show the real `errors=`/`findings=` output before reporting an outcome.
 - Keep the fail-closed defaults (`envClass=dev`, `allow`=target host). Don't widen `allow` to silence a
   block unless the extra host is genuinely intended.

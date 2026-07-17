@@ -471,10 +471,12 @@ segments:
 
 # Optional auth - see "Authenticated runs":
 auth:
-  strategy: pool                  # only "pool" is supported here today
+  strategy: pool                  # pool (pre-supplied) | login (mint at run time) | bootstrap-signup (provision)
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
+  # or keep secrets out of the file:
+  # source: { file: creds.csv, format: csv }   # csv | jsonl | tokens
 
 # Optional finding thresholds - see "Findings explained":
 findings:
@@ -523,7 +525,7 @@ findings:
 | `thinkMs` | `[min, max]` | Think-time range (must be exactly two ints, else `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | Back-pressure cap. |
 
-**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` defaults to `pool` (only `pool` is accepted here); `users` is a list of `{ subject, token }` (`token` is the secret, exposed to templates as `{{.token}}`).
+**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, or `bootstrap-signup`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }` (mutually exclusive with `users`). For `login`: `login.flow`, `login.capture.token` (required), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool).
 
 **`findings` fields** (every field optional; a `0`/omitted value keeps its default)
 
@@ -613,6 +615,9 @@ Builds a RunSpec from a scenario file (or single-endpoint flags), executes it (i
 | `--ramp-to <rate>` | 0 | Open model: ramp peak rate (uses `--open` as the start). |
 | `--seed <n>` | 1 | Random seed. |
 | `--engine <url>` | - | Run against an existing engine over HTTP instead of in-process. |
+| `--auth-source <ref>` | - | Attach an external credential pool without editing the scenario: `file:./pool.csv` or `env:VAR`. Resolved in-process (the secret never crosses the wire); overrides any `auth` block the scenario declares. See [Authenticated runs](#authenticated-runs). |
+| `--auth-format <fmt>` | (inferred) | Body format for `--auth-source`: `csv` \| `jsonl` \| `tokens`. Inferred from a `.csv`/`.jsonl` extension, else `tokens`. |
+| `--keep-accounts` | false | Bootstrap-signup only: leave provisioned accounts in place (opt out of teardown). Without it, a signup pool with no teardown flow is rejected. |
 | `--json` | false | Print the raw report JSON instead of a summary. |
 | `--fail-on-findings` | false | Exit non-zero if any finding is detected (CI gate). |
 | `--fail-on-severity <s>` | - | Gate only on findings at/above `warning` or `critical`. |
@@ -1077,27 +1082,100 @@ use the defaults (auto-detection included).
 
 To make simulated traffic carry real auth material, attach a **credential pool**. Each closed virtual user (by **user index**) or open session (by **session/arrival index**) is assigned a credential, wrapping around when there are more users than entries. Reference it from a template header (`"Authorization": "Bearer {{.token}}"`), or use `{{.subject}}` for the non-sensitive principal.
 
-The simplest way is the scenario file's `auth:` block:
+There are four credential strategies. Pick the one that fits your service.
+
+### Strategy: pool (pre-supplied credentials)
+
+The simplest form — author tokens directly in the scenario file:
 
 ```yaml
 auth:
-  strategy: pool          # only "pool" (pre-supplied entries) is supported on this path
+  strategy: pool          # default when auth: is present; may be omitted
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
 ```
 
-```bash
-tmula run examples/shop/scenario.yaml --users 50   # with the auth: block above
+To keep secrets out of the file entirely, use an **external source** instead of `users`:
+
+```yaml
+auth:
+  strategy: pool
+  source:
+    file: creds.csv       # path relative to the scenario file; or use `env:` for a variable
+    format: csv           # csv | jsonl | tokens
 ```
 
-**Why secrets stay in-process.** The domain `Credential.Secret` field carries `json:"-"`, so the secret is **never serialized**. It cannot cross the HTTP/SSE/store wire and is never persisted (its `String()` also redacts it in logs). Concretely:
+`source` and `users` are mutually exclusive. Supported formats:
+
+| Format | Body shape | Subject |
+|--------|-----------|---------|
+| `csv` | header row `subject,token`, one credential per line | from `subject` column |
+| `jsonl` | one `{"subject":"…","token":"…"}` object per line | from `subject` field |
+| `tokens` | one raw secret per line | **empty** — `{{.subject}}` renders as `""` |
+
+> **`tokens` format gotcha.** There is no subject column, so `{{.subject}}` in a header or body template renders as an empty string. Use `csv` or `jsonl` if your teardown or path templates need `{{.subject}}`.
+
+An external source pool can fan out across **distributed workers** — each worker resolves its own slice locally; only a secret-free reference crosses the wire. Inline `users` pools and login/bootstrap strategies cannot fan out to workers.
+
+### Strategy: login (mint a token at run time)
+
+Use when the service issues tokens through a login endpoint:
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"u1","password":"p1"}'
+        extract: { tok: "$.access_token" }
+    capture:
+      token: tok          # required: which extracted variable becomes {{.token}}
+      subject: uid        # optional: which variable becomes {{.subject}}
+    scope: per-user       # per-user (default) | shared (client_credentials)
+```
+
+tmula walks the login flow once per virtual user (`per-user`) or once for all sessions (`shared`), captures the token, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (re-runs the login) and retries; that refresh traffic is excluded from findings. Login runs are **in-process only** — rejected against a remote `--engine` and distributed workers.
+
+### Strategy: bootstrap-signup (provision real accounts)
+
+Use when the test needs one real account per virtual user, provisioned for the run and torn down after:
+
+```yaml
+auth:
+  strategy: bootstrap-signup
+  signup:
+    flow:
+      - id: register
+        request: POST /users
+        body: '{"email":"tester@example.com"}'
+        extract: { tok: "$.token", uid: "$.id" }
+    capture:
+      token: tok          # required
+      subject: uid        # optional but needed for {{.subject}}-templated teardown
+    teardown:
+      - id: delete
+        request: DELETE /users/{{.subject}}
+```
+
+Teardown runs after the load test, even if the run is killed or times out (best-effort on partial failure). If the signup block has no teardown flow, the run is **rejected** unless you pass `--keep-accounts` to opt out of teardown. Bootstrap runs are **in-process only** — rejected against a remote `--engine` and distributed workers. **Only use against a confirmed non-production sandbox.**
+
+```bash
+tmula run scenario.yaml --users 20                 # signup + run + teardown
+tmula run scenario.yaml --users 20 --keep-accounts # signup + run, accounts left in place
+```
+
+### Why secrets stay in-process
+
+The domain `Credential.Secret` field carries `json:"-"`, so the secret is **never serialized**. It cannot cross the HTTP/SSE/store wire and is never persisted (its `String()` also redacts it in logs). Concretely:
 
 - `tmula run` with an `auth:` block runs the control plane **in-process** (through its Go API) so the secret never has to be marshaled. The unauthenticated path still boots a real loopback engine over HTTP for parity.
 - A `users[].cred` you try to POST over HTTP is **silently ignored**: the secret is stripped by `json:"-"`, so HTTP submission cannot carry auth.
-- A remote `--engine` **refuses** an authenticated run: `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`.
+- A remote `--engine` **refuses** an authenticated run (pool with inline users, login, or bootstrap): `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`. An **external source** pool is the one exception: only a secret-free reference crosses the wire; workers resolve the file or env variable locally.
 
-**Constraints** (from validation): only the pre-supplied `pool` strategy works on the run path today. `bootstrap-signup` is refused with a "not yet supported via this run path (follow-up)" message. A credential pool **cannot** be combined with distributed workers (the worker fan-out synthesizes its own unauthenticated users).
+**Constraints** (from validation): a credential pool **cannot** be combined with distributed workers unless the pool is an external source. The open workload model is in-process only regardless of auth strategy.
 
 ---
 

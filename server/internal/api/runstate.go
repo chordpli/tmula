@@ -35,6 +35,12 @@ type runState struct {
 	// an aggregate rather than feeding the collector). When nil, the live
 	// collector snapshot is used instead.
 	finalStats *obs.Stats
+	// bootstrap, when non-nil, is the bootstrap-signup provider+teardown for a run
+	// whose credential pool provisions real accounts. It is built once in execute,
+	// shared with the closed/open auth paths (so prewarm, the live auth, and
+	// teardown all act on the same cached identities), and its teardown is deferred
+	// for the whole run. Nil for every non-bootstrap run.
+	bootstrap *bootstrapAuth
 }
 
 // stats returns the run's stats: the final aggregate if one was produced

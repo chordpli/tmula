@@ -50,17 +50,65 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
    - API-key header (e.g. `api_key`): `"headers": { "api_key": "{{.token}}" }`
    - OAuth2 / bearer: `"headers": { "Authorization": "Bearer {{.token}}" }`
 
-   Add an `auth` pool with a **clearly-labeled placeholder** for the user to fill:
+   There are four ways to supply credentials — pick the one that fits:
 
+   **(a) Inline users (simplest, token in file):**
    ```json
    "auth": { "strategy": "pool", "users": [ { "subject": "tester", "token": "REPLACE_ME_API_KEY" } ] }
    ```
+   The user must fill the placeholder. Use the dotted `{{.token}}` — `{{token}}` without the dot is a
+   template error and the request won't send. If you can't determine the header, **say which endpoints
+   will 401/403** rather than guess.
 
-   Use the dotted `{{.token}}` — `{{token}}` without the dot is a template error and the request won't send.
-   If you can't determine the header, **say which endpoints will 401/403** rather than guess.
-   **`{{.token}}` is always the static pool token** — tmula has no mechanism to capture a login response
-   into it, so a `login` step does not produce the token; the user must fill the placeholder. (The separate
-   `extract` field only feeds non-credential session vars referenced as `{{.varName}}`, never the token.)
+   **(b) External source (keep secrets out of the scenario file):**
+   ```json
+   "auth": {
+     "strategy": "pool",
+     "source": { "file": "creds.csv", "format": "csv" }
+   }
+   ```
+   `source` is mutually exclusive with `users`. Supported formats:
+   - `csv`: header row `subject,token`; one credential per line.
+   - `jsonl`: one `{"subject":"...","token":"..."}` JSON object per line.
+   - `tokens`: one raw secret per line, **no subject** — `{{.subject}}` renders empty with this format.
+   The file path is resolved relative to the scenario file's directory. Use `"env": "VAR_NAME"` instead
+   of `"file"` to read the body from an environment variable (useful in CI).
+
+   **(c) Login strategy (mint a token at run time):**
+   ```json
+   "auth": {
+     "strategy": "login",
+     "login": {
+       "flow": [ { "id": "signin", "request": "POST /auth/token",
+                   "body": "{\"username\":\"u1\",\"password\":\"p1\"}",
+                   "extract": { "tok": "$.access_token" } } ],
+       "capture": { "token": "tok" },
+       "scope": "per-user"
+     }
+   }
+   ```
+   tmula walks the login flow once per virtual user (scope `per-user`, the default) or once for all
+   sessions (scope `shared`, client_credentials style), captures `$.access_token` into the `tok`
+   variable, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (re-runs the login) and
+   retries; that refresh traffic is excluded from findings. Login runs are in-process only — rejected
+   against a remote `--engine` and distributed workers.
+
+   **(d) Bootstrap signup (provision real accounts):**
+   ```json
+   "auth": {
+     "strategy": "bootstrap-signup",
+     "signup": {
+       "flow": [ { "id": "register", "request": "POST /users",
+                   "body": "{\"email\":\"user{{.subject}}@example.com\"}",
+                   "extract": { "tok": "$.token", "uid": "$.id" } } ],
+       "capture": { "token": "tok", "subject": "uid" },
+       "teardown": [ { "id": "delete", "request": "DELETE /users/{{.subject}}" } ]
+     }
+   }
+   ```
+   Provisions one real account per virtual user before the run, then **tears all accounts down after**
+   (even on kill/timeout). Requires a teardown flow OR `--keep-accounts`. Bootstrap runs are in-process
+   only. **Only use against a confirmed non-production sandbox** — this creates and deletes real accounts.
 
 5. **Shape the flow (optional but valuable):**
    - **Step ids**: rename cryptic/colliding ids to stable human-readable ones *before* wiring `dependsOn`
@@ -84,7 +132,8 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
 
 `target` · `allow` (reachable hosts; default = target host, fail-closed) · per-step `id`/`request`/`body`/
 `headers`/`dependsOn`/`weight` · `users` (closed model) · `open`+`maxSteps` (open model) · `seed` ·
-`deviationRate` · `auth` (pool only in-file) · `findings` (`errorRate`, `p95LatencyMs`, `availabilityStreak`).
+`deviationRate` · `auth` (pool with inline `users` or external `source`; `login` strategy; `bootstrap-signup`
+strategy) · `findings` (`errorRate`, `p95LatencyMs`, `availabilityStreak`).
 
 ## Iron Laws
 
@@ -120,5 +169,5 @@ Artifact produced: the enriched scenario written back to `json/scenario.json` (o
 }
 ```
 
-> Report: `{petId}`→`1`; `api_key` header wired to the pool (**fill `REPLACE_ME_API_KEY`** — the `login`
-> step is just a flow step, it does **not** supply the token); dropped 11 mutating ops for safety. Next: tmula-run.
+> Report: `{petId}`→`1`; `api_key` header wired to the pool (**fill `REPLACE_ME_API_KEY`** or switch to an
+> external `source` / `login` strategy to keep secrets out of the file); dropped 11 mutating ops for safety. Next: tmula-run.

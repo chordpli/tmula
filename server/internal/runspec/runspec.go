@@ -94,6 +94,16 @@ type RunSpec struct {
 	// runspec stays a leaf and only carries the declarative domain types.
 	LoginFlow *LoginFlowSpec `json:"loginFlow,omitempty"`
 
+	// SuggestedSignup is the declarative signup flow the importer derived from a
+	// register/signup operation, offered to the UI as a "create test accounts"
+	// suggestion that is INDEPENDENT of the primary CredentialPool (a login pool can
+	// be the primary auth while a signup is suggested separately). It is advisory
+	// only: the run path never reads it (a bootstrap-signup run carries its flow on
+	// the pool's SignupFlow instead), so it is not validated and never affects a run.
+	// Nil when the imported spec named no register operation. It carries no secret —
+	// the token is captured at run time from the live signup response.
+	SuggestedSignup *domain.SignupFlow `json:"suggestedSignup,omitempty"`
+
 	// id is internal run-bookkeeping: the run identifier the control plane assigns
 	// after creation (see SetID). It is never serialized and never read back out
 	// of the spec by the run path.
@@ -110,15 +120,18 @@ type LoginFlowSpec struct {
 	Templates map[domain.ID]domain.APITemplate `json:"templates"`
 	Start     domain.ID                        `json:"start"`
 	MaxSteps  int                              `json:"maxSteps,omitempty"`
-	// TokenVar names the captured variable that becomes the credential's secret
-	// (required). SubjectVar, when set, names the captured variable that becomes
-	// the non-sensitive subject.
-	TokenVar   string `json:"tokenVar"`
+	// TokenVar names the captured variable that becomes the credential's secret.
+	// Optional: an empty TokenVar means the runner auto-detects the token from the
+	// login response (see load.DetectCredential). SubjectVar, when set, names the
+	// captured variable that becomes the non-sensitive subject.
+	TokenVar   string `json:"tokenVar,omitempty"`
 	SubjectVar string `json:"subjectVar,omitempty"`
 }
 
-// Validate checks the login flow is well-formed: a non-empty graph, a start node
-// present in it, and a token capture variable.
+// Validate checks the login flow is well-formed: a non-empty graph and a start node
+// present in it. The token capture variable is optional — an empty TokenVar means
+// the runner auto-detects the token from the login response — so a flow without an
+// explicit capture is valid.
 func (f LoginFlowSpec) Validate() error {
 	if err := f.Graph.Validate(); err != nil {
 		return fmt.Errorf("login flow: %w", err)
@@ -135,9 +148,6 @@ func (f LoginFlowSpec) Validate() error {
 	}
 	if !known {
 		return fmt.Errorf("login flow: start node %q is not in the login graph", f.Start)
-	}
-	if f.TokenVar == "" {
-		return fmt.Errorf("login flow: a token capture variable (tokenVar) is required")
 	}
 	return nil
 }
@@ -245,9 +255,15 @@ func (r RunSpec) Validate() error {
 //     serialized. shardSpecFor copies the ref into ShardSpec.CredentialSource.
 //   - Inline Entries != nil && workers → REJECTED. The secrets would serialize
 //     into the wire spec.
+//   - Bootstrap-signup && NO workers → ALLOWED when it carries a SignupFlow and
+//     either a teardown journey OR --keep-accounts (the gating-safety rule). The
+//     orchestrator compiles the SignupFlow, prewarms one account per virtual user,
+//     and defers teardown. A bootstrap pool with no SignupFlow, or no teardown and
+//     no keep-accounts, is REJECTED above.
 //   - Bootstrap-signup && workers → REJECTED. A bootstrap pool mints real accounts
-//     and has no shared reference to fan out; P4 keeps this rejected. (Domain
-//     Validate already forbids a Source on a bootstrap pool.)
+//     and has no shared reference to fan out; P4 keeps this rejected (distributed
+//     bootstrap is a follow-up). (Domain Validate already forbids a Source on a
+//     bootstrap pool.)
 //   - Login && workers → REJECTED. A minted login token is a json:"-" secret the
 //     worker fan-out cannot resolve. (Domain Validate forbids a Source on a login
 //     pool, so login never reaches the carve-out.)
@@ -284,9 +300,24 @@ func (r RunSpec) validateCredentialPool() error {
 		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; a distributed run with workers ships the reference instead)")
 	}
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
-		// Follow-up: the bootstrap provider exists but needs a signup transport this
-		// run path does not yet wire. Refuse rather than run unauthenticated.
-		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
+		// A bootstrap-signup pool provisions one real account per virtual user up
+		// front (the orchestrator compiles its SignupFlow and prewarms it). Two gates
+		// apply on the IN-PROCESS path:
+		//
+		//   1. It must carry a declarative SignupFlow — the legacy bare BootstrapFlowID
+		//      is not runnable (nothing to compile and walk).
+		//   2. GATING SAFETY: it must either declare a teardown journey OR opt out with
+		//      KeepAccounts. A bootstrap run with no teardown and no keep-accounts is
+		//      refused, so a load test never strands thousands of real accounts.
+		//
+		// (bootstrap + workers is rejected below, with the other inline-secret pools —
+		// distributed bootstrap is a follow-up that has no shared reference to fan out.)
+		if r.CredentialPool.SignupFlow == nil {
+			return fmt.Errorf("api: the %q strategy needs a signupFlow describing how to provision an account", domain.CredBootstrapSignup)
+		}
+		if !r.CredentialPool.SignupFlow.HasTeardown() && !r.CredentialPool.KeepAccounts {
+			return fmt.Errorf("api: the %q strategy provisions real accounts and must deprovision them: declare a teardown flow, or pass --keep-accounts to leave them in place", domain.CredBootstrapSignup)
+		}
 	}
 	if r.CredentialPool.Strategy == domain.CredLogin {
 		// A login pool mints tokens by walking a standalone login flow, so the spec
@@ -302,9 +333,14 @@ func (r RunSpec) validateCredentialPool() error {
 	if hasWorkers {
 		// Inline-secret carry (entries pool or a minted login token) cannot fan out:
 		// the secret would serialize into the wire spec / a json:"-" secret the
-		// worker cannot resolve. Only a source-backed pool reaches workers (handled
-		// above). This rejection is load-bearing for reproduce fidelity — see the
-		// doc comment before relaxing it.
+		// worker cannot resolve. A bootstrap pool mints real accounts and has no
+		// shared reference to fan out either — distributed bootstrap is a follow-up,
+		// kept rejected here (P3 set this, P4 keeps it). Only a source-backed pool
+		// reaches workers (handled above). This rejection is load-bearing for
+		// reproduce fidelity — see the doc comment before relaxing it.
+		if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
+			return fmt.Errorf("api: the %q strategy is not supported with distributed workers (a bootstrap pool provisions per-node accounts and has no shared reference to fan out; distributed bootstrap is a follow-up)", domain.CredBootstrapSignup)
+		}
 		return fmt.Errorf("api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)")
 	}
 	return nil
@@ -335,6 +371,14 @@ func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	// here is a wiring bug, not a silent unauthenticated run.
 	if r.CredentialPool.Strategy == domain.CredLogin {
 		return nil, fmt.Errorf("api: a login credential pool's provider is built by the orchestrator, not runspec (login transport lives above this leaf)")
+	}
+	// Bootstrap-signup likewise needs a signup transport (the compiled SignupFlow)
+	// that this leaf cannot build — the orchestrator builds the provider (see
+	// api.bootstrapAuthFor) and the run path never reaches here for a bootstrap pool,
+	// so a bootstrap pool arriving here is a wiring bug, not a silent unauthenticated
+	// run.
+	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
+		return nil, fmt.Errorf("api: a bootstrap-signup credential pool's provider is built by the orchestrator, not runspec (signup transport lives above this leaf)")
 	}
 	// The remaining strategies (pool today) need no signup/token function — an empty
 	// ProviderDeps.

@@ -184,6 +184,21 @@ type CredentialPool struct {
 	// existed.
 	Source          *CredentialSourceRef `json:"source,omitempty"`
 	BootstrapFlowID *ID                  `json:"bootstrapFlowId,omitempty"`
+	// SignupFlow is the declarative bootstrap-signup journey (signup steps + a
+	// capture mapping + an optional teardown journey) a CredBootstrapSignup pool
+	// walks once per virtual user to provision a real account and capture its token.
+	// It is transport-free; the orchestrator compiles it to a graph + templates at
+	// provider-build time. Required (in place of the legacy BootstrapFlowID) for a
+	// runnable bootstrap pool; ignored by other strategies. omitempty keeps a
+	// non-bootstrap pool serializing byte-identically.
+	SignupFlow *SignupFlow `json:"signupFlow,omitempty"`
+	// KeepAccounts opts a bootstrap-signup run out of teardown: the provisioned
+	// accounts are left in place after the run instead of being deprovisioned. It is
+	// the ONLY escape from the gating-safety rule that a bootstrap pool without a
+	// teardown flow is rejected — and it lets a kept-accounts run reproduce later
+	// under the same still-live principals. Ignored by other strategies. omitempty
+	// keeps a non-bootstrap pool serializing byte-identically.
+	KeepAccounts bool `json:"keepAccounts,omitempty"`
 	// LoginFlowID names the standalone login flow a CredLogin pool walks to mint a
 	// token (POST a login/token endpoint, capture the token). It is a declarative
 	// reference, not a node in the main scenario graph, so the simulated traffic
@@ -220,8 +235,21 @@ func (c CredentialPool) Validate() error {
 			}
 		}
 	}
-	if c.Strategy == CredBootstrapSignup && (c.BootstrapFlowID == nil || *c.BootstrapFlowID == "") {
-		return fmt.Errorf("credential pool %q: bootstrap-signup needs a non-empty bootstrapFlowId", c.ID)
+	if c.Strategy == CredBootstrapSignup {
+		// A runnable bootstrap pool carries a declarative SignupFlow (the form the
+		// orchestrator compiles and walks); the legacy BootstrapFlowID is still
+		// accepted as a bare reference. Require at least one, and validate a present
+		// SignupFlow's shape (a resolvable token/secret capture above all).
+		hasFlow := c.SignupFlow != nil
+		hasLegacyID := c.BootstrapFlowID != nil && *c.BootstrapFlowID != ""
+		if !hasFlow && !hasLegacyID {
+			return fmt.Errorf("credential pool %q: bootstrap-signup needs a signupFlow (or a bootstrapFlowId)", c.ID)
+		}
+		if hasFlow {
+			if err := c.SignupFlow.Validate(); err != nil {
+				return fmt.Errorf("credential pool %q: %w", c.ID, err)
+			}
+		}
 	}
 	if c.Strategy == CredLogin {
 		if c.LoginFlowID == nil || *c.LoginFlowID == "" {
@@ -231,10 +259,25 @@ func (c CredentialPool) Validate() error {
 		if c.LoginScope != "" && !c.LoginScope.Valid() {
 			return fmt.Errorf("credential pool %q: invalid loginScope %q (want %q or %q)", c.ID, c.LoginScope, LoginPerUser, LoginShared)
 		}
-		// A login pool mints its tokens at run time, so it must not also carry a
-		// pre-supplied pool (inline entries or an external source).
-		if len(c.Entries) > 0 || c.Source != nil {
-			return fmt.Errorf("credential pool %q: login strategy mints tokens at run time and takes no inline entries or source", c.ID)
+		// P8: a login pool MAY carry a credential pool of login-INPUT rows — each
+		// Credential is interpreted as Subject=username, Secret=password (NOT a
+		// pre-issued token), so virtual user i logs in as a different account by
+		// templating the row (see api.NewLoginTokenFunc, which seeds {{.username}}/
+		// {{.password}}). Entries and a Source are mutually exclusive (like the pool
+		// strategy): each is a way to supply the SAME input rows. Both empty is the
+		// long-standing single-identity login — accepted, unchanged. Inline passwords
+		// are in-process secrets exactly like the token pool's inline entries; the
+		// Credential.Secret json:"-" tag keeps them out of any serialization (AD-011),
+		// and the distributed-login follow-up keeps login+workers rejected at the run
+		// path so those passwords never cross the wire.
+		hasEntries, hasSource := len(c.Entries) > 0, c.Source != nil
+		if hasEntries && hasSource {
+			return fmt.Errorf("credential pool %q: login strategy takes either inline login-input entries or a source, not both", c.ID)
+		}
+		if c.Source != nil {
+			if err := c.Source.Validate(); err != nil {
+				return fmt.Errorf("credential pool %q: %w", c.ID, err)
+			}
 		}
 	}
 	return nil

@@ -1,8 +1,12 @@
 import {
   allowlistMatchesHost,
   hostFromBaseUrl,
+  loginBodyReferencesRow,
   parseAllowlist,
+  parseCredentials,
+  parseLoginCredentials,
   parseSegments,
+  parseSignupSteps,
   type ExperimentForm,
 } from './api'
 
@@ -79,6 +83,103 @@ export function doctorForm(form: ExperimentForm): DoctorIssue[] {
   }
   if (templatesResult.ok && graphResult.ok) {
     issues.push(...doctorTemplates(templatesResult.value, graphResult.value))
+  }
+  issues.push(...doctorAuth(form))
+  return issues
+}
+
+// doctorAuth surfaces the auth-section blockers so a misconfigured pool/login/bootstrap
+// is caught here (before a 400 from the server), mirroring the scenario checks. None
+// has nothing to check. Each strategy reports its own missing/invalid pieces; a parse
+// failure is an error (the run cannot send it), while a stranded-accounts bootstrap is
+// the load-bearing safety warning the gating rule enforces.
+function doctorAuth(form: ExperimentForm): DoctorIssue[] {
+  const issues: DoctorIssue[] = []
+  if (form.authMode === 'pool') {
+    if (!form.authPoolText.trim()) {
+      issues.push(issue('error', 'auth-pool-empty', 'doctor.authPoolEmpty'))
+    } else {
+      try {
+        parseCredentials(form.authPoolFormat, form.authPoolText)
+      } catch (e) {
+        issues.push(issue('error', 'auth-pool-invalid', 'doctor.authPoolInvalid', { error: messageOf(e) }))
+      }
+    }
+  } else if (form.authMode === 'login') {
+    // An empty token capture is fine: tmula auto-detects the token from the login
+    // response (E1), so no "missing capture path" warning is raised. The simple
+    // mini-form only needs a request path (buildAuth compiles the rest); the advanced
+    // mode still validates the raw graph/templates JSON.
+    if (form.loginMode === 'simple') {
+      if (!form.loginUrlPath.trim()) {
+        issues.push(issue('error', 'auth-login-url', 'doctor.authLoginUrl'))
+      }
+    } else {
+      const graph = parseJSON(form.loginGraphJSON)
+      if (!graph.ok) {
+        issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
+      }
+      const templates = parseJSON(form.loginTemplatesJSON)
+      if (!templates.ok) {
+        issues.push(
+          issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
+        )
+      }
+    }
+    // "Log in multiple users": when a credential list is supplied, validate it parses
+    // (a malformed list cannot be sent) and warn when the login body never references a
+    // row — every virtual user would then log in with the same literal body, defeating
+    // the list. The body warning only applies to the simple mini-form, where the body is
+    // the editable template; the advanced mode authors the body inside raw templates.
+    if (form.loginCredText.trim()) {
+      let credsOk = false
+      try {
+        parseLoginCredentials(form.loginCredFormat, form.loginCredText)
+        credsOk = true
+      } catch (e) {
+        issues.push(issue('error', 'auth-login-cred-invalid', 'doctor.authLoginCredInvalid', { error: messageOf(e) }))
+      }
+      if (credsOk && form.loginMode === 'simple' && !loginBodyReferencesRow(form.loginBodyTemplate)) {
+        issues.push(issue('warning', 'auth-login-cred-unused', 'doctor.authLoginCredUnused'))
+      }
+    }
+  } else if (form.authMode === 'bootstrap') {
+    if (!form.authBootstrapConfirmed) {
+      issues.push(issue('error', 'auth-bootstrap-unconfirmed', 'doctor.authBootstrapUnconfirmed'))
+    }
+    // An empty token capture is fine: tmula auto-detects the token from the signup
+    // response (E1), so no "missing capture path" warning is raised. The simple
+    // mini-form only needs a signup path; advanced validates the raw steps JSON.
+    const simple = form.signupMode === 'simple'
+    if (simple) {
+      if (!form.signupUrlPath.trim()) {
+        issues.push(issue('error', 'auth-bootstrap-url', 'doctor.authBootstrapUrl'))
+      }
+    } else {
+      try {
+        parseSignupSteps(form.signupStepsJSON, 'signup')
+      } catch (e) {
+        issues.push(issue('error', 'auth-bootstrap-steps-json', 'doctor.authBootstrapStepsJson', { error: messageOf(e) }))
+      }
+    }
+    // Gating safety: no teardown and not keeping accounts strands real accounts. The
+    // teardown is the simple teardown URL in simple mode, the raw teardown JSON in
+    // advanced mode — either satisfies the rule.
+    const hasTeardown = simple
+      ? form.signupTeardownUrlPath.trim().length > 0
+      : form.signupTeardownJSON.trim().length > 0
+    if (!form.keepAccounts && !hasTeardown) {
+      issues.push(issue('warning', 'auth-bootstrap-no-teardown', 'doctor.authBootstrapNoTeardown'))
+    }
+    if (!simple && !form.keepAccounts && hasTeardown) {
+      try {
+        parseSignupSteps(form.signupTeardownJSON, 'teardown')
+      } catch (e) {
+        issues.push(
+          issue('error', 'auth-bootstrap-teardown-json', 'doctor.authBootstrapTeardownJson', { error: messageOf(e) }),
+        )
+      }
+    }
   }
   return issues
 }

@@ -3,9 +3,12 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  AUTH_FORM_DEFAULTS,
+  authFormFromImport,
   buildRunSpec,
   compareURL,
   createExperiment,
+  findReplaceMePlaceholders,
   formFromRunSpec,
   getExperimentSpec,
   getReport,
@@ -14,6 +17,9 @@ import {
   killRun,
   MAX_TRACE_USERS,
   parseAllowlist,
+  parseCredentials,
+  parseLoginCredentials,
+  placeholderLabel,
   probeRun,
   reportHTMLURL,
   runDisabled,
@@ -22,8 +28,13 @@ import {
   startRun,
   streamURL,
   traceable,
+  type AuthMode,
+  type CredFormat,
   type ExperimentForm,
+  type ImportResult,
   type ImportStats,
+  type LoginCredFormat,
+  type LoginScope,
   type OutcomeSummary,
   type Report,
   type Stats,
@@ -79,7 +90,51 @@ const initialForm: ExperimentForm = {
   thinkMaxMs: 900,
   segmentsJSON: '',
   traceEnabled: true,
+  ...AUTH_FORM_DEFAULTS,
 }
+
+// loginFlowPlaceholders show the shape of a login flow (a single POST that captures a
+// token) without prefilling it, so the field reads as guidance until the operator
+// authors their own. The graph + templates are authored exactly like the scenario.
+const loginGraphPlaceholder = `{
+  "id": "login",
+  "nodes": [{ "id": "login", "apiTemplateId": "t_login" }],
+  "edges": []
+}`
+const loginTemplatesPlaceholder = `{
+  "t_login": {
+    "method": "POST",
+    "path": "/login",
+    "payloadTemplate": "{\\"user\\":\\"alice\\",\\"pass\\":\\"secret\\"}",
+    "extract": { "access_token": "$.access_token" }
+  }
+}`
+
+// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
+// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so we can detect when the operator has not
+// edited it yet. LOGIN_BODY_MULTI is the smart default the multi-user path suggests:
+// each virtual user logs in as the NEXT credential-list row, so the body reads the row
+// via the {{.username}}/{{.password}} Go-template markers the backend exposes (NOT the
+// {username}/{password} markers the single-identity body uses).
+const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
+const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
+
+// signupStepsPlaceholder shows the bootstrap signup journey shape: a step list with a
+// bare method/path and an extract that captures the token. teardownPlaceholder shows
+// the matching deprovision step. Both are guidance only until the operator authors
+// their own.
+const signupStepsPlaceholder = `[
+  {
+    "id": "signup",
+    "method": "POST",
+    "path": "/signup",
+    "body": "{\\"email\\":\\"test+{{.userIndex}}@example.com\\"}",
+    "extract": { "accessToken": "$.token", "id": "$.id" }
+  }
+]`
+const signupTeardownPlaceholder = `[
+  { "id": "delete", "method": "DELETE", "path": "/accounts/{{.subject}}" }
+]`
 
 // segmentsPlaceholder shows the persona-mix shape without prefilling it, so an
 // open run stays homogeneous until the operator opts in.
@@ -119,6 +174,13 @@ function Operator() {
   // partial miniature is visible the moment it appears. Presets and spec imports
   // carry no stats and clear it.
   const [importCoverage, setImportCoverage] = useState<CoverageReport | null>(null)
+  // authImported flags that the last import auto-populated the Auth section (a derived
+  // login / credential pool / suggested signup). It drives the success banner in the
+  // Auth card ("Login auto-detected … just fill the highlighted secret") and is cleared
+  // whenever the operator changes the auth mode by hand or runs a plain import with no
+  // derived auth. The value is the mode that was auto-filled, so the banner copy can
+  // name it; '' means nothing was auto-detected.
+  const [authImported, setAuthImported] = useState<'' | AuthMode>('')
   // history is the ids of completed runs, in order, so a finished run can be
   // compared against the one before it.
   const [history, setHistory] = useState<string[]>([])
@@ -195,6 +257,9 @@ function Operator() {
 
   function set<K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) {
     setForm((f) => ({ ...f, [key]: value }))
+    // Changing the auth mode by hand dismisses the "auto-detected" banner — once the
+    // operator picks a mode themselves, the import's claim no longer describes it.
+    if (key === 'authMode') setAuthImported('')
   }
 
   function setBaseUrl(value: string) {
@@ -245,6 +310,26 @@ function Operator() {
   function applyPreset(p: Preset) {
     applyScenario(p)
     setLoadedPresetKey(p.nameKey)
+  }
+
+  // applyImport is the headline P7 path: an import both fills the scenario AND, when the
+  // backend derived auth (a login flow / credential pool / suggested signup), POPULATES
+  // the Auth section so the only thing left is the secret. It applies the scenario
+  // first, then maps the derived auth onto the form via authFormFromImport, and records
+  // which mode was auto-filled so the Auth card can show the success banner. An import
+  // with no derived auth clears the banner (the scenario still lands) — it does NOT
+  // reset the operator's existing auth, so a plain re-import never wipes a configured
+  // pool. The non-prod bootstrap gate is never auto-confirmed (authFormFromImport keeps
+  // it off), so create-accounts still requires an explicit confirmation before a run.
+  function applyImport(result: ImportResult) {
+    applyScenario(result)
+    const authPatch = authFormFromImport(result)
+    if (authPatch.authMode && authPatch.authMode !== 'none') {
+      setForm((f) => ({ ...f, ...authPatch }))
+      setAuthImported(authPatch.authMode)
+    } else {
+      setAuthImported('')
+    }
   }
 
   async function run() {
@@ -666,10 +751,16 @@ function Operator() {
 
             <hr className="divider" />
 
-            {/* Import (Feature B): build a scenario from a spec or recording. */}
-            <ImportPanel onImported={applyScenario} />
+            {/* Import (Feature B): build a scenario from a spec or recording. The
+                import additionally auto-fills the Auth section (P7) when the backend
+                derives auth, so onImported carries the whole result, not just the
+                scenario. */}
+            <ImportPanel onImported={applyImport} />
           </div>
         </section>
+
+        {/* ---- Auth (P5 / P7) ---- */}
+        <AuthCard form={form} set={set} imported={authImported} />
 
         {/* ---- Run ---- */}
         <section className="card">
@@ -945,13 +1036,7 @@ function ImportCoveragePanel({ report }: { report: CoverageReport | null }) {
 function ImportPanel({
   onImported,
 }: {
-  onImported: (s: {
-    graph: unknown
-    templates: unknown
-    start: string
-    maxSteps: number
-    stats?: ImportStats
-  }) => void
+  onImported: (result: ImportResult) => void
 }) {
   const { t } = useI18n()
   const [text, setText] = useState('')
@@ -1076,6 +1161,779 @@ function ImportPanel({
     </div>
   )
 }
+
+// AUTH_MODES is the ordered set of auth strategies the card offers, REORDERED by effort
+// (easiest first) so a normal developer reaches for the simplest viable option: None
+// (anonymous) → Account list (paste one bearer token or a small pool — the easiest real
+// auth) → Login (auto/simple — mint a token from a login form) → Create accounts (the
+// advanced, gated path that provisions real accounts). Each maps onto a radio in the
+// segmented selector and an i18n label/description.
+const AUTH_MODES: { mode: AuthMode; labelKey: string; descKey: string }[] = [
+  { mode: 'none', labelKey: 'auth.mode.none', descKey: 'auth.mode.none.desc' },
+  { mode: 'pool', labelKey: 'auth.mode.pool', descKey: 'auth.mode.pool.desc' },
+  { mode: 'login', labelKey: 'auth.mode.login', descKey: 'auth.mode.login.desc' },
+  { mode: 'bootstrap', labelKey: 'auth.mode.bootstrap', descKey: 'auth.mode.bootstrap.desc' },
+]
+
+// AuthCard is the Auth section (P5 / P7): it picks how the simulated traffic
+// authenticates and authors the chosen strategy's material. None (the default) attaches
+// nothing and keeps the run anonymous. Account list pastes/uploads pre-issued tokens
+// (parsed in the browser into inline entries — the server rejects a file source over the
+// wire, D1). Login mints a token from a standalone flow authored through a simple
+// mini-form (raw JSON behind Advanced). Create-accounts provisions real accounts and is
+// gated behind an explicit non-production confirmation. It writes straight to the form
+// via the parent's set(); buildRunSpec turns the fields into the wire credentialPool.
+//
+// P7 (Easy-Auth): when an import auto-detects auth, `imported` names the populated mode
+// and the card leads with a success banner so the operator knows the heavy lifting is
+// done and only the highlighted secret is left.
+function AuthCard({
+  form,
+  set,
+  imported,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  imported: '' | AuthMode
+}) {
+  const { t } = useI18n()
+  // Surface every REPLACE_ME_* placeholder the active flow's body still carries as a
+  // highlighted input the operator must fill — so after an auto-detected import the ONLY
+  // thing left is the secret. Only the relevant mode's body is scanned.
+  const placeholders =
+    form.authMode === 'login'
+      ? findReplaceMePlaceholders(form.loginBodyTemplate)
+      : form.authMode === 'bootstrap'
+        ? findReplaceMePlaceholders(form.signupBodyTemplate)
+        : []
+  // The banner only makes sense while the auto-filled mode is still selected.
+  const showBanner = imported !== '' && imported === form.authMode
+
+  return (
+    <section className="card" aria-labelledby="card-auth">
+      <div className="card__head">
+        <span className="card__step" aria-hidden="true">4</span>
+        <h2 className="card__title" id="card-auth">{t('card.auth')}</h2>
+      </div>
+      <p className="card__hint">{t('card.auth.hint')}</p>
+
+      <div className="stack" style={{ gap: 16 }}>
+        {showBanner && (
+          <div className="auth-banner" role="status">
+            <span className="auth-banner__icon" aria-hidden="true">
+              <CheckMini />
+            </span>
+            <span>
+              {placeholders.length > 0
+                ? t(`auth.imported.${imported}.secret`)
+                : t(`auth.imported.${imported}`)}
+            </span>
+          </div>
+        )}
+
+        <div className="authmodes" role="radiogroup" aria-label={t('card.auth')}>
+          {AUTH_MODES.map(({ mode, labelKey, descKey }) => (
+            <label key={mode} className={`authmode${form.authMode === mode ? ' authmode--on' : ''}`}>
+              <input
+                className="authmode__radio"
+                type="radio"
+                name="authMode"
+                checked={form.authMode === mode}
+                onChange={() => set('authMode', mode)}
+              />
+              <span className="authmode__body">
+                <span className="authmode__label">{t(labelKey)}</span>
+                <span className="authmode__desc">{t(descKey)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
+
+        {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
+        {form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
+        {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
+      </div>
+    </section>
+  )
+}
+
+// ReplaceMeFields renders one highlighted input per REPLACE_ME_* placeholder the active
+// flow body carries, so the secret an import could not derive is the one obvious thing
+// left to fill. Each input is bound to form.replaceMeValues[placeholder]; buildAuth
+// substitutes the value into the body at send time (the placeholder literal never
+// leaves the browser once filled). The label is derived from the placeholder suffix
+// (REPLACE_ME_PASSWORD -> "Password") so no per-secret translation is needed.
+function ReplaceMeFields({
+  form,
+  set,
+  placeholders,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  placeholders: string[]
+}) {
+  const { t } = useI18n()
+  function setValue(placeholder: string, value: string) {
+    set('replaceMeValues', { ...form.replaceMeValues, [placeholder]: value })
+  }
+  // A password-ish placeholder masks its input; everything else stays visible.
+  const isSecret = (p: string) => /PASS|SECRET|TOKEN|KEY/i.test(p)
+  return (
+    <div className="auth-secrets" role="group" aria-label={t('auth.secrets.title')}>
+      <p className="auth-secrets__head">
+        <span className="auth-secrets__icon" aria-hidden="true">
+          <AlertIcon />
+        </span>
+        <span>{t('auth.secrets.hint')}</span>
+      </p>
+      <div className="field-row field-row--2">
+        {placeholders.map((p) => (
+          <Field key={p} label={placeholderLabel(p)} help={t('auth.secrets.fieldHint')}>
+            <input
+              className="input input--highlight"
+              type={isSecret(p) ? 'password' : 'text'}
+              value={form.replaceMeValues[p] ?? ''}
+              onChange={(e) => setValue(p, e.target.value)}
+              placeholder={placeholderLabel(p)}
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </Field>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// AuthPoolFields authors a token pool: a format selector, a file upload, and a textarea
+// of pasted credentials. The file and textarea are BOTH parsed in the browser — the
+// file's text is loaded into the textarea on pick (so the operator sees exactly what
+// will be sent), and the live parsed-count / error is computed from the textarea on
+// every keystroke. Nothing but inline { subject, token } entries ever leave the
+// browser (the server rejects a file source over the wire — D1).
+function AuthPoolFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+
+  // Live parse of the pasted text for the count / inline error. It never throws out of
+  // render: a malformed body surfaces as a short message, an empty body as nothing.
+  let count = 0
+  let parseError = ''
+  if (form.authPoolText.trim()) {
+    try {
+      count = parseCredentials(form.authPoolFormat, form.authPoolText).length
+    } catch (e) {
+      parseError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Pick the format from the extension so the strongest signal isn't lost; .csv ->
+    // csv, .jsonl -> jsonl, anything else stays on the current selection.
+    const lower = file.name.toLowerCase()
+    if (lower.endsWith('.csv')) set('authPoolFormat', 'csv')
+    else if (lower.endsWith('.jsonl')) set('authPoolFormat', 'jsonl')
+    else if (lower.endsWith('.txt') || lower.endsWith('.tokens')) set('authPoolFormat', 'tokens')
+    try {
+      // Read the file client-side so the textarea reflects exactly what will be sent;
+      // the operator can still edit it before running.
+      set('authPoolText', await file.text())
+    } catch {
+      /* ignore an unreadable file; the operator can paste instead */
+    }
+  }
+
+  return (
+    <div className="authpanel">
+      <div className="import__grid">
+        <label className="field import__file">
+          <span className="field__label">{t('auth.pool.file')}</span>
+          <input className="filepick" type="file" accept=".csv,.jsonl,.txt,.tokens" onChange={onFile} />
+          <span className="field__help">{t('auth.pool.fileHint')}</span>
+        </label>
+        <Field label={t('auth.pool.format')} help={t('auth.pool.formatHint')}>
+          <select
+            className="select"
+            value={form.authPoolFormat}
+            onChange={(e) => set('authPoolFormat', e.target.value as CredFormat)}
+          >
+            <option value="csv">{t('auth.pool.format.csv')}</option>
+            <option value="jsonl">{t('auth.pool.format.jsonl')}</option>
+            <option value="tokens">{t('auth.pool.format.tokens')}</option>
+          </select>
+        </Field>
+      </div>
+
+      <Field label={t('auth.pool.paste')} help={t('auth.pool.pasteHint')}>
+        <textarea
+          className="textarea"
+          value={form.authPoolText}
+          onChange={(e) => set('authPoolText', e.target.value)}
+          rows={6}
+          placeholder={t(`auth.pool.placeholder.${form.authPoolFormat}`)}
+          spellCheck={false}
+        />
+      </Field>
+
+      {parseError ? (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{parseError}</span>
+        </div>
+      ) : count > 0 ? (
+        <p className="authpanel__ok" role="status">
+          <CheckMini />
+          {t('auth.pool.count', { count })}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+// AuthLoginFields authors the standalone login flow that mints a token. The COMMON case
+// (P7) is the simple mini-form: a login URL (method + path), a request-body template
+// with {username}/{password} markers, and the per-user vs shared scope toggle —
+// buildAuth compiles those into the login flow graph/templates under the hood. Token
+// capture, subject capture, the start node, and the raw graph/templates JSON live behind
+// an Advanced collapsible (collapsed by default): a normal user never opens it. Capture
+// defaults empty (auto-detect, E1); the simple flow is single-step so the start is
+// implied. The mode toggle picks which authoring path buildAuth reads.
+function AuthLoginFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const simple = form.loginMode === 'simple'
+  const hasCredList = form.loginCredText.trim().length > 0
+  // Smart default: when the operator supplies a credential list, the per-row body should
+  // pull the row in via {{.username}}/{{.password}}. Suggest the multi-user body ONLY
+  // when the current body is still untouched (the single-identity default) so we never
+  // clobber a hand-edited body; the operator can also apply it from the hint.
+  const bodyIsDefault = form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
+  const suggestMultiBody = hasCredList && bodyIsDefault
+  function setCredText(text: string) {
+    set('loginCredText', text)
+    // The first time a list appears, auto-upgrade an untouched body to the per-row
+    // template so the common case just works; a hand-edited body is left as-is.
+    if (text.trim() && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE) {
+      set('loginBodyTemplate', LOGIN_BODY_MULTI)
+    }
+  }
+  return (
+    <div className="authpanel">
+      {simple ? (
+        <>
+          <div className="field-row field-row--2">
+            <Field label={t('auth.login.url')} help={t('auth.login.urlHint')}>
+              <div className="methodpath">
+                <select
+                  className="select methodpath__method"
+                  aria-label={t('auth.login.method')}
+                  value={form.loginUrlMethod}
+                  onChange={(e) => set('loginUrlMethod', e.target.value)}
+                >
+                  {HTTP_METHODS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="input methodpath__path"
+                  value={form.loginUrlPath}
+                  onChange={(e) => set('loginUrlPath', e.target.value)}
+                  placeholder="/login"
+                  spellCheck={false}
+                />
+              </div>
+            </Field>
+            <Field
+              label={t('auth.login.scope')}
+              help={t('auth.login.scopeHint')}
+              tip={<HelpTip label={t('auth.login.scope')} text={t('auth.login.scope.tip')} />}
+            >
+              <select
+                className="select"
+                value={form.loginScope}
+                onChange={(e) => set('loginScope', e.target.value as LoginScope)}
+              >
+                <option value="per-user">{t('auth.login.scope.perUser')}</option>
+                <option value="shared">{t('auth.login.scope.shared')}</option>
+              </select>
+            </Field>
+          </div>
+
+          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
+
+          <Field
+            label={t('auth.login.body')}
+            help={t('auth.login.bodyHint')}
+            tip={<HelpTip label={t('auth.login.body')} text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')} />}
+          >
+            <textarea
+              className="textarea"
+              value={form.loginBodyTemplate}
+              onChange={(e) => set('loginBodyTemplate', e.target.value)}
+              rows={4}
+              placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
+              spellCheck={false}
+            />
+          </Field>
+          {suggestMultiBody && (
+            <button
+              type="button"
+              className="btn btn--ghost"
+              style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+              onClick={() => set('loginBodyTemplate', LOGIN_BODY_MULTI)}
+            >
+              {t('auth.login.body.useMulti')}
+            </button>
+          )}
+        </>
+      ) : (
+        <AuthLoginAdvancedBody form={form} set={set} />
+      )}
+
+      <details className="advanced" open={!simple}>
+        <summary className="advanced__summary">
+          {t('auth.advanced.login')}
+          <span className="field__badge">{t('badge.jsonAdvanced')}</span>
+        </summary>
+        <div className="stack advanced__body" style={{ gap: 16 }}>
+          <Check
+            checked={!simple}
+            onChange={(v) => set('loginMode', v ? 'advanced' : 'simple')}
+            label={t('auth.advanced.rawLogin')}
+            sub={t('auth.advanced.rawLoginSub')}
+          />
+          <div className="field-row field-row--2">
+            <Field
+              label={t('auth.login.tokenVar')}
+              help={t('auth.login.tokenVarHint')}
+              tip={<HelpTip label={t('auth.login.tokenVar')} text={t('auth.login.tokenVar.tip')} />}
+            >
+              <input
+                className="input"
+                value={form.loginTokenVar}
+                onChange={(e) => set('loginTokenVar', e.target.value)}
+                placeholder={t('auth.tokenVar.autoPlaceholder')}
+                spellCheck={false}
+              />
+            </Field>
+            <Field label={t('auth.login.subjectVar')} help={t('auth.login.subjectVarHint')}>
+              <input
+                className="input"
+                value={form.loginSubjectVar}
+                onChange={(e) => set('loginSubjectVar', e.target.value)}
+                placeholder="$.user_id"
+                spellCheck={false}
+              />
+            </Field>
+          </div>
+          {!simple && (
+            <Field label={t('auth.login.start')} help={t('auth.login.startHint')}>
+              <input
+                className="input"
+                value={form.loginStart}
+                onChange={(e) => set('loginStart', e.target.value)}
+                placeholder="login"
+                spellCheck={false}
+              />
+            </Field>
+          )}
+        </div>
+      </details>
+    </div>
+  )
+}
+
+// AuthLoginCredList is the OPTIONAL "log in multiple users" panel: a format selector, a
+// file upload, and a textarea of username,password rows, all parsed IN THE BROWSER (like
+// the token pool) into credentialPool.entries of { subject: username, token: password }.
+// Supply a list and each virtual user logs in as the NEXT row (a different account);
+// leave it empty and the login mints ONE identity from the body (the prior behavior).
+// It shows the live parsed count / error so the operator sees how many accounts were
+// recognized before running. Picking a file loads its text into the textarea (so the
+// operator sees exactly what will be sent) and routes through onCredText, which also
+// upgrades an untouched login body to the per-row template.
+function AuthLoginCredList({
+  form,
+  set,
+  onCredText,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+  onCredText: (text: string) => void
+}) {
+  const { t } = useI18n()
+
+  // Live parse of the pasted text for the count / inline error. It never throws out of
+  // render: a malformed body surfaces as a short message, an empty body as nothing.
+  let count = 0
+  let parseError = ''
+  if (form.loginCredText.trim()) {
+    try {
+      count = parseLoginCredentials(form.loginCredFormat, form.loginCredText).length
+    } catch (e) {
+      parseError = e instanceof Error ? e.message : String(e)
+    }
+  }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    // Pick the format from the extension; .csv -> csv, .jsonl -> jsonl, else unchanged.
+    const lower = file.name.toLowerCase()
+    if (lower.endsWith('.csv')) set('loginCredFormat', 'csv')
+    else if (lower.endsWith('.jsonl')) set('loginCredFormat', 'jsonl')
+    try {
+      onCredText(await file.text())
+    } catch {
+      /* ignore an unreadable file; the operator can paste instead */
+    }
+  }
+
+  return (
+    <details className="advanced" open={form.loginCredText.trim().length > 0}>
+      <summary className="advanced__summary">
+        {t('auth.login.cred.toggle')}
+        <span className="field__badge">{t('badge.optional')}</span>
+      </summary>
+      <div className="stack advanced__body" style={{ gap: 16 }}>
+        <p className="card__hint">{t('auth.login.cred.hint')}</p>
+        <div className="import__grid">
+          <label className="field import__file">
+            <span className="field__label">{t('auth.login.cred.file')}</span>
+            <input className="filepick" type="file" accept=".csv,.jsonl" onChange={onFile} />
+            <span className="field__help">{t('auth.login.cred.fileHint')}</span>
+          </label>
+          <Field label={t('auth.pool.format')} help={t('auth.login.cred.formatHint')}>
+            <select
+              className="select"
+              value={form.loginCredFormat}
+              onChange={(e) => set('loginCredFormat', e.target.value as LoginCredFormat)}
+            >
+              <option value="csv">{t('auth.login.cred.format.csv')}</option>
+              <option value="jsonl">{t('auth.login.cred.format.jsonl')}</option>
+            </select>
+          </Field>
+        </div>
+
+        <Field
+          label={t('auth.login.cred.paste')}
+          help={t('auth.login.cred.pasteHint')}
+          tip={<HelpTip label={t('auth.login.cred.paste')} text={t('auth.login.cred.tip')} />}
+        >
+          <textarea
+            className="textarea"
+            value={form.loginCredText}
+            onChange={(e) => onCredText(e.target.value)}
+            rows={5}
+            placeholder={t(`auth.login.cred.placeholder.${form.loginCredFormat}`)}
+            spellCheck={false}
+          />
+        </Field>
+
+        {parseError ? (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{parseError}</span>
+          </div>
+        ) : count > 0 ? (
+          <p className="authpanel__ok" role="status">
+            <CheckMini />
+            {t('auth.login.cred.count', { count })}
+          </p>
+        ) : null}
+      </div>
+    </details>
+  )
+}
+
+// AuthLoginAdvancedBody is the raw graph/templates JSON authoring for the login flow,
+// shown when the operator opts into advanced mode. It is the original power-user path
+// preserved verbatim — a sibling graph the login transport walks to mint a token.
+function AuthLoginAdvancedBody({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <>
+      <Field
+        label={t('auth.login.graph')}
+        help={t('auth.login.graphHint')}
+        tip={<HelpTip label={t('auth.login.graph')} text={t('auth.login.graph.tip')} />}
+      >
+        <textarea
+          className="textarea"
+          value={form.loginGraphJSON}
+          onChange={(e) => set('loginGraphJSON', e.target.value)}
+          rows={6}
+          placeholder={loginGraphPlaceholder}
+          spellCheck={false}
+        />
+      </Field>
+      <Field label={t('auth.login.templates')} help={t('auth.login.templatesHint')}>
+        <textarea
+          className="textarea"
+          value={form.loginTemplatesJSON}
+          onChange={(e) => set('loginTemplatesJSON', e.target.value)}
+          rows={7}
+          placeholder={loginTemplatesPlaceholder}
+          spellCheck={false}
+        />
+      </Field>
+    </>
+  )
+}
+
+// AuthBootstrapFields authors the bootstrap signup flow that provisions real accounts.
+// Framed clearly (P7) as the LAST resort — only when you need many DISTINCT accounts you
+// cannot pre-make. The COMMON case is the simple mini-form: a signup URL (method + path)
+// with a body template, plus an optional teardown URL — buildAuth compiles those into
+// the signup/teardown steps. Capture paths, the start steps, and the raw steps JSON live
+// behind Advanced (collapsed by default; capture empty = auto-detect, E1). Because it
+// creates and deletes REAL accounts on the target, the whole panel is gated behind an
+// explicit non-production confirmation — until it is checked the fields are disabled and
+// the run is blocked (buildAuth re-checks it). The teardown-or-keepAccounts rule holds:
+// with keepAccounts off and no teardown the doctor flags stranded accounts.
+function AuthBootstrapFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const confirmed = form.authBootstrapConfirmed
+  const simple = form.signupMode === 'simple'
+  return (
+    <div className="authpanel">
+      <p className="authpanel__lead">{t('auth.bootstrap.lead')}</p>
+
+      <div className="authpanel__warn" role="alert">
+        <AlertIcon />
+        <label className="authpanel__confirm">
+          <input
+            className="check__box"
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => set('authBootstrapConfirmed', e.target.checked)}
+          />
+          <span>
+            <span className="authpanel__confirmLabel">{t('auth.bootstrap.confirm')}</span>
+            <span className="authpanel__confirmSub">{t('auth.bootstrap.confirmSub')}</span>
+          </span>
+        </label>
+      </div>
+
+      <fieldset className="authpanel__fields" disabled={!confirmed}>
+        {simple ? (
+          <>
+            <Field
+              label={t('auth.bootstrap.signupUrl')}
+              help={t('auth.bootstrap.signupUrlHint')}
+            >
+              <div className="methodpath">
+                <select
+                  className="select methodpath__method"
+                  aria-label={t('auth.bootstrap.signupMethod')}
+                  value={form.signupUrlMethod}
+                  onChange={(e) => set('signupUrlMethod', e.target.value)}
+                >
+                  {HTTP_METHODS.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  className="input methodpath__path"
+                  value={form.signupUrlPath}
+                  onChange={(e) => set('signupUrlPath', e.target.value)}
+                  placeholder="/register"
+                  spellCheck={false}
+                />
+              </div>
+            </Field>
+            <Field
+              label={t('auth.bootstrap.body')}
+              help={t('auth.bootstrap.bodyHint')}
+              tip={<HelpTip label={t('auth.bootstrap.body')} text={t('auth.bootstrap.body.tip')} />}
+            >
+              <textarea
+                className="textarea"
+                value={form.signupBodyTemplate}
+                onChange={(e) => set('signupBodyTemplate', e.target.value)}
+                rows={4}
+                placeholder={'{"email": "test+{{.userIndex}}@example.com", "password": "{password}"}'}
+                spellCheck={false}
+              />
+            </Field>
+          </>
+        ) : (
+          <AuthBootstrapAdvancedBody form={form} set={set} />
+        )}
+
+        <Check
+          checked={form.keepAccounts}
+          onChange={(v) => set('keepAccounts', v)}
+          label={t('auth.bootstrap.keep')}
+          sub={t('auth.bootstrap.keepSub')}
+        />
+
+        {!form.keepAccounts && simple && (
+          <Field label={t('auth.bootstrap.teardownUrl')} help={t('auth.bootstrap.teardownUrlHint')}>
+            <div className="methodpath">
+              <select
+                className="select methodpath__method"
+                aria-label={t('auth.bootstrap.teardownMethod')}
+                value={form.signupTeardownUrlMethod}
+                onChange={(e) => set('signupTeardownUrlMethod', e.target.value)}
+              >
+                {HTTP_METHODS.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="input methodpath__path"
+                value={form.signupTeardownUrlPath}
+                onChange={(e) => set('signupTeardownUrlPath', e.target.value)}
+                placeholder="/accounts/{{.subject}}"
+                spellCheck={false}
+              />
+            </div>
+          </Field>
+        )}
+
+        {!form.keepAccounts && !simple && (
+          <>
+            <Field label={t('auth.bootstrap.teardown')} help={t('auth.bootstrap.teardownHint')}>
+              <textarea
+                className="textarea"
+                value={form.signupTeardownJSON}
+                onChange={(e) => set('signupTeardownJSON', e.target.value)}
+                rows={4}
+                placeholder={signupTeardownPlaceholder}
+                spellCheck={false}
+              />
+            </Field>
+            <Field label={t('auth.bootstrap.teardownStart')} help={t('auth.bootstrap.teardownStartHint')}>
+              <input
+                className="input"
+                value={form.signupTeardownStart}
+                onChange={(e) => set('signupTeardownStart', e.target.value)}
+                placeholder="delete"
+                spellCheck={false}
+              />
+            </Field>
+          </>
+        )}
+
+        <details className="advanced" open={!simple}>
+          <summary className="advanced__summary">
+            {t('auth.advanced.bootstrap')}
+            <span className="field__badge">{t('badge.jsonAdvanced')}</span>
+          </summary>
+          <div className="stack advanced__body" style={{ gap: 16 }}>
+            <Check
+              checked={!simple}
+              onChange={(v) => set('signupMode', v ? 'advanced' : 'simple')}
+              label={t('auth.advanced.rawBootstrap')}
+              sub={t('auth.advanced.rawBootstrapSub')}
+            />
+            <div className="field-row field-row--2">
+              <Field
+                label={t('auth.bootstrap.captureToken')}
+                help={t('auth.bootstrap.captureTokenHint')}
+                tip={<HelpTip label={t('auth.bootstrap.captureToken')} text={t('auth.bootstrap.captureToken.tip')} />}
+              >
+                <input
+                  className="input"
+                  value={form.signupCaptureToken}
+                  onChange={(e) => set('signupCaptureToken', e.target.value)}
+                  placeholder={t('auth.tokenVar.autoPlaceholder')}
+                  spellCheck={false}
+                />
+              </Field>
+              <Field label={t('auth.bootstrap.captureSubject')} help={t('auth.bootstrap.captureSubjectHint')}>
+                <input
+                  className="input"
+                  value={form.signupCaptureSubject}
+                  onChange={(e) => set('signupCaptureSubject', e.target.value)}
+                  placeholder="id"
+                  spellCheck={false}
+                />
+              </Field>
+            </div>
+            {!simple && (
+              <Field label={t('auth.bootstrap.start')} help={t('auth.bootstrap.startHint')}>
+                <input
+                  className="input"
+                  value={form.signupStart}
+                  onChange={(e) => set('signupStart', e.target.value)}
+                  placeholder="signup"
+                  spellCheck={false}
+                />
+              </Field>
+            )}
+          </div>
+        </details>
+      </fieldset>
+    </div>
+  )
+}
+
+// AuthBootstrapAdvancedBody is the raw signup-steps JSON authoring, shown when the
+// operator opts into advanced mode. It is the original power-user path preserved: a JSON
+// array of signup requests with their own ids, methods, paths, bodies and extracts.
+function AuthBootstrapAdvancedBody({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  return (
+    <Field
+      label={t('auth.bootstrap.steps')}
+      help={t('auth.bootstrap.stepsHint')}
+      tip={<HelpTip label={t('auth.bootstrap.steps')} text={t('auth.bootstrap.steps.tip')} />}
+    >
+      <textarea
+        className="textarea"
+        value={form.signupStepsJSON}
+        onChange={(e) => set('signupStepsJSON', e.target.value)}
+        rows={7}
+        placeholder={signupStepsPlaceholder}
+        spellCheck={false}
+      />
+    </Field>
+  )
+}
+
+// HTTP_METHODS is the small set the simple login/signup mini-forms offer in their
+// method selector — the verbs a login or signup realistically uses.
+const HTTP_METHODS = ['POST', 'PUT', 'GET', 'PATCH', 'DELETE']
 
 // LangToggle is the header language switch (EN / 한국어): a small segmented control
 // bound to the i18n context. The active language is marked with aria-pressed so the

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -509,6 +510,227 @@ func TestRunSourcePoolShipsReferenceToEngine(t *testing.T) {
 	// Defense in depth: the raw body must not contain a token field at all.
 	if strings.Contains(string(*body), "\"token\"") {
 		t.Errorf("the shipped body must contain no token bytes: %s", *body)
+	}
+}
+
+// TestRunAuthExpiryNoteEndToEnd pins TASK 2 end to end: a SUT that rejects with
+// 401 makes the run report carry the non-failing "auth may have expired" note,
+// while a clean SUT carries none. The note is observability only — the 401 run is
+// not failed by it (no --fail-on-findings here), and no auth finding is raised.
+func TestRunAuthExpiryNoteEndToEnd(t *testing.T) {
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer rejecting.Close()
+
+	out := captureStdout(t, func() error {
+		return runScenario([]string{"--target", rejecting.URL, "--get", "/", "--users", "5", "--json"})
+	})
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if len(rep.Notes) == 0 {
+		t.Fatalf("a 401-clustered run must carry an auth-expiry note; report: %+v", rep)
+	}
+	var found bool
+	for _, n := range rep.Notes {
+		if strings.Contains(strings.ToLower(n), "auth") && strings.Contains(n, "401") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notes %v should include the 401 auth-expiry note", rep.Notes)
+	}
+
+	clean := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer clean.Close()
+	cleanOut := captureStdout(t, func() error {
+		return runScenario([]string{"--target", clean.URL, "--get", "/", "--users", "5", "--json"})
+	})
+	var cleanRep cliReport
+	if err := json.Unmarshal([]byte(cleanOut), &cleanRep); err != nil {
+		t.Fatalf("parse clean report json: %v\n%s", err, cleanOut)
+	}
+	if len(cleanRep.Notes) != 0 {
+		t.Errorf("a clean run must carry no notes, got %v", cleanRep.Notes)
+	}
+}
+
+// authSeenSUT returns an httptest SUT that records each Authorization header it
+// sees (under a mutex) and always 200s, plus accessors for the test to assert
+// what bearer tokens reached it.
+func authSeenSUT(t *testing.T) (*httptest.Server, func() map[string]int) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := map[string]int{}
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.Header.Get("Authorization")]++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(sut.Close)
+	return sut, func() map[string]int {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]int, len(seen))
+		for k, v := range seen {
+			out[k] = v
+		}
+		return out
+	}
+}
+
+// authSourceScenario writes a scenario that sends "Bearer {{.token}}" but
+// declares NO auth block, so the only credentials a run can carry come from the
+// --auth-source flag. Returns the scenario file path.
+func authSourceScenario(t *testing.T, target string, users int) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "scenario.yaml")
+	doc := "target: " + target + "\n" +
+		"users: " + itoa(users) + "\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"    headers:\n" +
+		"      Authorization: \"Bearer {{.token}}\"\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+	return file
+}
+
+func itoa(n int) string { return strconv.Itoa(n) }
+
+// TestRunAuthSourceFileFlag pins TASK 1: --auth-source file:<path> attaches an
+// external credential pool to a scenario that declares no auth, resolving the
+// file in-process (the secret never crosses the wire) and authenticating the run.
+// The format is inferred from the .csv extension.
+func TestRunAuthSourceFileFlag(t *testing.T) {
+	sut, seenFn := authSeenSUT(t)
+
+	dir := t.TempDir()
+	pool := filepath.Join(dir, "pool.csv")
+	if err := os.WriteFile(pool, []byte("subject,token\nalice,tok-alice\nbob,tok-bob\n"), 0o644); err != nil {
+		t.Fatalf("write pool: %v", err)
+	}
+	file := authSourceScenario(t, sut.URL, 2)
+
+	out := captureStdout(t, func() error {
+		return runScenario([]string{file, "--auth-source", "file:" + pool, "--json"})
+	})
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if rep.Run.Status != "completed" || rep.Stats.Total != 2 {
+		t.Fatalf("got status=%q total=%d, want completed/2", rep.Run.Status, rep.Stats.Total)
+	}
+	seen := seenFn()
+	if seen["Bearer tok-alice"] != 1 || seen["Bearer tok-bob"] != 1 {
+		t.Errorf("auth headers seen = %v, want one each of tok-alice and tok-bob", seen)
+	}
+}
+
+// TestRunAuthSourceEnvFlag pins that --auth-source env:VAR reads the pool from an
+// environment variable. The tokens format (one secret per line) is explicit here.
+func TestRunAuthSourceEnvFlag(t *testing.T) {
+	sut, seenFn := authSeenSUT(t)
+	t.Setenv("TMULA_TEST_CREDS", "tok-x\ntok-y\n")
+	file := authSourceScenario(t, sut.URL, 2)
+
+	out := captureStdout(t, func() error {
+		return runScenario([]string{file, "--auth-source", "env:TMULA_TEST_CREDS", "--auth-format", "tokens", "--json"})
+	})
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if rep.Run.Status != "completed" || rep.Stats.Total != 2 {
+		t.Fatalf("got status=%q total=%d, want completed/2", rep.Run.Status, rep.Stats.Total)
+	}
+	seen := seenFn()
+	if seen["Bearer tok-x"] != 1 || seen["Bearer tok-y"] != 1 {
+		t.Errorf("auth headers seen = %v, want one each of tok-x and tok-y", seen)
+	}
+}
+
+// TestRunAuthSourceOverridesScenarioAuth pins the documented precedence: when the
+// scenario ALSO declares an auth block, the --auth-source flag wins — the run
+// authenticates with the flag's pool, not the file's.
+func TestRunAuthSourceOverridesScenarioAuth(t *testing.T) {
+	sut, seenFn := authSeenSUT(t)
+
+	dir := t.TempDir()
+	pool := filepath.Join(dir, "pool.csv")
+	if err := os.WriteFile(pool, []byte("subject,token\nflagged,tok-from-flag\n"), 0o644); err != nil {
+		t.Fatalf("write pool: %v", err)
+	}
+	file := filepath.Join(dir, "scenario.yaml")
+	doc := "target: " + sut.URL + "\n" +
+		"users: 1\n" +
+		"flow:\n" +
+		"  - id: a\n" +
+		"    request: GET /a\n" +
+		"    headers:\n" +
+		"      Authorization: \"Bearer {{.token}}\"\n" +
+		"auth:\n" +
+		"  users:\n" +
+		"    - subject: scenario\n" +
+		"      token: tok-from-scenario\n"
+	if err := os.WriteFile(file, []byte(doc), 0o644); err != nil {
+		t.Fatalf("write scenario: %v", err)
+	}
+
+	out := captureStdout(t, func() error {
+		return runScenario([]string{file, "--auth-source", "file:" + pool, "--json"})
+	})
+	var rep cliReport
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("parse report json: %v\n%s", err, out)
+	}
+	if rep.Run.Status != "completed" {
+		t.Fatalf("status = %q, want completed", rep.Run.Status)
+	}
+	seen := seenFn()
+	if seen["Bearer tok-from-flag"] == 0 {
+		t.Errorf("flag pool token never reached the SUT; seen = %v", seen)
+	}
+	if seen["Bearer tok-from-scenario"] != 0 {
+		t.Errorf("scenario auth block was used despite --auth-source override; seen = %v", seen)
+	}
+}
+
+// TestRunAuthSourceErrors covers the clear-failure paths: a malformed flag form
+// (no scheme), an unknown scheme, a missing file, and an unset env var must each
+// error before or during expansion rather than silently running unauthenticated.
+func TestRunAuthSourceErrors(t *testing.T) {
+	sut, _ := authSeenSUT(t)
+	file := authSourceScenario(t, sut.URL, 1)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no scheme", []string{file, "--auth-source", "./pool.csv"}, "auth-source"},
+		{"unknown scheme", []string{file, "--auth-source", "vault:/secret"}, "auth-source"},
+		{"missing file", []string{file, "--auth-source", "file:/no/such/pool.csv"}, "credential source"},
+		{"unset env", []string{file, "--auth-source", "env:TMULA_DEFINITELY_UNSET"}, "credential source"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := captureStdoutErr(t, func() error { return runScenario(c.args) })
+			if err == nil {
+				t.Fatalf("%s: expected an error, got nil", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: error = %q, want it to mention %q", c.name, err, c.want)
+			}
+		})
 	}
 }
 

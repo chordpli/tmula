@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { ExperimentForm } from './api'
+import { AUTH_FORM_DEFAULTS, type ExperimentForm } from './api'
 import { doctorForm } from './scenarioDoctor'
 
 const form: ExperimentForm = {
@@ -35,6 +35,7 @@ const form: ExperimentForm = {
   thinkMaxMs: 0,
   segmentsJSON: '',
   traceEnabled: false,
+  ...AUTH_FORM_DEFAULTS,
 }
 
 function codes(f: ExperimentForm = form): string[] {
@@ -122,5 +123,56 @@ describe('doctorForm', () => {
 
   it('warns that personas are ignored by the closed model', () => {
     expect(codes({ ...form, segmentsJSON: '[{"name":"buyer","weight":1}]' })).toContain('segments-closed')
+  })
+
+  it('flags a malformed multi-user login credential list', () => {
+    const got = codes({
+      ...form,
+      authMode: 'login',
+      loginMode: 'simple',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'user,pass\nalice,pw', // wrong header names → cannot parse
+    })
+    expect(got).toContain('auth-login-cred-invalid')
+  })
+
+  it('warns when a login credential list is supplied but the body never references a row', () => {
+    const got = codes({
+      ...form,
+      authMode: 'login',
+      loginMode: 'simple',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+      loginBodyTemplate: '{"username": "fixed", "password": "fixed"}', // no {{.username}}
+    })
+    expect(got).toContain('auth-login-cred-unused')
+  })
+
+  it('does not warn when the login body templates the credential-list row in', () => {
+    const got = codes({
+      ...form,
+      authMode: 'login',
+      loginMode: 'simple',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+      loginBodyTemplate: '{"username": "{{.username}}", "password": "{{.password}}"}',
+    })
+    expect(got).not.toContain('auth-login-cred-unused')
+    expect(got).not.toContain('auth-login-cred-invalid')
+  })
+
+  it('does not flag the credential list when no login list is supplied (single identity)', () => {
+    const got = codes({
+      ...form,
+      authMode: 'login',
+      loginMode: 'simple',
+      loginUrlPath: '/login',
+      // loginCredText stays empty → single-identity login, nothing to check.
+    })
+    expect(got).not.toContain('auth-login-cred-invalid')
+    expect(got).not.toContain('auth-login-cred-unused')
   })
 })

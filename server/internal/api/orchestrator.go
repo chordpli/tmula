@@ -23,6 +23,22 @@ import (
 func (s *Server) execute(ctx context.Context, rs *runState, spec RunSpec) {
 	defer close(rs.done)
 
+	// Bootstrap-signup runs provision real accounts up front; defer their teardown
+	// for the whole run so the accounts are deprovisioned no matter how execute
+	// returns (normal finish, error, or a killed/timed-out run). runTeardown runs on
+	// a FRESH context — never the run context, which may already be cancelled here —
+	// so a killed run still deprovisions, and it is a no-op for a keep-accounts run
+	// or a non-bootstrap run. The provider is built once and shared with the run
+	// paths through rs so prewarm, the live auth, and teardown all act on the SAME
+	// cached identities.
+	if boot, err := s.bootstrapAuthFor(spec, rs.guard); err != nil {
+		s.finalizeRun(ctx, rs, spec, err)
+		return
+	} else if boot != nil {
+		rs.bootstrap = boot
+		defer boot.runTeardown(rs.exec.ID, spec.PoolSize())
+	}
+
 	// Open model: the scheduler generates sessions over time and returns the
 	// aggregate directly.
 	if spec.IsOpen() {
@@ -198,6 +214,12 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		wireAuth = func(ctx context.Context, userIndex int) (load.CredentialHolder, load.RefreshFunc, error) {
 			return login.seed(ctx, userIndex)
 		}
+	} else if rs.bootstrap != nil {
+		// Bootstrap-signup: the provider provisions an account per arrival index the
+		// first time the scheduler authenticates it (the deduping cache makes a repeat
+		// arrival index reuse its account). It is the same provider execute deferred
+		// teardown on, so every provisioned account is deprovisioned afterward.
+		provider = rs.bootstrap.provider
 	} else {
 		provider, err = spec.CredentialProvider()
 		if err != nil {
@@ -329,6 +351,26 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 // untouched — every static user keeps Holder==nil and renders Cred directly.
 func (s *Server) authenticateClosedUsers(ctx context.Context, rs *runState, spec RunSpec) ([]load.VirtualUser, error) {
 	users := spec.ClosedUsers()
+
+	// Bootstrap-signup strategy: provision one real account per user up front
+	// (prewarmed under the rate cap) and assign each user the credential its index
+	// was provisioned with. The provider is the one execute built and stored on rs,
+	// so the deferred teardown deprovisions exactly these identities. Like the static
+	// pool, each user renders Cred directly (Holder==nil) — bootstrap credentials do
+	// not refresh mid-run.
+	if rs.bootstrap != nil {
+		if err := rs.bootstrap.Prewarm(ctx, len(users)); err != nil {
+			return nil, fmt.Errorf("api: prewarm bootstrap accounts: %w", err)
+		}
+		for i := range users {
+			cred, err := rs.bootstrap.provider.Acquire(ctx, i)
+			if err != nil {
+				return nil, fmt.Errorf("api: provision bootstrap account for user %d: %w", i, err)
+			}
+			users[i].Cred = cred
+		}
+		return users, nil
+	}
 
 	// Login strategy: holder + refresh per user, minted from the login flow.
 	if login, err := s.loginAuthFor(spec, rs.guard); err != nil {

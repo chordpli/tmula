@@ -2,6 +2,15 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  AUTH_FORM_DEFAULTS,
+  applyReplaceMe,
+  authFormFromImport,
+  authFormFromSpec,
+  buildAuth,
+  findReplaceMePlaceholders,
+  placeholderLabel,
+  simpleLoginFlow,
+  simpleSignupFlow,
   buildRunSpec,
   classifyEdge,
   compareURL,
@@ -26,9 +35,12 @@ import {
   lerpColor,
   outcomeRates,
   outcomeSummary,
+  parseCredentials,
+  parseLoginCredentials,
   parseHeatFrame,
   parseLatencyFrame,
   parseAllowlist,
+  parseSignupSteps,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
@@ -50,6 +62,12 @@ import {
 // `unknown` on the wire so the UI never depends on its shape elsewhere).
 function expParams(spec: RunSpec): { virtualUserCount: number; deviationRate: number } {
   return (spec.experiment as { params: { virtualUserCount: number; deviationRate: number } }).params
+}
+
+// expAuthStrategy unwraps the experiment params' authStrategy for the auth-wiring
+// assertions (same reason expParams reaches through the `unknown` experiment).
+function expAuthStrategy(spec: RunSpec): string {
+  return (spec.experiment as { params: { authStrategy: string } }).params.authStrategy
 }
 
 // rgb parses a color into channels for assertions, accepting both the "rgb(r, g, b)"
@@ -83,6 +101,7 @@ const form: ExperimentForm = {
   thinkMaxMs: 0,
   segmentsJSON: '',
   traceEnabled: false,
+  ...AUTH_FORM_DEFAULTS,
 }
 
 describe('allowlist helpers', () => {
@@ -277,6 +296,429 @@ describe('buildRunSpec', () => {
     // degrades a hand-typed out-of-range percent gracefully instead.
     expect(expParams(buildRunSpec({ ...form, deviationPct: 150 })).deviationRate).toBe(1)
     expect(expParams(buildRunSpec({ ...form, deviationPct: -10 })).deviationRate).toBe(0)
+  })
+})
+
+describe('parseCredentials', () => {
+  it('parses CSV with a token column and an optional subject column', () => {
+    const out = parseCredentials('csv', 'subject,token\nalice,tok-a\nbob,tok-b\n')
+    expect(out).toEqual([
+      { subject: 'alice', token: 'tok-a' },
+      { subject: 'bob', token: 'tok-b' },
+    ])
+  })
+
+  it('parses a CSV with only a token column (no subject)', () => {
+    const out = parseCredentials('csv', 'token\ntok-a\ntok-b')
+    expect(out).toEqual([{ token: 'tok-a' }, { token: 'tok-b' }])
+  })
+
+  it('honors quoted CSV fields and column order independent of position', () => {
+    const out = parseCredentials('csv', 'token,subject\n"tok,with,commas","alice, the user"')
+    expect(out).toEqual([{ subject: 'alice, the user', token: 'tok,with,commas' }])
+  })
+
+  it('throws when a CSV has no token column header', () => {
+    expect(() => parseCredentials('csv', 'subject,secret\nalice,tok')).toThrow(/token/)
+  })
+
+  it('parses JSONL with token and optional subject', () => {
+    const body = '{"subject":"alice","token":"tok-a"}\n{"token":"tok-b"}\n'
+    expect(parseCredentials('jsonl', body)).toEqual([{ subject: 'alice', token: 'tok-a' }, { token: 'tok-b' }])
+  })
+
+  it('throws when a JSONL line is missing its token or is not JSON', () => {
+    expect(() => parseCredentials('jsonl', '{"subject":"a"}')).toThrow(/token/)
+    expect(() => parseCredentials('jsonl', 'not json')).toThrow()
+  })
+
+  it('parses plain tokens, one secret per non-blank line, with no subject', () => {
+    expect(parseCredentials('tokens', 'tok-a\n\n  tok-b  \n')).toEqual([{ token: 'tok-a' }, { token: 'tok-b' }])
+  })
+
+  it('throws on an empty body for every format', () => {
+    expect(() => parseCredentials('csv', '   ')).toThrow()
+    expect(() => parseCredentials('jsonl', '   ')).toThrow()
+    expect(() => parseCredentials('tokens', '   ')).toThrow()
+  })
+})
+
+describe('parseLoginCredentials (log in multiple users)', () => {
+  it('parses CSV username,password rows into { subject, token } login inputs', () => {
+    const out = parseLoginCredentials('csv', 'username,password\nalice,pw-a\nbob,pw-b\n')
+    // subject = username, token = password (login INPUTS, not pre-issued tokens).
+    expect(out).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+  })
+
+  it('reads the CSV columns by header name regardless of order', () => {
+    const out = parseLoginCredentials('csv', 'password,username\npw-a,alice')
+    expect(out).toEqual([{ subject: 'alice', token: 'pw-a' }])
+  })
+
+  it('throws when the CSV header lacks a username or password column', () => {
+    expect(() => parseLoginCredentials('csv', 'user,pass\nalice,pw')).toThrow(/username.*password|password.*username/i)
+  })
+
+  it('parses JSONL {username,password} objects into login inputs', () => {
+    const body = '{"username":"alice","password":"pw-a"}\n{"username":"bob","password":"pw-b"}\n'
+    expect(parseLoginCredentials('jsonl', body)).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+  })
+
+  it('throws when a JSONL row is missing its username or password', () => {
+    expect(() => parseLoginCredentials('jsonl', '{"username":"alice"}')).toThrow(/password/i)
+    expect(() => parseLoginCredentials('jsonl', '{"password":"pw"}')).toThrow(/username/i)
+    expect(() => parseLoginCredentials('jsonl', 'not json')).toThrow()
+  })
+
+  it('throws on an empty body for both formats', () => {
+    expect(() => parseLoginCredentials('csv', '   ')).toThrow()
+    expect(() => parseLoginCredentials('jsonl', '   ')).toThrow()
+  })
+})
+
+describe('parseSignupSteps', () => {
+  it('parses a well-formed signup step array', () => {
+    const steps = parseSignupSteps('[{"id":"signup","method":"POST","path":"/signup"}]', 'signup')
+    expect(steps).toEqual([{ id: 'signup', method: 'POST', path: '/signup' }])
+  })
+
+  it('throws on a non-array, or a step missing id/method/path', () => {
+    expect(() => parseSignupSteps('{"id":"x"}', 'signup')).toThrow(/array/)
+    expect(() => parseSignupSteps('[{"method":"POST","path":"/x"}]', 'signup')).toThrow(/id/)
+    expect(() => parseSignupSteps('[{"id":"x","path":"/x"}]', 'signup')).toThrow(/method/)
+    expect(() => parseSignupSteps('[{"id":"x","method":"POST"}]', 'teardown')).toThrow(/path/)
+  })
+})
+
+describe('buildAuth', () => {
+  it('returns null for the None mode (anonymous run)', () => {
+    expect(buildAuth(form)).toBeNull()
+    expect(buildAuth({ ...form, authMode: 'none' })).toBeNull()
+  })
+
+  it('builds a pool from pasted CSV, resolved to inline entries (never a source)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'pool',
+      authPoolFormat: 'csv',
+      authPoolText: 'subject,token\nalice,tok-a\nbob,tok-b',
+    })
+    expect(build).not.toBeNull()
+    expect(build!.authStrategy).toBe('pool')
+    expect(build!.credentialPool.strategy).toBe('pool')
+    expect(build!.credentialPool.entries).toEqual([
+      { subject: 'alice', token: 'tok-a' },
+      { subject: 'bob', token: 'tok-b' },
+    ])
+    // D1: the browser only ever sends inline entries, never a file/env source.
+    expect((build!.credentialPool as { source?: unknown }).source).toBeUndefined()
+    expect(build!.loginFlow).toBeUndefined()
+  })
+
+  it('builds a login pool plus the standalone login flow, defaulting the scope', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login","apiTemplateId":"t"}],"edges":[]}',
+      loginTemplatesJSON: '{"t":{"method":"POST","path":"/login","extract":{"access_token":"$.access_token"}}}',
+      loginStart: 'login',
+      loginTokenVar: 'access_token',
+      loginSubjectVar: 'user_id',
+      loginScope: 'per-user',
+    })
+    expect(build!.authStrategy).toBe('login')
+    expect(build!.credentialPool.strategy).toBe('login')
+    // The pool references the flow by id; the flow itself rides at the top level.
+    expect(build!.credentialPool.loginFlowId).toBe('login')
+    // Per-user is the default scope, so it is omitted from the pool to stay minimal.
+    expect(build!.credentialPool.loginScope).toBeUndefined()
+    expect(build!.loginFlow).toEqual({
+      graph: { id: 'login', nodes: [{ id: 'login', apiTemplateId: 't' }], edges: [] },
+      templates: { t: { method: 'POST', path: '/login', extract: { access_token: '$.access_token' } } },
+      start: 'login',
+      tokenVar: 'access_token',
+      subjectVar: 'user_id',
+    })
+  })
+
+  it('sends the shared (client_credentials) scope when selected', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
+      loginTemplatesJSON: '{}',
+      loginStart: 'login',
+      loginTokenVar: 'tok',
+      loginScope: 'shared',
+    })
+    expect(build!.credentialPool.loginScope).toBe('shared')
+  })
+
+  it('omits tokenVar when login has no explicit capture (auto-detect)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login"}],"edges":[]}',
+      loginTemplatesJSON: '{}',
+      loginStart: 'login',
+      loginTokenVar: '   ', // blank → auto-detect
+    })
+    expect(build!.authStrategy).toBe('login')
+    // No tokenVar is sent, so the backend auto-detects the token from the response.
+    expect(build!.loginFlow?.tokenVar).toBeUndefined()
+  })
+
+  it('attaches credentialPool.entries from a CSV login credential list (multi-user)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+    })
+    expect(build!.credentialPool.strategy).toBe('login')
+    // Each row becomes { subject: username, token: password } so each virtual user logs
+    // in as a different account; the backend reads entries[i % N].
+    expect(build!.credentialPool.entries).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+    // The login flow itself still rides at the top level (the body templates the rows in).
+    expect(build!.loginFlow).toBeDefined()
+  })
+
+  it('attaches credentialPool.entries from a JSONL login credential list (multi-user)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'jsonl',
+      loginCredText: '{"username":"alice","password":"pw-a"}',
+    })
+    expect(build!.credentialPool.entries).toEqual([{ subject: 'alice', token: 'pw-a' }])
+  })
+
+  it('omits entries when the login credential list is empty (single-identity, unchanged)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredText: '   ', // blank → single-identity login
+    })
+    expect(build!.credentialPool.strategy).toBe('login')
+    // No entries: the run mints ONE identity from the login body, exactly as before.
+    expect(build!.credentialPool.entries).toBeUndefined()
+  })
+
+  it('propagates a malformed login credential list as a throw (fail-fast)', () => {
+    expect(() =>
+      buildAuth({
+        ...form,
+        authMode: 'login',
+        loginUrlPath: '/login',
+        loginCredFormat: 'csv',
+        loginCredText: 'user,pass\nalice,pw', // wrong header names
+      }),
+    ).toThrow(/username|password/i)
+  })
+
+  it('builds a bootstrap pool with a signup flow, capture, teardown and keepAccounts', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'bootstrap',
+      signupMode: 'advanced',
+      authBootstrapConfirmed: true,
+      signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup","extract":{"tok":"$.token"}}]',
+      signupStart: 'signup',
+      signupCaptureToken: 'tok',
+      signupCaptureSubject: 'id',
+      signupTeardownJSON: '[{"id":"del","method":"DELETE","path":"/accounts/{{.subject}}"}]',
+      signupTeardownStart: 'del',
+      keepAccounts: false,
+    })
+    expect(build!.authStrategy).toBe('bootstrap-signup')
+    const pool = build!.credentialPool
+    expect(pool.strategy).toBe('bootstrap-signup')
+    expect(pool.keepAccounts).toBe(false)
+    expect(pool.signupFlow).toEqual({
+      steps: [{ id: 'signup', method: 'POST', path: '/signup', extract: { tok: '$.token' } }],
+      start: 'signup',
+      capture: { token: 'tok', subject: 'id' },
+      teardown: [{ id: 'del', method: 'DELETE', path: '/accounts/{{.subject}}' }],
+      teardownStart: 'del',
+    })
+  })
+
+  it('omits the signup capture token when none is given (auto-detect)', () => {
+    const build = buildAuth({
+      ...form,
+      authMode: 'bootstrap',
+      signupMode: 'advanced',
+      authBootstrapConfirmed: true,
+      signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
+      signupStart: 'signup',
+      signupCaptureToken: '   ', // blank → auto-detect
+      signupCaptureSubject: 'id',
+      keepAccounts: true,
+    })
+    expect(build!.authStrategy).toBe('bootstrap-signup')
+    const sf = build!.credentialPool.signupFlow!
+    // No capture.token is sent, so the backend auto-detects it from the response;
+    // the subject is still captured (so teardown can name the account).
+    expect(sf.capture.token).toBeUndefined()
+    expect(sf.capture.subject).toBe('id')
+  })
+
+  it('refuses bootstrap until the non-production safety gate is confirmed', () => {
+    const base = {
+      ...form,
+      authMode: 'bootstrap' as const,
+      signupMode: 'advanced' as const,
+      signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
+      signupCaptureToken: 'tok',
+      keepAccounts: true,
+    }
+    // Unconfirmed → throws.
+    expect(() => buildAuth(base)).toThrow(/non-production|confirm/i)
+    // Confirmed → builds.
+    expect(buildAuth({ ...base, authBootstrapConfirmed: true })!.authStrategy).toBe('bootstrap-signup')
+  })
+})
+
+describe('buildRunSpec auth wiring', () => {
+  it('keeps the None path byte-identical (no credentialPool, authStrategy pool)', () => {
+    const spec = buildRunSpec(form)
+    expect(spec.credentialPool).toBeUndefined()
+    expect(spec.loginFlow).toBeUndefined()
+    expect(expAuthStrategy(spec)).toBe('pool')
+  })
+
+  it('attaches a pool credentialPool and the pool authStrategy', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'pool',
+      authPoolFormat: 'tokens',
+      authPoolText: 'tok-a\ntok-b',
+    })
+    expect(expAuthStrategy(spec)).toBe('pool')
+    expect(spec.credentialPool?.strategy).toBe('pool')
+    expect(spec.credentialPool?.entries).toEqual([{ token: 'tok-a' }, { token: 'tok-b' }])
+    expect(spec.loginFlow).toBeUndefined()
+  })
+
+  it('attaches a login credentialPool + loginFlow and the login authStrategy', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'login',
+      loginMode: 'advanced',
+      loginGraphJSON: '{"id":"login","nodes":[{"id":"login","apiTemplateId":"t"}],"edges":[]}',
+      loginTemplatesJSON: '{"t":{"method":"POST","path":"/login","extract":{"at":"$.access_token"}}}',
+      loginStart: 'login',
+      loginTokenVar: 'at',
+    })
+    expect(expAuthStrategy(spec)).toBe('login')
+    expect(spec.credentialPool?.strategy).toBe('login')
+    expect(spec.credentialPool?.loginFlowId).toBe('login')
+    expect(spec.loginFlow?.tokenVar).toBe('at')
+    expect(spec.loginFlow?.start).toBe('login')
+  })
+
+  it('carries the multi-user login credential list through to the spec entries', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginCredFormat: 'csv',
+      loginCredText: 'username,password\nalice,pw-a\nbob,pw-b',
+    })
+    expect(expAuthStrategy(spec)).toBe('login')
+    expect(spec.credentialPool?.entries).toEqual([
+      { subject: 'alice', token: 'pw-a' },
+      { subject: 'bob', token: 'pw-b' },
+    ])
+    // The login flow still rides at the top level alongside the pool.
+    expect(spec.loginFlow).toBeDefined()
+  })
+
+  it('attaches a bootstrap credentialPool and the bootstrap authStrategy (confirmed)', () => {
+    const spec = buildRunSpec({
+      ...form,
+      authMode: 'bootstrap',
+      signupMode: 'advanced',
+      authBootstrapConfirmed: true,
+      signupStepsJSON: '[{"id":"signup","method":"POST","path":"/signup"}]',
+      signupCaptureToken: 'tok',
+      keepAccounts: true,
+    })
+    expect(expAuthStrategy(spec)).toBe('bootstrap-signup')
+    expect(spec.credentialPool?.strategy).toBe('bootstrap-signup')
+    expect(spec.credentialPool?.keepAccounts).toBe(true)
+    expect(spec.loginFlow).toBeUndefined()
+  })
+
+  it('propagates an invalid auth config as a throw (fail-fast, no partial spec)', () => {
+    expect(() => buildRunSpec({ ...form, authMode: 'pool', authPoolText: '' })).toThrow()
+  })
+})
+
+describe('authFormFromSpec', () => {
+  it('maps no credentialPool to the None mode', () => {
+    expect(authFormFromSpec({})).toEqual({ authMode: 'none' })
+  })
+
+  it('maps a pool spec to pool mode (entries are never restored — secret is masked)', () => {
+    const patch = authFormFromSpec({ credentialPool: { id: 'p', strategy: 'pool', entries: [{ subject: 'a' }] } })
+    expect(patch.authMode).toBe('pool')
+    // The masked secret cannot round-trip, so no text is restored.
+    expect(patch.authPoolText).toBeUndefined()
+  })
+
+  it('restores the login flow shape and scope (no secret involved)', () => {
+    const patch = authFormFromSpec({
+      credentialPool: { id: 'p', strategy: 'login', loginFlowId: 'login', loginScope: 'shared' },
+      loginFlow: {
+        graph: { id: 'login', nodes: [{ id: 'login' }], edges: [] },
+        templates: { t: { method: 'POST', path: '/login' } },
+        start: 'login',
+        tokenVar: 'at',
+        subjectVar: 'uid',
+      },
+    })
+    expect(patch.authMode).toBe('login')
+    expect(patch.loginScope).toBe('shared')
+    expect(patch.loginStart).toBe('login')
+    expect(patch.loginTokenVar).toBe('at')
+    expect(patch.loginSubjectVar).toBe('uid')
+    expect(JSON.parse(patch.loginGraphJSON!)).toEqual({ id: 'login', nodes: [{ id: 'login' }], edges: [] })
+  })
+
+  it('restores the bootstrap flow but never pre-confirms the safety gate', () => {
+    const patch = authFormFromSpec({
+      credentialPool: {
+        id: 'p',
+        strategy: 'bootstrap-signup',
+        keepAccounts: true,
+        signupFlow: {
+          steps: [{ id: 'signup', method: 'POST', path: '/signup' }],
+          capture: { token: 'tok', subject: 'id' },
+        },
+      },
+    })
+    expect(patch.authMode).toBe('bootstrap')
+    // Re-confirmation is required: attach mode does not pre-tick the non-prod gate.
+    expect(patch.authBootstrapConfirmed).toBe(false)
+    expect(patch.keepAccounts).toBe(true)
+    expect(patch.signupCaptureToken).toBe('tok')
+    expect(JSON.parse(patch.signupStepsJSON!)).toEqual([{ id: 'signup', method: 'POST', path: '/signup' }])
   })
 })
 
@@ -1193,6 +1635,7 @@ describe('formFromRunSpec', () => {
       thinkMaxMs: 900,
       segmentsJSON: '',
       traceEnabled: true,
+      ...AUTH_FORM_DEFAULTS,
     }
     const patch = formFromRunSpec(openSpec)!
     const spec = buildRunSpec({ ...base, ...patch })
@@ -1257,5 +1700,144 @@ describe('formFromRunSpec', () => {
     // No workload block = the closed default, with no pool size to apply.
     expect(patch.workloadKind).toBe('closed')
     expect(patch.users).toBeUndefined()
+  })
+})
+
+describe('simpleLoginFlow / simpleSignupFlow (auth mini-forms)', () => {
+  it('compiles the login mini-form into a single-node login flow, auto-detecting the token', () => {
+    const flow = simpleLoginFlow({
+      ...form,
+      loginUrlMethod: 'POST',
+      loginUrlPath: '/oauth/token',
+      loginBodyTemplate: 'grant_type=password',
+      loginTokenVar: '',
+    })
+    const g = flow.graph as { id: string; nodes: { id: string; apiTemplateId: string }[] }
+    expect(g.nodes).toHaveLength(1)
+    expect(flow.start).toBe(g.nodes[0].id)
+    const tmpl = (flow.templates as Record<string, { method: string; path: string; payloadTemplate?: string }>)[
+      g.nodes[0].apiTemplateId
+    ]
+    expect(tmpl.method).toBe('POST')
+    expect(tmpl.path).toBe('/oauth/token')
+    expect(tmpl.payloadTemplate).toBe('grant_type=password')
+    expect(flow.tokenVar).toBeUndefined() // empty capture → backend auto-detects
+  })
+
+  it('substitutes only the filled REPLACE_ME secret into the login body', () => {
+    const flow = simpleLoginFlow({
+      ...form,
+      loginUrlPath: '/login',
+      loginBodyTemplate: 'user=REPLACE_ME_USERNAME&pass=REPLACE_ME_PASSWORD',
+      replaceMeValues: { REPLACE_ME_PASSWORD: 's3cret' },
+    })
+    const g = flow.graph as { nodes: { apiTemplateId: string }[] }
+    const tmpl = (flow.templates as Record<string, { payloadTemplate?: string }>)[g.nodes[0].apiTemplateId]
+    expect(tmpl.payloadTemplate).toBe('user=REPLACE_ME_USERNAME&pass=s3cret')
+  })
+
+  it('throws a clear reason when the login path is missing', () => {
+    expect(() => simpleLoginFlow({ ...form, loginUrlPath: '' })).toThrow(/path/i)
+  })
+
+  it('compiles the signup mini-form with a teardown when keepAccounts is off', () => {
+    const flow = simpleSignupFlow({
+      ...form,
+      signupUrlPath: '/register',
+      signupBodyTemplate: '{"email":"a"}',
+      keepAccounts: false,
+      signupTeardownUrlPath: '/accounts/{{.subject}}',
+    })
+    expect(flow.steps).toHaveLength(1)
+    expect(flow.steps[0]).toMatchObject({ method: 'POST', path: '/register', body: '{"email":"a"}' })
+    expect(flow.teardown).toEqual([{ id: 'teardown', method: 'DELETE', path: '/accounts/{{.subject}}' }])
+  })
+
+  it('omits teardown when keepAccounts is on', () => {
+    const flow = simpleSignupFlow({
+      ...form,
+      signupUrlPath: '/register',
+      keepAccounts: true,
+      signupTeardownUrlPath: '/accounts/{{.subject}}',
+    })
+    expect(flow.teardown).toBeUndefined()
+  })
+
+  it('throws a clear reason when the signup path is missing', () => {
+    expect(() => simpleSignupFlow({ ...form, signupUrlPath: '' })).toThrow(/path/i)
+  })
+})
+
+describe('REPLACE_ME placeholder helpers', () => {
+  it('finds distinct placeholders across bodies in first-seen order', () => {
+    expect(
+      findReplaceMePlaceholders('a REPLACE_ME_USERNAME b REPLACE_ME_PASSWORD', 'c REPLACE_ME_PASSWORD'),
+    ).toEqual(['REPLACE_ME_USERNAME', 'REPLACE_ME_PASSWORD'])
+  })
+
+  it('substitutes filled values and leaves unfilled placeholders intact', () => {
+    expect(applyReplaceMe('u=REPLACE_ME_USERNAME p=REPLACE_ME_PASSWORD', { REPLACE_ME_USERNAME: 'alice' })).toBe(
+      'u=alice p=REPLACE_ME_PASSWORD',
+    )
+  })
+
+  it('labels a placeholder for its highlighted input', () => {
+    expect(placeholderLabel('REPLACE_ME_PASSWORD')).toBe('Password')
+    expect(placeholderLabel('REPLACE_ME')).toBe('Value')
+  })
+})
+
+describe('authFormFromImport (import → Auth auto-fill)', () => {
+  const base = { graph: {}, templates: {}, start: '', maxSteps: 0 }
+
+  it('returns an empty patch when the import carries no auth', () => {
+    expect(authFormFromImport(base)).toEqual({})
+  })
+
+  it('maps a derived single-node login flow onto the simple login mini-form', () => {
+    const patch = authFormFromImport({
+      ...base,
+      loginFlow: {
+        graph: { id: 'login', nodes: [{ id: 'login', apiTemplateId: 't_login' }], edges: [] },
+        templates: { t_login: { method: 'POST', path: '/oauth/token', payloadTemplate: 'grant_type=password' } },
+        start: 'login',
+      },
+    })
+    expect(patch.authMode).toBe('login')
+    expect(patch.loginMode).toBe('simple')
+    expect(patch.loginUrlPath).toBe('/oauth/token')
+    expect(patch.loginBodyTemplate).toBe('grant_type=password')
+  })
+
+  it('maps secret-omitted pool entries onto pre-filled JSONL the operator completes', () => {
+    const patch = authFormFromImport({
+      ...base,
+      credentialPool: { id: 'p', strategy: 'pool', entries: [{ subject: 'alice', token: '' }] },
+    })
+    expect(patch.authMode).toBe('pool')
+    expect(patch.authPoolFormat).toBe('jsonl')
+    expect(patch.authPoolText).toContain('alice')
+  })
+
+  it('offers a suggested signup as create-accounts but never confirms the non-prod gate', () => {
+    const patch = authFormFromImport({
+      ...base,
+      suggestedSignup: { steps: [{ id: 'signup', method: 'POST', path: '/register' }], capture: {} },
+    })
+    expect(patch.authMode).toBe('bootstrap')
+    expect(patch.signupUrlPath).toBe('/register')
+    expect(patch.authBootstrapConfirmed).toBe(false)
+  })
+})
+
+describe('buildAuth simple login path', () => {
+  it('builds a login pool + flow from the simple mini-form (default loginMode)', () => {
+    const build = buildAuth({ ...form, authMode: 'login', loginUrlPath: '/login', loginTokenVar: '' })
+    expect(build!.authStrategy).toBe('login')
+    expect(build!.credentialPool.strategy).toBe('login')
+    expect(build!.credentialPool.loginFlowId).toBe('login')
+    const g = build!.loginFlow!.graph as { nodes: { id: string }[] }
+    expect(g.nodes).toHaveLength(1)
+    expect(build!.loginFlow!.tokenVar).toBeUndefined() // auto-detect
   })
 })
