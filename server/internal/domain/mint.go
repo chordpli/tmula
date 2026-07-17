@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"time"
@@ -113,6 +114,34 @@ type MintSpec struct {
 	// distributed worker resolves the key against its OWN root, not the master's. An empty
 	// keyRoot falls back to the process working directory. Irrelevant to an env Key.
 	keyRoot string `json:"-"`
+}
+
+// MarshalJSON / UnmarshalJSON route TTL and Leeway through flexDuration, so a mint spec
+// serializes its durations as human strings ("1h0m0s") and accepts either a string
+// (browser- or hand-authored) or a nanosecond number (a Go-marshaled ShardSpec) on the
+// way back in. The unexported resolvedKey/keyRoot fields keep json:"-" via the alias.
+func (m MintSpec) MarshalJSON() ([]byte, error) {
+	type alias MintSpec
+	return json.Marshal(&struct {
+		TTL    flexDuration `json:"ttl"`
+		Leeway flexDuration `json:"leeway,omitempty"`
+		*alias
+	}{flexDuration(m.TTL), flexDuration(m.Leeway), (*alias)(&m)})
+}
+
+func (m *MintSpec) UnmarshalJSON(data []byte) error {
+	type alias MintSpec
+	aux := &struct {
+		TTL    flexDuration `json:"ttl"`
+		Leeway flexDuration `json:"leeway,omitempty"`
+		*alias
+	}{alias: (*alias)(m)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	m.TTL = time.Duration(aux.TTL)
+	m.Leeway = time.Duration(aux.Leeway)
+	return nil
 }
 
 // Validate checks the mint spec is signable: a known alg, a positive TTL, a present

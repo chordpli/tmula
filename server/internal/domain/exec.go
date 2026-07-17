@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -49,6 +50,31 @@ type ExecSpec struct {
 	// is clamped to MaxExecMaxOutputBytes. It bounds memory so a flooding command cannot
 	// OOM the run.
 	MaxOutputBytes int `json:"maxOutputBytes,omitempty"`
+}
+
+// MarshalJSON / UnmarshalJSON route Timeout through flexDuration, so an exec spec
+// serializes its timeout as a human string ("30s") and accepts either a string
+// (browser- or hand-authored) or a nanosecond number (a Go-marshaled spec) on decode —
+// without this a web-posted exec spec 400s on the string timeout the console sends.
+func (e ExecSpec) MarshalJSON() ([]byte, error) {
+	type alias ExecSpec
+	return json.Marshal(&struct {
+		Timeout flexDuration `json:"timeout,omitempty"`
+		*alias
+	}{flexDuration(e.Timeout), (*alias)(&e)})
+}
+
+func (e *ExecSpec) UnmarshalJSON(data []byte) error {
+	type alias ExecSpec
+	aux := &struct {
+		Timeout flexDuration `json:"timeout,omitempty"`
+		*alias
+	}{alias: (*alias)(e)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	e.Timeout = time.Duration(aux.Timeout)
+	return nil
 }
 
 const (
