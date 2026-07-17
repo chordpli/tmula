@@ -2809,7 +2809,15 @@ export async function discoverIssuer(issuer: string, allow: string[]): Promise<D
     }
     throw new Error(message || `discovery failed: ${res.status}`)
   }
-  return (await res.json()) as DiscoveryResult
+  // IdP-side failures come back as HTTP 200 with { ok:false, reason } (only an
+  // allowlist rejection is a non-2xx) — treat them as errors too, and never hand
+  // the caller a result without a usable token endpoint.
+  const body = (await res.json()) as DiscoveryResult & { ok?: boolean; reason?: string }
+  if (body.ok === false) throw new Error(body.reason || 'discovery failed')
+  if (typeof body.tokenEndpoint !== 'string' || !body.tokenEndpoint.trim()) {
+    throw new Error(body.reason || 'discovery returned no token_endpoint')
+  }
+  return body
 }
 
 // --- Auth preflight (the "Test login / Test token" button) ----------------------

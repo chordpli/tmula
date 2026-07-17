@@ -2583,6 +2583,20 @@ describe('discoverIssuer', () => {
     await expect(discoverIssuer('https://idp.example.com', ['localhost'])).rejects.toThrow(/allowlist/)
   })
 
+  it('treats an HTTP-200 { ok:false, reason } body as a failure, not a success', async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({ ok: false, reason: 'https://idp/.well-known/openid-configuration returned status 404 (want 200)' }),
+    })
+    await expect(discoverIssuer('https://idp', ['idp'])).rejects.toThrow(/404/)
+  })
+
+  it('rejects a 200 body without a usable tokenEndpoint instead of storing undefined', async () => {
+    mockFetch({ ok: true, status: 200, body: JSON.stringify({ ok: true, issuer: 'https://idp' }) })
+    await expect(discoverIssuer('https://idp', ['idp'])).rejects.toThrow(/token_endpoint/)
+  })
+
   it('falls back to the status code on an empty error body and propagates network failures', async () => {
     mockFetch({ ok: false, status: 502, body: '' })
     await expect(discoverIssuer('https://x', ['x'])).rejects.toThrow('502')
