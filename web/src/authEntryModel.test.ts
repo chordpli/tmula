@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
   ADVANCED_AUTH_ENTRIES,
-  advancedFoldOpen,
   entryPatch,
   isAdvancedAuthMode,
   modeForEntry,
@@ -88,19 +87,6 @@ describe('authEntryModel', () => {
     form = { ...form, ...entryPatch('oauth2') }
     expect(selectedEntry(form.authMode, form.authEntryOAuth2)).toBe('oauth2')
     expect(form.oauth2Guide).toEqual(answers)
-  })
-
-  it('keeps the expert fold open once the operator opened it this session', () => {
-    // An advanced mode always forces the fold open.
-    expect(advancedFoldOpen('mint', false)).toBe(true)
-    expect(advancedFoldOpen('exec', false)).toBe(true)
-    // Leaving mint/exec used to snap the fold shut; the userOpened bit keeps it
-    // open for the rest of the session.
-    expect(advancedFoldOpen('pool', true)).toBe(true)
-    expect(advancedFoldOpen('none', true)).toBe(true)
-    // Never opened by the user and no advanced mode selected: stays folded.
-    expect(advancedFoldOpen('pool', false)).toBe(false)
-    expect(advancedFoldOpen('login', false)).toBe(false)
   })
 
   it('selectedEntry self-heals when the wire mode no longer matches the guide', () => {

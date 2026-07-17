@@ -67,8 +67,8 @@ import {
 } from './api'
 import {
   ADVANCED_AUTH_ENTRIES,
-  advancedFoldOpen,
   entryPatch,
+  isAdvancedAuthMode,
   PRIMARY_AUTH_ENTRIES,
   selectedEntry,
   type AuthEntry,
@@ -1321,8 +1321,16 @@ function AuthCard({
 }) {
   const { t } = useI18n()
   const authIssues = authDoctorIssues(issues)
-  // advOpened: the operator opened the expert fold this session — keep it open.
-  const [advOpened, setAdvOpened] = useState(false)
+  // advOpen is the single source of truth for the expert fold's open state, kept in sync
+  // with the DOM by onToggle. An effect forces it open whenever the wire mode becomes an
+  // advanced one (a round-tripped mint/exec import), so the selected strategy radio is
+  // never hidden. Deriving `open` from two OR'd sources instead left the fold stuck shut:
+  // React never rewrites a controlled <details> open prop whose value did not change, so a
+  // manual close could not be re-opened by a later import.
+  const [advOpen, setAdvOpen] = useState(() => isAdvancedAuthMode(form.authMode))
+  useEffect(() => {
+    if (isAdvancedAuthMode(form.authMode)) setAdvOpen(true)
+  }, [form.authMode])
   // The managed-IdP mint footgun: when the imported spec's token issuer holds the
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
@@ -1383,10 +1391,8 @@ function AuthCard({
             shut under their cursor (advOpened tracks the user's open). */}
         <details
           className="advanced"
-          open={advancedFoldOpen(form.authMode, advOpened)}
-          onToggle={(e) => {
-            if ((e.target as HTMLDetailsElement).open) setAdvOpened(true)
-          }}
+          open={advOpen}
+          onToggle={(e) => setAdvOpen((e.target as HTMLDetailsElement).open)}
         >
           <summary className="advanced__summary">
             {t('auth.advanced.modes')}

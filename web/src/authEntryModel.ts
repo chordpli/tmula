@@ -55,15 +55,6 @@ export function isAdvancedAuthMode(mode: AuthMode): boolean {
   return ADVANCED_AUTH_ENTRIES.some((o) => o.entry === mode)
 }
 
-// advancedFoldOpen decides whether the expert (mint/exec) fold renders open: an
-// advanced wire mode always forces it open (a round-tripped exec/mint spec must
-// show its radio), and once the operator opened it this session it STAYS open —
-// switching from mint/exec back to a primary entry must not snap it shut under
-// their cursor.
-export function advancedFoldOpen(mode: AuthMode, userOpened: boolean): boolean {
-  return isAdvancedAuthMode(mode) || userOpened
-}
-
 // entryPatch maps picking a UI entry onto the two form fields it sets: the wire
 // authMode and the UI-only authEntryOAuth2 flag (true only for the guide). It
 // deliberately touches NOTHING else — in particular not oauth2Guide — so switching
