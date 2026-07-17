@@ -236,6 +236,57 @@ func TestPreflightBootstrapRefusesWithoutTeardown(t *testing.T) {
 	}
 }
 
+// TestPreflightBootstrapTearsDownDespiteKeepAccounts proves a bootstrap preflight removes
+// its probe account even when the run spec sets keep-accounts: the preflight forces
+// teardown so it never strands the account it created (a keep-accounts spec would
+// otherwise pass the HasTeardown gate and leak the account with ok:true).
+func TestPreflightBootstrapTearsDownDespiteKeepAccounts(t *testing.T) {
+	var signups, deletes int
+	sut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/signup":
+			signups++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"tok-abc","subject":"u0"}`))
+		case r.Method == http.MethodDelete:
+			deletes++
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer sut.Close()
+
+	srv := NewServer(load.NewRESTAdapter(2 * time.Second))
+	spec := specAuth(sut.URL, 1, &domain.CredentialPool{
+		ID:       "p",
+		Strategy: domain.CredBootstrapSignup,
+		SignupFlow: &domain.SignupFlow{
+			Steps: []domain.SignupStep{{
+				ID: "signup", Method: "POST", Path: "/signup", Body: `{"u":"u{{.userIndex}}"}`,
+				Extract: map[string]string{"tok": "access_token", "uid": "subject"},
+			}},
+			Capture:  domain.SignupCapture{Token: "tok", Subject: "uid"},
+			Teardown: []domain.SignupStep{{ID: "rm", Method: "DELETE", Path: "/u/{{.subject}}"}},
+		},
+		KeepAccounts: true, // the run would keep accounts, but a preflight must NOT strand one
+	})
+
+	code, res := postPreflight(t, srv, spec)
+	if code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", code)
+	}
+	if !res.OK {
+		t.Fatalf("bootstrap preflight should succeed: %+v", res)
+	}
+	if signups != 1 {
+		t.Errorf("expected exactly one signup, got %d", signups)
+	}
+	if deletes != 1 {
+		t.Errorf("teardown must fire despite keep-accounts so the probe account is not stranded; deletes = %d, want 1", deletes)
+	}
+}
+
 // TestPreflightInvalidSpec rejects a request with no credential pool as a 400.
 func TestPreflightInvalidSpec(t *testing.T) {
 	srv := NewServer(load.NewRESTAdapter(2 * time.Second))

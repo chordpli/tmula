@@ -218,6 +218,16 @@ func (s *Server) preflightBootstrap(ctx context.Context, spec RunSpec, guard *sa
 			Reason:   "bootstrap-signup preflight provisions one real account and needs a teardown flow to remove it afterward; declare auth.signup.teardown before preflighting (or preflight a login/pool/mint strategy)",
 		}
 	}
+	// Force teardown for the preflight even if the run spec sets keep-accounts: a preflight
+	// must never strand the probe account it created. bootstrapAuthFor wires teardown only
+	// when !KeepAccounts, so a keep-accounts spec would otherwise pass the HasTeardown gate
+	// and leave the account behind with ok:true. Copy the pool so the caller's spec is
+	// untouched.
+	if pool.KeepAccounts {
+		poolCopy := *pool
+		poolCopy.KeepAccounts = false
+		spec.CredentialPool = &poolCopy
+	}
 	boot, err := s.bootstrapAuthFor(spec, guard)
 	if err != nil {
 		return PreflightResult{OK: false, Strategy: strategy, Reason: err.Error()}
