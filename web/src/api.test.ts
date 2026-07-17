@@ -2326,6 +2326,18 @@ describe('curl paste (parseCurlCommand / authFormFromCurl)', () => {
     expect(parseCurlCommand("curl 'https://x.test/unbalanced")).toBeNull() // open quote
   })
 
+  it('parses curl attached-value flags: -XPUT, -H<value>, -d<value>, and skips -u<value>', () => {
+    const req = parseCurlCommand(
+      `curl -XPUT https://api.example.com/login -H'Content-Type: application/json' -d'a=1' -uadmin:pw`,
+    )
+    expect(req).toEqual({
+      method: 'PUT',
+      url: 'https://api.example.com/login',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'a=1',
+    })
+  })
+
   it('maps a headerless curl onto the simple mini-form, marking the body hand-authored', () => {
     const patch = authFormFromCurl({
       method: 'POST',

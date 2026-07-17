@@ -866,6 +866,16 @@ export function parseCurlCommand(text: string): CurlRequest | null {
       url = tokens[++i] ?? ''
     } else if (CURL_VALUE_FLAGS.has(tok)) {
       i++ // skip the flag's value so it is never mistaken for the URL
+    } else if (tok.startsWith('-X') && !tok.startsWith('--') && tok.length > 2) {
+      method = tok.slice(2).toUpperCase() // curl's attached form: -XPUT
+    } else if (tok.startsWith('-H') && !tok.startsWith('--') && tok.length > 2) {
+      const h = tok.slice(2)
+      const colon = h.indexOf(':')
+      if (colon > 0) headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim()
+    } else if (tok.startsWith('-d') && !tok.startsWith('--') && tok.length > 2) {
+      dataParts.push(tok.slice(2)) // attached form: -d'a=1'
+    } else if (tok.startsWith('-u') && !tok.startsWith('--') && tok.length > 2) {
+      /* attached basic-auth value (-uadmin:pw): consumed, not modeled */
     } else if (tok.startsWith('-')) {
       /* boolean flag we don't use (-s, -k, -v, -L, --compressed, …): ignore */
     } else if (!url) {
