@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -332,13 +333,40 @@ func TestScenarioGraphValidate(t *testing.T) {
 }
 
 func TestCredentialSecretNotSerialized(t *testing.T) {
-	c := Credential{Subject: "u1", Secret: "super-secret-token"}
+	c := Credential{Subject: "u1", Secret: "super-secret-token", Refresh: "super-secret-refresh", ExpiresIn: time.Hour}
 	data, err := json.Marshal(c)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	if string(data) == "" || containsSecret(string(data)) {
 		t.Fatalf("secret leaked into JSON: %s", data)
+	}
+	// Refresh and ExpiresIn are runtime-only (json:"-"): only Subject persists.
+	if indexOf(string(data), "super-secret-refresh") >= 0 {
+		t.Fatalf("refresh token leaked into JSON: %s", data)
+	}
+}
+
+// TestCredentialStringRedactsSecrets pins that %v/%+v on a Credential — the
+// shape a careless log line produces — never prints the access token NOR the
+// refresh token, while still surfacing the non-sensitive subject.
+func TestCredentialStringRedactsSecrets(t *testing.T) {
+	c := Credential{Subject: "u1", Secret: "super-secret-token", Refresh: "super-secret-refresh"}
+	for _, s := range []string{c.String(), fmt.Sprintf("%v", c), fmt.Sprintf("%+v", c)} {
+		if indexOf(s, "super-secret-token") >= 0 {
+			t.Errorf("access token leaked through Stringer: %s", s)
+		}
+		if indexOf(s, "super-secret-refresh") >= 0 {
+			t.Errorf("refresh token leaked through Stringer: %s", s)
+		}
+		if indexOf(s, "u1") < 0 {
+			t.Errorf("subject missing from Stringer output: %s", s)
+		}
+	}
+	// A refresh-only credential (no access token) must still redact the refresh.
+	refreshOnly := Credential{Subject: "u1", Refresh: "super-secret-refresh"}.String()
+	if indexOf(refreshOnly, "super-secret-refresh") >= 0 {
+		t.Errorf("refresh token leaked when Secret empty: %s", refreshOnly)
 	}
 }
 

@@ -47,6 +47,20 @@ type LoginFlow struct {
 	// single-identity login: no row is seeded and {{.username}}/{{.password}} render
 	// empty. The passwords are in-process secrets (Credential.Secret is json:"-").
 	Entries []domain.Credential
+
+	// RefreshRequest / RefreshBody are an OPTIONAL explicit refresh-grant override. When
+	// RefreshBody is set, refreshTemplateFor builds the mid-run refresh transport from it
+	// — SHORT-CIRCUITING the deriveRefreshTemplate gate — so even a login the auto-derive
+	// cannot rewrite (a JSON-body login, or a form login with no grant_type) still gets a
+	// real grant_type=refresh_token exchange instead of a re-login. RefreshRequest is the
+	// "METHOD /path" the refresh POSTs to; it is OPTIONAL and defaults to the login token
+	// node's endpoint when empty (a same-endpoint refresh needs only the body). RefreshBody
+	// is the form body the operator authored; a bare {{.refreshToken}} in it is routed
+	// through urlquery (the SAME convention as the auto-derived body) so an opaque token
+	// stays form-safe. Both empty is the unchanged auto-derive / re-login behavior. They
+	// carry no secret — the refresh token is captured from the live login response.
+	RefreshRequest string
+	RefreshBody    string
 }
 
 // loginMaxStepsDefault bounds a login flow's walk when the flow does not set its
@@ -153,6 +167,89 @@ func NewLoginTokenFunc(runner *load.Runner, flow LoginFlow, baseSeed int64) (aut
 		case hasRow:
 			cred.Subject = row.Subject
 		}
+		// Fold in the OAuth2 refresh grant data when the response carries it — the
+		// data foundation a later real grant_type=refresh_token transport reads. This
+		// is purely additive: a response with no refresh_token/expires_in leaves both
+		// fields zero, so the returned credential is identical to a pre-refresh mint.
+		cred.Refresh, cred.ExpiresIn = load.DetectRefresh(final.Body)
 		return cred, nil
 	}, nil
+}
+
+// refreshNodeID and refreshGraphID label the synthetic single-node graph the refresh
+// transport walks. The refresh exchange is a single token POST, so a one-node flow
+// (the derived refresh template) is sufficient; the labels are internal and never
+// observed by the run.
+const (
+	refreshNodeID  = domain.ID("refresh")
+	refreshGraphID = domain.ID("refresh-flow")
+)
+
+// NewRefreshTokenFunc compiles a derived refresh template into an
+// auth.RefreshTokenFunc: each call renders the template with the CURRENT credential
+// seeded (so {{.refreshToken}} carries cur.Refresh), POSTs it through the SAME
+// guarded runner the login uses (so the safety allowlist and rate cap still apply),
+// and captures the rotated credential from the response. It is the real OAuth2
+// grant_type=refresh_token exchange that replaces re-running the (human-consent)
+// login on a mid-run 401.
+//
+// The render context seeds refreshToken (cur.Refresh) and token (cur.Secret) via the
+// VirtualUser's Vars, and subject (cur.Subject) via the user's Cred, exactly like
+// NewLoginTokenFunc seeds username/password — Render uses missingkey=error, so the
+// keys are ALWAYS seeded. baseSeed+userIndex keeps the walk deterministic per
+// principal, mirroring the login transport.
+//
+// Capture precedence mirrors the login: the new access token is auto-detected via
+// load.DetectCredential (body + Set-Cookie), and the refresh token / lifetime via
+// load.DetectRefresh. ROTATION RULE: when the response omits a new refresh_token, the
+// current credential's refresh token is CARRIED FORWARD (not blanked), so a server
+// that does not rotate the refresh token keeps a working one for the next cycle.
+// cur.Subject is preserved. A refresh that yields no access token is a loud error
+// (mirroring NewLoginTokenFunc), rather than authenticating as nobody.
+func NewRefreshTokenFunc(runner *load.Runner, refreshTmpl domain.APITemplate, baseSeed int64) auth.RefreshTokenFunc {
+	graph := domain.ScenarioGraph{
+		ID:    refreshGraphID,
+		Nodes: []domain.Node{{ID: refreshNodeID, APITemplateID: refreshTmpl.ID}},
+	}
+	nodeTmpl := map[domain.ID]domain.APITemplate{refreshNodeID: refreshTmpl}
+
+	return func(ctx context.Context, userIndex int, cur domain.Credential) (domain.Credential, error) {
+		// Seed the render context from the CURRENT credential. refreshToken/token are
+		// Vars (Render exposes only subject/token from Cred, so refreshToken must be a
+		// Var); subject/token also come from Cred so {{.subject}}/{{.token}} reflect the
+		// current principal. All keys are always seeded (missingkey=error).
+		vars := map[string]string{
+			"userIndex":    strconv.Itoa(userIndex),
+			"refreshToken": cur.Refresh,
+			"token":        cur.Secret,
+		}
+		user := load.VirtualUser{
+			ID:   "refresh-" + strconv.Itoa(userIndex),
+			Vars: vars,
+			Cred: domain.Credential{Subject: cur.Subject, Secret: cur.Secret},
+		}
+		_, final, err := runner.RunOnceCapture(ctx, graph, nodeTmpl, refreshNodeID, 1, user, baseSeed+int64(userIndex))
+		if err != nil {
+			return domain.Credential{}, fmt.Errorf("api: refresh-token exchange user %d: %w", userIndex, err)
+		}
+		// Capture the rotated access token (and any subject) from the response, then the
+		// rotated refresh token / lifetime — mirroring the login's auto-detect.
+		token, _ := load.DetectCredential(final.Body, final.SetCookie)
+		if token == "" {
+			return domain.Credential{}, fmt.Errorf("api: refresh-token exchange user %d: response carried no access token", userIndex)
+		}
+		refresh, expiresIn := load.DetectRefresh(final.Body)
+		if refresh == "" {
+			// Rotation rule: the server did not rotate the refresh token, so keep the
+			// current one rather than blanking it (a blanked refresh token would force a
+			// re-login on the next cycle).
+			refresh = cur.Refresh
+		}
+		return domain.Credential{
+			Subject:   cur.Subject, // preserved across the rotation
+			Secret:    token,
+			Refresh:   refresh,
+			ExpiresIn: expiresIn,
+		}, nil
+	}
 }

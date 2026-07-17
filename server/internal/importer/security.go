@@ -65,6 +65,16 @@ func deriveAuth(doc openAPIDoc, ops []apiOp) *derivedAuth {
 		return nil
 	}
 
+	// TODO(mint): emit an advisory "managed-IdP — cannot self-issue" warning here when
+	// the picked scheme is a third-party/managed IdP the operator does NOT control the
+	// signing key for — an `openIdConnect` scheme, or an `oauth2` scheme whose tokenUrl
+	// points at a managed issuer (Auth0/Cognito/Firebase/Okta host), or a bearerFormat
+	// naming an external JWKS. The mint strategy can ONLY sign for a key the operator
+	// holds (self-issued JWT, the M1 case), so suggesting it for a managed issuer is the
+	// #1 footgun. Deferred (not built now): the importer has no warning/notes channel
+	// surfaced to the UI yet, so this needs a new advisory surface (server field +
+	// web banner) rather than a one-line hook. Until then the web Auth card's mint
+	// helper text states the self-issued-only constraint (see auth.mode.mint.desc).
 	switch strings.ToLower(scheme.Type) {
 	case "oauth2":
 		return deriveOAuth2(name, scheme)

@@ -71,6 +71,12 @@ type Server struct {
 	seq           atomic.Int64
 	now           func() time.Time
 	mux           *http.ServeMux
+	// allowExec is the operator opt-in for the exec credential strategy (WithAllowExec).
+	// It defaults to false: an exec run — which executes an arbitrary local command per
+	// virtual user — is REJECTED at StartRun unless the operator explicitly enabled it,
+	// because a scenario file is untrusted and merely declaring strategy:"exec" must
+	// never run a command.
+	allowExec bool
 }
 
 // maxRetainedRuns and maxRetainedShares bound the in-memory registries so a
@@ -112,6 +118,18 @@ func WithStore(st store.Store) Option {
 		if st != nil {
 			s.store = st
 		}
+	}
+}
+
+// WithAllowExec enables the exec credential strategy, which runs an operator-supplied
+// command per virtual user to mint a token. It is OFF by default: because a scenario
+// file is UNTRUSTED, merely declaring strategy:"exec" must not execute anything — the
+// operator must explicitly opt in here (the CLI exposes this as a flag). An exec
+// command's egress is NOT bound by the target allowlist / rate cap, so this opt-in is
+// the trust boundary.
+func WithAllowExec(allow bool) Option {
+	return func(s *Server) {
+		s.allowExec = allow
 	}
 }
 
@@ -244,6 +262,14 @@ func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 	s.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("%w: %q", errExperimentNotFound, id)
+	}
+
+	// Operator opt-in gate for the exec strategy: it runs an arbitrary local command per
+	// virtual user, so a scenario merely DECLARING it must never execute anything. Reject
+	// at StartRun — before any provider/runner — exactly like the prod-lock guard, unless
+	// the operator explicitly enabled exec (WithAllowExec / the --allow-exec flag).
+	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredExec && !s.allowExec {
+		return "", &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command per virtual user and is disabled by default; enable it explicitly with the --allow-exec flag (server WithAllowExec) before running an exec scenario", domain.CredExec)}
 	}
 
 	guard, err := safety.NewGuardForEnv(spec.TargetEnv, nil, false)

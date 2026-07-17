@@ -354,6 +354,13 @@ func (s *Server) sessionUser(ctx context.Context, spec RunSpec, sess domain.Evid
 		return user, nil
 	}
 
+	// Operator opt-in gate for exec, replicated from StartRun: reproduce builds the
+	// credential provider and Acquires — which for the exec strategy RUNS the operator's
+	// local command. A scenario merely declaring exec must never execute anything without
+	// the explicit --allow-exec opt-in, on this path too (not just StartRun).
+	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredExec && !s.allowExec {
+		return load.VirtualUser{}, &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command and is disabled by default; reproduce of an exec run requires the same --allow-exec opt-in as the run", domain.CredExec)}
+	}
 	provider, err := spec.CredentialProvider()
 	if err != nil {
 		return load.VirtualUser{}, err

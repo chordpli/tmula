@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 )
@@ -65,6 +66,18 @@ type TeardownFunc func(ctx context.Context, userIndex int, cred domain.Credentia
 // signupCall tracks one in-flight signup so concurrent Acquire calls for the
 // same user share a single signup instead of all serializing on one lock.
 type signupCall struct {
+	done chan struct{}
+	cred domain.Credential
+	err  error
+}
+
+// refreshCall tracks one in-flight refresh-token exchange so concurrent Refresh
+// calls for the same key collapse to a single exchange instead of each firing its
+// own grant_type=refresh_token POST against the now-stale refresh token. It mirrors
+// signupCall but lives in a SEPARATE map: an Acquire and a Refresh for the same key
+// are independent operations (Acquire serves the cache, Refresh always rotates), so
+// they must not share an in-flight slot.
+type refreshCall struct {
 	done chan struct{}
 	cred domain.Credential
 	err  error
@@ -208,6 +221,18 @@ func (b *BootstrapSignupProvider) Teardown(ctx context.Context) error {
 // distinct account.
 type TokenFunc func(ctx context.Context, userIndex int) (domain.Credential, error)
 
+// RefreshTokenFunc rotates one principal's credential via a real OAuth2
+// grant_type=refresh_token exchange. It takes the CURRENT credential so it can read
+// cur.Refresh (the captured refresh token) and returns the rotated credential (a new
+// access token, the rotated-or-carried-forward refresh token, and the new lifetime).
+// It is injected so the login provider is independent of any concrete refresh
+// transport (the transport lives a layer above, in the api package, and is compiled
+// from the login flow's token POST). It is OPTIONAL: when nil — or when the current
+// credential carries no refresh token — the login provider falls back to re-running
+// the full login (TokenFunc). userIndex keys the principal exactly as TokenFunc does,
+// so a refresh rotates the same account the login minted.
+type RefreshTokenFunc func(ctx context.Context, userIndex int, cur domain.Credential) (domain.Credential, error)
+
 // LoginProvider mints a token per virtual user by running a login flow up front,
 // caching the result so each user keeps a stable identity for the run. It is a
 // near-clone of BootstrapSignupProvider: cache-by-index, in-flight dedup so
@@ -215,10 +240,20 @@ type TokenFunc func(ctx context.Context, userIndex int) (domain.Credential, erro
 // not cached so it can be retried. It composes ABOVE the Provider seam — the
 // static PoolProvider path is untouched.
 type LoginProvider struct {
-	token    TokenFunc
-	mu       sync.Mutex
-	cache    map[int]domain.Credential
-	inflight map[int]*signupCall
+	token TokenFunc
+	// refreshToken, when set, rotates a credential via a real grant_type=refresh_token
+	// exchange instead of re-running the login. It is set once at build time
+	// (SetRefreshToken), before Refresh is ever called, so it needs no lock of its own.
+	// A nil refreshToken keeps Refresh on the re-login (token) path — the safe fallback
+	// for a login flow that cannot be expressed as a refresh-token grant.
+	refreshToken RefreshTokenFunc
+	mu           sync.Mutex
+	cache        map[int]domain.Credential
+	inflight     map[int]*signupCall
+	// refreshInflight dedups concurrent Refresh calls per key (see refreshCall). It is
+	// guarded by the same mu as cache/inflight — only the map bookkeeping is locked; the
+	// exchange itself runs unlocked, exactly like Acquire's signup.
+	refreshInflight map[int]*refreshCall
 }
 
 // NewLoginProvider builds a provider that mints tokens on demand via token.
@@ -227,9 +262,10 @@ func NewLoginProvider(token TokenFunc) (*LoginProvider, error) {
 		return nil, fmt.Errorf("auth: login provider needs a token function")
 	}
 	return &LoginProvider{
-		token:    token,
-		cache:    make(map[int]domain.Credential),
-		inflight: make(map[int]*signupCall),
+		token:           token,
+		cache:           make(map[int]domain.Credential),
+		inflight:        make(map[int]*signupCall),
+		refreshInflight: make(map[int]*refreshCall),
 	}, nil
 }
 
@@ -267,6 +303,16 @@ func (l *LoginProvider) Acquire(ctx context.Context, userIndex int) (domain.Cred
 	return call.cred, call.err
 }
 
+// SetRefreshToken installs the refresh-token transport Refresh rotates credentials
+// through, mirroring SetTeardown on the bootstrap provider. It is set once at build
+// time (the orchestrator wires it from the login flow's derived refresh template),
+// before Refresh is ever called, so it needs no lock. A nil func keeps Refresh on the
+// re-login (token) path — the safe fallback when the login flow cannot be expressed
+// as a grant_type=refresh_token exchange.
+func (l *LoginProvider) SetRefreshToken(refresh RefreshTokenFunc) {
+	l.refreshToken = refresh
+}
+
 // Set replaces the cached credential for userIndex. It is how a mid-run refresh
 // records the freshly minted token so a later Acquire serves the fresh one.
 func (l *LoginProvider) Set(userIndex int, cred domain.Credential) {
@@ -275,12 +321,102 @@ func (l *LoginProvider) Set(userIndex int, cred domain.Credential) {
 	l.mu.Unlock()
 }
 
-// Refresh re-runs the login flow for userIndex, replaces the cached credential
-// with the freshly minted one, and returns it. Unlike Acquire it does NOT serve a
-// cached value — it always mints anew — which is the mid-run 401 recovery path
-// (reactive re-acquire of the same principal). A failed refresh leaves the
-// existing cache untouched and is returned to the caller.
+// peek reads the cached credential for userIndex under the lock. ok is false when no
+// credential has been minted for the index yet. It is the read-current step of a
+// refresh-token exchange (Refresh reads the current credential so the exchange can
+// present cur.Refresh) and is kept a discrete, locked accessor so a later
+// single-flight wrapper can compose the three Refresh steps without touching the api
+// layer.
+func (l *LoginProvider) peek(userIndex int) (domain.Credential, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c, ok := l.cache[userIndex]
+	return c, ok
+}
+
+// Refresh rotates the cached credential for userIndex and returns the fresh one.
+// Unlike Acquire it does NOT serve a cached value — it always rotates — which is the
+// mid-run 401 recovery path (reactive re-acquire of the same principal).
+//
+// Concurrent Refresh calls for the SAME key are SINGLE-FLIGHTED: while one rotation
+// is in flight, other callers WAIT on it and return its result (cred+err) rather than
+// each firing its own exchange against the now-stale refresh token. This is the same
+// in-flight-dedup pattern Acquire uses, on a SEPARATE map (refreshInflight): it bounds
+// the shared-scope storm where every session collapses to cache key 0 and would
+// otherwise all rotate at once (lost-update / self-DDoS). It collapses only CONCURRENT
+// calls — once the in-flight refresh completes a LATER Refresh starts a NEW exchange
+// (each genuine re-expiry rotates again). Only the map bookkeeping is locked; the
+// exchange runs WITHOUT holding l.mu (it is a network call), exactly like Acquire's
+// signup, so -race stays clean.
+//
+// The actual rotation (refreshOnce) is structured as THREE DISCRETE STEPS so the
+// dedup wraps them without touching the api layer: (1) read the current credential,
+// (2) exchange it for a fresh one, (3) write the result back. See refreshOnce.
 func (l *LoginProvider) Refresh(ctx context.Context, userIndex int) (domain.Credential, error) {
+	// TODO(slice3): post-failure backoff. A per-key cooldown (inject a clock; on a
+	// recent FAILED attempt return a cooldown error to skip the exchange) was considered
+	// here and DEFERRED: single-flight above already bounds the concurrent storm, and a
+	// cooldown would convert a legitimate sequential recovery attempt into a forced
+	// excused-401 for the cooldown window — degrading the reactive single-retry recovery
+	// the runtime depends on (runtime.go classifies any Refresh error as auth-refresh
+	// with no retry). Backoff is a secondary refinement; revisit only if a sustained-401
+	// sequential storm proves to hammer the token endpoint in practice.
+	l.mu.Lock()
+	if call, ok := l.refreshInflight[userIndex]; ok {
+		// A rotation for this key is already in flight: wait for it and share its result
+		// instead of exchanging the (now-stale) refresh token a second time.
+		l.mu.Unlock()
+		<-call.done
+		return call.cred, call.err
+	}
+	call := &refreshCall{done: make(chan struct{})}
+	l.refreshInflight[userIndex] = call
+	l.mu.Unlock()
+
+	// The exchange runs UNLOCKED (it is a network call); only the bookkeeping above and
+	// below holds l.mu.
+	cred, err := l.refreshOnce(ctx, userIndex)
+
+	l.mu.Lock()
+	call.cred, call.err = cred, err
+	// Remove the in-flight entry so a LATER Refresh (a genuine subsequent re-expiry)
+	// starts a fresh exchange rather than re-serving this completed one.
+	delete(l.refreshInflight, userIndex)
+	l.mu.Unlock()
+	close(call.done)
+	return cred, err
+}
+
+// refreshOnce performs ONE rotation of the cached credential for userIndex, in three
+// discrete steps. It carries no dedup of its own — Refresh wraps it in single-flight.
+//
+// When a refresh-token transport is wired AND the current credential carries a
+// refresh token, it performs a real grant_type=refresh_token exchange: read-current
+// (peek) → exchange (refreshToken) → write-back (Set). A refresh-token exchange
+// FAILURE surfaces as an error (no silent fall back to re-login after a real
+// attempt), so the runtime tags it ErrorClassAuthRefresh rather than masking a broken
+// refresh endpoint.
+//
+// Otherwise — no refresh transport, or no captured refresh token — it FALLS BACK to
+// re-running the full login (token), exactly as before this seam existed. A failed
+// refresh leaves the existing cache untouched and is returned to the caller.
+func (l *LoginProvider) refreshOnce(ctx context.Context, userIndex int) (domain.Credential, error) {
+	if l.refreshToken != nil {
+		// Step 1 (read-current): the exchange needs the current refresh token.
+		if cur, ok := l.peek(userIndex); ok && cur.Refresh != "" {
+			// Step 2 (exchange): a real grant_type=refresh_token POST. A failure surfaces.
+			cred, err := l.refreshToken(ctx, userIndex, cur)
+			if err != nil {
+				return domain.Credential{}, fmt.Errorf("auth: refresh-token exchange user %d: %w", userIndex, err)
+			}
+			// Step 3 (write-back): record the rotated credential so a later Acquire and the
+			// next Refresh both see it (the rotated refresh token is read on the next cycle).
+			l.Set(userIndex, cred)
+			return cred, nil
+		}
+	}
+	// Fallback: re-run the login flow (no refresh transport, or no captured refresh
+	// token to exchange).
 	cred, err := l.token(ctx, userIndex)
 	if err != nil {
 		return domain.Credential{}, fmt.Errorf("auth: refresh login user %d: %w", userIndex, err)
@@ -308,11 +444,25 @@ type ProviderDeps struct {
 	Signup SignupFunc
 	// Token mints a token per virtual user by running a login flow (login strategy).
 	Token TokenFunc
+	// RefreshToken rotates a login credential via a real grant_type=refresh_token
+	// exchange (login strategy). It is OPTIONAL: a nil RefreshToken keeps the login
+	// provider's Refresh on the re-login path — the safe fallback for a login flow that
+	// cannot be expressed as a refresh-token grant.
+	RefreshToken RefreshTokenFunc
 	// Teardown deprovisions a provisioned account (bootstrap-signup strategy). It is
 	// optional: a nil Teardown makes the provider's Teardown a cache-clearing no-op
 	// (the --keep-accounts path). The run path requires either a teardown or an
 	// explicit keep-accounts opt-out before a bootstrap run is accepted.
 	Teardown TeardownFunc
+	// MintKey is the resolved in-process signing key for the mint strategy — the
+	// decoded HMAC secret (HS256) or the PEM private-key bytes (RS256/ES256). It is
+	// resolved from the pool's MintSpec.Key reference by the layer that builds the
+	// provider (runspec.CredentialProvider, the same layer pool entries resolve at),
+	// and held only in process: the key reference, never the key, crosses the wire.
+	MintKey []byte
+	// Now is the clock the mint provider stamps iat/exp from. Optional — a nil Now
+	// defaults to time.Now; it is injected only so a test can fix time.
+	Now func() time.Time
 }
 
 // NewProvider selects a provider for a credential pool from the injected deps. A
@@ -330,7 +480,33 @@ func NewProvider(pool domain.CredentialPool, deps ProviderDeps) (Provider, error
 		p.SetTeardown(deps.Teardown)
 		return p, nil
 	case domain.CredLogin:
-		return NewLoginProvider(deps.Token)
+		p, err := NewLoginProvider(deps.Token)
+		if err != nil {
+			return nil, err
+		}
+		// Nil-safe: an unset RefreshToken keeps Refresh on the re-login fallback path.
+		p.SetRefreshToken(deps.RefreshToken)
+		return p, nil
+	case domain.CredMint:
+		// The mint strategy self-issues a JWT per virtual user; it needs no token/
+		// signup transport — only the resolved signing key (deps.MintKey), resolved
+		// from pool.Mint.Key by the layer that built this provider. A nil Mint or an
+		// empty key is rejected (a mint run with no key is a wiring bug).
+		if pool.Mint == nil {
+			return nil, fmt.Errorf("auth: mint strategy needs a mint spec on the pool")
+		}
+		return NewMintProvider(*pool.Mint, deps.MintKey, deps.Now)
+	case domain.CredExec:
+		// The exec strategy runs an operator-supplied command per virtual user and uses
+		// its stdout as the token; it needs no flow/transport, so it builds RIGHT HERE
+		// over an exec-backed TokenFunc wrapped in a LoginProvider — cache-by-index,
+		// in-flight dedup and Refresh all come for free, and Refresh simply re-runs the
+		// command (no refresh transport is wired). A nil Exec spec is a wiring bug, not a
+		// silent anonymous run.
+		if pool.Exec == nil {
+			return nil, fmt.Errorf("auth: exec strategy needs an exec spec on the pool")
+		}
+		return NewLoginProvider(NewExecTokenFunc(*pool.Exec))
 	default:
 		return nil, fmt.Errorf("auth: unknown credential strategy %q", pool.Strategy)
 	}

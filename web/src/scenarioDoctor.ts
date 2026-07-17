@@ -180,6 +180,23 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
         )
       }
     }
+  } else if (form.authMode === 'mint') {
+    // Mint self-issues a JWT locally; its blockers are a missing signing-key reference
+    // (the run cannot sign without it) and malformed extra claims (cannot be signed).
+    // The TTL is a positive number from a clamped numeric input, so no separate check.
+    if (!form.mintKeyEnv.trim() && !form.mintKeyFile.trim()) {
+      issues.push(issue('error', 'auth-mint-key', 'doctor.authMintKey'))
+    }
+    if (form.mintClaimsJSON.trim()) {
+      try {
+        const parsed = JSON.parse(form.mintClaimsJSON)
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          issues.push(issue('error', 'auth-mint-claims', 'doctor.authMintClaims', { error: 'not a JSON object' }))
+        }
+      } catch (e) {
+        issues.push(issue('error', 'auth-mint-claims', 'doctor.authMintClaims', { error: messageOf(e) }))
+      }
+    }
   }
   return issues
 }

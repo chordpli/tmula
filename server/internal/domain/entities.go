@@ -129,19 +129,39 @@ func (g ScenarioGraph) Validate() error {
 
 // --- Credentials ------------------------------------------------------------
 
-// Credential is one principal's auth material. The secret is never serialized
-// (masking at rest, AD-011); only a non-sensitive subject is persisted.
+// Credential is one principal's auth material. Secrets are never serialized
+// (masking at rest, AD-011); only a non-sensitive subject is persisted. Refresh
+// and ExpiresIn are the OAuth2 grant data a later real grant_type=refresh_token
+// transport reads: Refresh is the refresh token (a secret, json:"-", redacted by
+// String like Secret) and ExpiresIn is the access token's lifetime straight from
+// the login response's expires_in (seconds). ExpiresIn is runtime-only (json:"-")
+// so the "only Subject persists" contract is unchanged; both stay zero when the
+// login response carries neither field, leaving the credential identical to a
+// pre-refresh mint.
 type Credential struct {
-	Subject string `json:"subject"`
-	Secret  string `json:"-"`
+	Subject   string        `json:"subject"`
+	Secret    string        `json:"-"`
+	Refresh   string        `json:"-"`
+	ExpiresIn time.Duration `json:"-"`
 }
 
-// String redacts the secret so a Credential cannot leak via %v/%+v in logs.
+// String redacts BOTH secrets (Secret and Refresh) so a Credential cannot leak a
+// token via %v/%+v in logs; the non-sensitive subject and the (non-secret) expiry
+// are shown to keep the value debuggable.
 func (c Credential) String() string {
-	if c.Secret == "" {
-		return fmt.Sprintf("Credential{Subject:%q}", c.Subject)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Credential{Subject:%q", c.Subject)
+	if c.Secret != "" {
+		b.WriteString(", Secret:***")
 	}
-	return fmt.Sprintf("Credential{Subject:%q, Secret:***}", c.Subject)
+	if c.Refresh != "" {
+		b.WriteString(", Refresh:***")
+	}
+	if c.ExpiresIn != 0 {
+		fmt.Fprintf(&b, ", ExpiresIn:%s", c.ExpiresIn)
+	}
+	b.WriteByte('}')
+	return b.String()
 }
 
 // CredentialSourceRef is a non-secret pointer to an external credential pool: a
@@ -210,6 +230,20 @@ type CredentialPool struct {
 	// once and shares the single token (client_credentials). Ignored by other
 	// strategies. omitempty keeps a non-login pool serializing byte-identically.
 	LoginScope LoginScope `json:"loginScope,omitempty"`
+	// Mint configures the CredMint strategy: how to self-issue a JWT per virtual user
+	// by signing one locally with a key the operator holds (the M1 case). It carries
+	// the alg, the NON-SECRET signing-key reference, the claims template, the subject
+	// source and the TTL — never the key itself (the resolved bytes ride on
+	// MintSpec.resolvedKey, json:"-", AD-011). Required for the CredMint strategy,
+	// ignored otherwise. omitempty keeps a non-mint pool serializing byte-identically.
+	Mint *MintSpec `json:"mint,omitempty"`
+	// Exec configures the CredExec strategy: run an operator-supplied COMMAND per
+	// virtual user and use its stdout as the credential (the bring-your-own-token
+	// escape hatch). It carries the argv command, optional extra env, a per-invocation
+	// timeout and an output cap — and NO secret of its own (operator secrets ride in
+	// Env values). Required for the CredExec strategy, ignored otherwise. omitempty
+	// keeps a non-exec pool serializing byte-identically.
+	Exec *ExecSpec `json:"exec,omitempty"`
 }
 
 // Validate checks the pool can actually provide credentials. For the pool
@@ -278,6 +312,31 @@ func (c CredentialPool) Validate() error {
 			if err := c.Source.Validate(); err != nil {
 				return fmt.Errorf("credential pool %q: %w", c.ID, err)
 			}
+		}
+	}
+	if c.Strategy == CredMint {
+		// A mint pool self-issues a JWT per virtual user; it carries no entries/source/
+		// login/signup flow (the token is signed locally), only a MintSpec describing
+		// the alg, the key reference, the claims and the TTL.
+		if c.Mint == nil {
+			return fmt.Errorf("credential pool %q: mint strategy needs a mint block (alg, key reference, ttl)", c.ID)
+		}
+		if err := c.Mint.Validate(); err != nil {
+			return fmt.Errorf("credential pool %q: %w", c.ID, err)
+		}
+	}
+	if c.Strategy == CredExec {
+		// An exec pool runs an operator-supplied command per virtual user and uses its
+		// stdout as the credential; it carries no entries/source/login/signup flow (the
+		// token comes from the command), only an ExecSpec describing the argv, the env,
+		// the timeout and the output cap. The operator opt-in that actually permits the
+		// command to run is a RUN-PATH gate (StartRun), not a pool-shape check — Validate
+		// only confirms the spec is runnable.
+		if c.Exec == nil {
+			return fmt.Errorf("credential pool %q: exec strategy needs an exec block (command, timeout)", c.ID)
+		}
+		if err := c.Exec.Validate(); err != nil {
+			return fmt.Errorf("credential pool %q: %w", c.ID, err)
 		}
 	}
 	return nil

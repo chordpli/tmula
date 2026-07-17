@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // DetectCredential is a best-effort auto-detector for the token (and subject) in a
@@ -37,6 +38,38 @@ func DetectCredential(body []byte, setCookie []string) (token, subject string) {
 	return token, subject
 }
 
+// DetectRefresh is the sibling auto-detector for the OAuth2 refresh grant data in
+// a login response: the refresh_token and the access token's lifetime (expires_in,
+// in seconds). It is the data foundation for a later real grant_type=refresh_token
+// transport — a caller folds the results into a domain.Credential's Refresh /
+// ExpiresIn next to the access token DetectCredential already found.
+//
+// Like DetectCredential it is a best-effort FALLBACK: it searches the response JSON
+// for the ranked refresh-key list (refresh_token / refreshToken / …) and the ranked
+// expiry-key list (expires_in / expiresIn / …), case-insensitive, walking nested
+// objects up to maxDetectDepth, reusing the same key-walk so the two detectors agree
+// on shape. Unlike DetectCredential there is NO cookie fallback: a refresh token is
+// carried in the body, never as a session cookie. When the body carries neither
+// field (or is not JSON) it returns ("", 0), so the caller folds in nothing and the
+// credential is byte-for-byte the pre-refresh mint.
+//
+// AD-011: the refresh token is a secret. DetectRefresh never logs it; the caller
+// folds it into a domain.Credential (whose Refresh is json:"-").
+func DetectRefresh(body []byte) (refresh string, expiresIn time.Duration) {
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		// Not JSON: no refresh grant data to recover (no cookie fallback by design).
+		return "", 0
+	}
+	refresh = detectByKeys(root, refreshKeys, refreshPaths)
+	if secs, ok := firstNumberByKey(root, expiresInKeys, maxDetectDepth); ok && secs > 0 {
+		// expires_in is seconds; keep sub-second precision so a fractional value does
+		// not truncate to zero.
+		expiresIn = time.Duration(secs * float64(time.Second))
+	}
+	return refresh, expiresIn
+}
+
 // maxDetectDepth bounds how deep the nested object scan descends, so a pathological
 // response cannot make detection walk an unbounded tree.
 const maxDetectDepth = 3
@@ -66,6 +99,29 @@ var tokenPaths = []string{
 	"data.access_token",
 	"data.accessToken",
 	"result.token",
+}
+
+// refreshKeys is the ranked list of (case-insensitive) keys whose string value is
+// taken as the OAuth2 refresh token. The standard refresh_token outranks variants.
+var refreshKeys = []string{
+	"refresh_token",
+	"refreshToken",
+	"refresh",
+}
+
+// refreshPaths is the ranked list of nested dotted refresh paths tried after the
+// flat keys, for the common data/result envelope shapes (mirrors tokenPaths).
+var refreshPaths = []string{
+	"data.refresh_token",
+	"data.refreshToken",
+	"result.refresh_token",
+}
+
+// expiresInKeys is the ranked list of (case-insensitive) keys whose NUMBER value is
+// taken as the access token's lifetime in seconds (the OAuth2 expires_in field).
+var expiresInKeys = []string{
+	"expires_in",
+	"expiresIn",
 }
 
 // subjectKeys is the ranked list of (case-insensitive) keys whose string value is
@@ -150,6 +206,54 @@ func firstStringByKey(node any, want string, depth int) string {
 		}
 	}
 	return ""
+}
+
+// firstNumberByKey runs the ranked numeric lookup: for each key in order, the first
+// JSON number reachable from root (case-insensitive, shallowest-first, up to depth
+// levels) wins. It mirrors firstStringByKey but for the numeric expires_in field;
+// json.Unmarshal into any decodes every JSON number as float64, so the caller gets
+// seconds (possibly fractional). ok is false when no key yields a number.
+func firstNumberByKey(root any, keys []string, depth int) (n float64, ok bool) {
+	for _, key := range keys {
+		if v, found := firstFloatByKey(root, key, depth); found {
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// firstFloatByKey returns the first JSON number reachable from node whose map key
+// equals want (case-insensitive), preferring a direct match at this level before
+// descending so the shallowest match wins (mirrors firstStringByKey).
+func firstFloatByKey(node any, want string, depth int) (float64, bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		for k, v := range n {
+			if strings.EqualFold(k, want) {
+				if f, ok := v.(float64); ok {
+					return f, true
+				}
+			}
+		}
+		if depth <= 1 {
+			return 0, false
+		}
+		for _, v := range n {
+			if f, ok := firstFloatByKey(v, want, depth-1); ok {
+				return f, true
+			}
+		}
+	case []any:
+		if depth <= 1 {
+			return 0, false
+		}
+		for _, v := range n {
+			if f, ok := firstFloatByKey(v, want, depth-1); ok {
+				return f, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // stringAtPath resolves a dotted path against root (via load's lookupJSONPath) and

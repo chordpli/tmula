@@ -54,6 +54,7 @@ func runScenario(args []string) error {
 		authSource     = fs.String("auth-source", "", "attach an external credential pool without editing the scenario: file:./pool.csv or env:VAR. Resolved in-process (the secret never crosses the wire); overrides any auth block the scenario declares")
 		authFormat     = fs.String("auth-format", "", "credential body format for --auth-source: csv | jsonl | tokens (default: inferred from a .csv/.jsonl file extension, else tokens)")
 		timeout        = fs.Duration("timeout", 2*time.Minute, "max time to wait for the run to finish")
+		allowExec      = fs.Bool("allow-exec", false, "permit the exec credential strategy, which runs an operator-supplied LOCAL command per virtual user to mint a token. OFF by default: a scenario file is untrusted, and an exec command's network egress bypasses the target allowlist/rate cap")
 	)
 	fs.Usage = func() {
 		fmt.Fprint(os.Stderr, "usage: tmula run [scenario.yaml] [flags]\n\n"+
@@ -229,7 +230,7 @@ func runScenario(args []string) error {
 				return err
 			}
 		} else {
-			srv := api.NewServer(load.NewRESTAdapter(30 * time.Second))
+			srv := api.NewServer(load.NewRESTAdapter(30*time.Second), api.WithAllowExec(*allowExec))
 			defer func() {
 				sctx, sc := context.WithTimeout(context.Background(), 5*time.Second)
 				defer sc()

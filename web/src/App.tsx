@@ -35,6 +35,8 @@ import {
   type ImportStats,
   type LoginCredFormat,
   type LoginScope,
+  type MintAlg,
+  type MintEncoding,
   type OutcomeSummary,
   type Report,
   type Stats,
@@ -1173,6 +1175,8 @@ const AUTH_MODES: { mode: AuthMode; labelKey: string; descKey: string }[] = [
   { mode: 'pool', labelKey: 'auth.mode.pool', descKey: 'auth.mode.pool.desc' },
   { mode: 'login', labelKey: 'auth.mode.login', descKey: 'auth.mode.login.desc' },
   { mode: 'bootstrap', labelKey: 'auth.mode.bootstrap', descKey: 'auth.mode.bootstrap.desc' },
+  { mode: 'mint', labelKey: 'auth.mode.mint', descKey: 'auth.mode.mint.desc' },
+  { mode: 'exec', labelKey: 'auth.mode.exec', descKey: 'auth.mode.exec.desc' },
 ]
 
 // AuthCard is the Auth section (P5 / P7): it picks how the simulated traffic
@@ -1254,6 +1258,8 @@ function AuthCard({
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
         {form.authMode === 'login' && <AuthLoginFields form={form} set={set} />}
         {form.authMode === 'bootstrap' && <AuthBootstrapFields form={form} set={set} />}
+        {form.authMode === 'mint' && <AuthMintFields form={form} set={set} />}
+        {form.authMode === 'exec' && <AuthExecFields form={form} set={set} />}
       </div>
     </section>
   )
@@ -1552,6 +1558,37 @@ function AuthLoginFields({
                 spellCheck={false}
               />
             </Field>
+          )}
+          {/* Explicit refresh-grant OVERRIDE: advanced only, so the simple mini-form stays
+              one-field. When a body is given it WINS over the backend's auto-derivation, so
+              even a JSON-body login refreshes without re-logging-in. The request line is
+              optional (defaults to the login token endpoint). */}
+          {!simple && (
+            <>
+              <Field
+                label={t('auth.login.refreshRequest')}
+                help={t('auth.login.refreshRequestHint')}
+                tip={<HelpTip label={t('auth.login.refresh')} text={t('auth.login.refresh.tip')} />}
+              >
+                <input
+                  className="input"
+                  value={form.loginRefreshRequest}
+                  onChange={(e) => set('loginRefreshRequest', e.target.value)}
+                  placeholder="POST /oauth/token"
+                  spellCheck={false}
+                />
+              </Field>
+              <Field label={t('auth.login.refreshBody')} help={t('auth.login.refreshBodyHint')}>
+                <textarea
+                  className="textarea"
+                  value={form.loginRefreshBody}
+                  onChange={(e) => set('loginRefreshBody', e.target.value)}
+                  rows={3}
+                  placeholder="grant_type=refresh_token&refresh_token={{.refreshToken}}&client_id=…"
+                  spellCheck={false}
+                />
+              </Field>
+            </>
           )}
         </div>
       </details>
@@ -1897,6 +1934,229 @@ function AuthBootstrapFields({
             )}
           </div>
         </details>
+      </fieldset>
+    </div>
+  )
+}
+
+// AuthMintFields authors the mint (local JWT signing) strategy: pick the signing
+// algorithm, point at the signing KEY by reference (an env var the server reads, or a
+// file on the server — never the key itself, which would forge a token on the wire),
+// and shape the token (a per-VU subject template, extra claims, and a lifetime). It
+// leads with a "self-issued only" note — the #1 footgun is reaching for mint against a
+// managed IdP (Auth0/Cognito/Firebase) whose signing key the operator does NOT hold.
+// HS256 additionally needs the secret's encoding; the asymmetric algs read a PEM and
+// hide that field. buildMintSpec turns these fields into the wire MintSpec.
+function AuthMintFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  // Live parse of the claims JSON for an inline error (never throws out of render).
+  let claimsError = ''
+  if (form.mintClaimsJSON.trim()) {
+    try {
+      const parsed = JSON.parse(form.mintClaimsJSON)
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        claimsError = t('auth.mint.claimsNotObject')
+      }
+    } catch {
+      claimsError = t('auth.mint.claimsInvalid')
+    }
+  }
+
+  return (
+    <div className="authpanel">
+      <p className="card__hint">{t('auth.mint.lead')}</p>
+
+      <div className="import__grid">
+        <Field
+          label={t('auth.mint.alg')}
+          help={t('auth.mint.algHint')}
+          tip={<HelpTip label={t('auth.mint.alg')} text={t('auth.mint.alg.tip')} />}
+        >
+          <select className="select" value={form.mintAlg} onChange={(e) => set('mintAlg', e.target.value as MintAlg)}>
+            <option value="HS256">{t('auth.mint.alg.hs256')}</option>
+            <option value="RS256">{t('auth.mint.alg.rs256')}</option>
+            <option value="ES256">{t('auth.mint.alg.es256')}</option>
+          </select>
+        </Field>
+        {form.mintAlg === 'HS256' && (
+          <Field label={t('auth.mint.encoding')} help={t('auth.mint.encodingHint')}>
+            <select
+              className="select"
+              value={form.mintSecretEncoding}
+              onChange={(e) => set('mintSecretEncoding', e.target.value as MintEncoding)}
+            >
+              <option value="raw">{t('auth.mint.encoding.raw')}</option>
+              <option value="base64">{t('auth.mint.encoding.base64')}</option>
+              <option value="base64url">{t('auth.mint.encoding.base64url')}</option>
+            </select>
+          </Field>
+        )}
+      </div>
+
+      <div className="import__grid">
+        <Field
+          label={t('auth.mint.keyEnv')}
+          help={t('auth.mint.keyEnvHint')}
+          tip={<HelpTip label={t('auth.mint.keyEnv')} text={t('auth.mint.key.tip')} />}
+        >
+          <input
+            className="input"
+            value={form.mintKeyEnv}
+            onChange={(e) => set('mintKeyEnv', e.target.value)}
+            placeholder={t('auth.mint.keyEnv.placeholder')}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+        <Field label={t('auth.mint.keyFile')} help={t('auth.mint.keyFileHint')}>
+          <input
+            className="input"
+            value={form.mintKeyFile}
+            onChange={(e) => set('mintKeyFile', e.target.value)}
+            placeholder={t('auth.mint.keyFile.placeholder')}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+      </div>
+
+      <div className="import__grid">
+        <Field
+          label={t('auth.mint.subject')}
+          help={t('auth.mint.subjectHint')}
+          tip={<HelpTip label={t('auth.mint.subject')} text={t('auth.mint.subject.tip')} />}
+        >
+          <input
+            className="input"
+            value={form.mintSubject}
+            onChange={(e) => set('mintSubject', e.target.value)}
+            placeholder="user-{{.userIndex}}"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label={t('auth.mint.ttl')} help={t('auth.mint.ttlHint')}>
+          <input
+            className="input"
+            type="number"
+            min={1}
+            value={form.mintTtlSeconds}
+            onChange={(e) => set('mintTtlSeconds', Math.max(1, Math.floor(Number(e.target.value) || 0)))}
+          />
+        </Field>
+      </div>
+
+      <Field
+        label={t('auth.mint.claims')}
+        help={t('auth.mint.claimsHint')}
+        tip={<HelpTip label={t('auth.mint.claims')} text={t('auth.mint.claims.tip')} />}
+      >
+        <textarea
+          className="textarea"
+          value={form.mintClaimsJSON}
+          onChange={(e) => set('mintClaimsJSON', e.target.value)}
+          rows={4}
+          placeholder={t('auth.mint.claims.placeholder')}
+          spellCheck={false}
+        />
+      </Field>
+
+      {claimsError && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{claimsError}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// AuthExecFields authors the exec (bring-your-own-token) strategy: tmula runs an
+// operator-supplied LOCAL command once per virtual user and reads the token from its
+// stdout — the escape hatch for auth schemes none of the built-in strategies model. It is
+// the most powerful and most dangerous option, so it is framed like bootstrap: a loud
+// warning banner (the command runs locally and its egress is NOT bound by the target
+// allowlist or rate cap) plus an explicit opt-in checkbox (execConfirmed) that gates the
+// fields and the run. The opt-in is enforced again server-side by the --allow-exec flag;
+// buildExecSpec re-checks the confirmation and rejects an empty command, a non-positive
+// timeout, or malformed env. Secrets belong in the env (resolved on the server), never in
+// argv. Both the command and env values may template {{.userIndex}} per virtual user.
+function AuthExecFields({
+  form,
+  set,
+}: {
+  form: ExperimentForm
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const confirmed = form.execConfirmed
+  return (
+    <div className="authpanel">
+      <p className="authpanel__lead">{t('auth.exec.lead')}</p>
+
+      <div className="authpanel__warn" role="alert">
+        <AlertIcon />
+        <label className="authpanel__confirm">
+          <input
+            className="check__box"
+            type="checkbox"
+            checked={confirmed}
+            onChange={(e) => set('execConfirmed', e.target.checked)}
+          />
+          <span>
+            <span className="authpanel__confirmLabel">{t('auth.exec.confirm')}</span>
+            <span className="authpanel__confirmSub">{t('auth.exec.confirmSub')}</span>
+          </span>
+        </label>
+      </div>
+
+      <fieldset className="authpanel__fields" disabled={!confirmed}>
+        <Field
+          label={t('auth.exec.command')}
+          help={t('auth.exec.commandHint')}
+          tip={<HelpTip label={t('auth.exec.command')} text={t('auth.exec.command.tip')} />}
+        >
+          <textarea
+            className="textarea"
+            value={form.execCommandText}
+            onChange={(e) => set('execCommandText', e.target.value)}
+            rows={4}
+            placeholder={'./fetch-token.sh\n--user\n{{.userIndex}}'}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+
+        <Field
+          label={t('auth.exec.env')}
+          help={t('auth.exec.envHint')}
+          tip={<HelpTip label={t('auth.exec.env')} text={t('auth.exec.env.tip')} />}
+        >
+          <textarea
+            className="textarea"
+            value={form.execEnvText}
+            onChange={(e) => set('execEnvText', e.target.value)}
+            rows={3}
+            placeholder={'API_SECRET=...\nUSER_INDEX={{.userIndex}}'}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </Field>
+
+        <Field label={t('auth.exec.timeout')} help={t('auth.exec.timeoutHint')}>
+          <input
+            className="input"
+            type="number"
+            min={1}
+            value={form.execTimeoutSeconds}
+            onChange={(e) => set('execTimeoutSeconds', Math.max(1, Math.floor(Number(e.target.value) || 0)))}
+          />
+        </Field>
       </fieldset>
     </div>
   )

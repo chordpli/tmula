@@ -91,6 +91,7 @@ func serve(args []string) error {
 		storePath  = fs.String("store", "", "local role: JSON snapshot file; loaded on start and written on graceful shutdown so run history survives a restart (blank = in-memory only)")
 		dbDSN      = fs.String("db-dsn", "", "master role: Postgres DSN for the durable store (falls back to in-memory when blank; env TMULA_DB_DSN is used if this flag is unset)")
 		showVer    = fs.Bool("version", false, "print version and exit")
+		allowExec  = fs.Bool("allow-exec", false, "permit the exec credential strategy, which runs an operator-supplied LOCAL command per virtual user to mint a token. OFF by default: a scenario file is untrusted, and an exec command's network egress bypasses the target allowlist/rate cap")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -132,6 +133,7 @@ func serve(args []string) error {
 	apiSrv, handler := newEngineServer(role,
 		api.WithDefaultWorkers(defaultWorkers),
 		api.WithStore(persistStore),
+		api.WithAllowExec(*allowExec),
 	)
 
 	srv := &http.Server{

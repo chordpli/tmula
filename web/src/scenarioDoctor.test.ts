@@ -175,4 +175,17 @@ describe('doctorForm', () => {
     expect(got).not.toContain('auth-login-cred-invalid')
     expect(got).not.toContain('auth-login-cred-unused')
   })
+
+  it('flags a mint run with no signing-key reference', () => {
+    const got = codes({ ...form, authMode: 'mint', mintKeyEnv: '', mintKeyFile: '' })
+    expect(got).toContain('auth-mint-key')
+  })
+
+  it('does not flag a mint run that references a key, and flags malformed claims', () => {
+    const ok = codes({ ...form, authMode: 'mint', mintKeyEnv: 'TMULA_MINT_SECRET' })
+    expect(ok).not.toContain('auth-mint-key')
+    expect(ok).not.toContain('auth-mint-claims')
+    const bad = codes({ ...form, authMode: 'mint', mintKeyEnv: 'K', mintClaimsJSON: '{not json}' })
+    expect(bad).toContain('auth-mint-claims')
+  })
 })

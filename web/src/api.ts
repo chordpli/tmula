@@ -54,6 +54,14 @@ export interface ExperimentForm {
   loginStart: string
   loginTokenVar: string // captured variable that becomes the token (optional; empty = auto-detect)
   loginSubjectVar: string // captured variable that becomes the subject (optional)
+  // Explicit refresh-grant OVERRIDE (advanced only): when loginRefreshBody is set it WINS
+  // over the backend's auto-derivation of a grant_type=refresh_token request, so even a
+  // JSON-body login gets a real refresh exchange instead of re-logging-in on a mid-run 401.
+  // loginRefreshRequest is the optional "METHOD /path" the refresh POSTs to (defaults to the
+  // login token endpoint). Both blank = auto-derive / re-login, unchanged. Surfaced ONLY in
+  // the advanced login panel — the simple mini-form stays one-field.
+  loginRefreshRequest: string // optional refresh request line, e.g. POST /oauth/token
+  loginRefreshBody: string // optional refresh form body, may reference {{.refreshToken}}
   loginScope: LoginScope // 'per-user' (default) or 'shared' (client_credentials)
 
   // "Log in multiple users" (P8): an OPTIONAL list of login credentials so each virtual
@@ -92,6 +100,34 @@ export interface ExperimentForm {
   // safety stance (this creates/deletes real accounts on the target).
   authBootstrapConfirmed: boolean
 
+  // 'mint' mode: self-issue a JWT per virtual user by signing one LOCALLY with a key
+  // the operator holds (the M1 case — a service whose tokens are self-issued JWTs). It
+  // SKIPS token acquisition entirely: no login/refresh/capture, each VU gets a token
+  // instantly. The signing key is a REFERENCE only (an env var the server reads, or a
+  // file on the server) — never inlined on the wire — so buildAuth sends mintKeyEnv /
+  // mintKeyFile as the pointer and the backend resolves it in-process. It does NOT help
+  // a third-party/managed IdP (Auth0/Cognito/Firebase) — you cannot sign for a key you
+  // do not hold — only self-issued JWT.
+  mintAlg: MintAlg // HS256 | RS256 | ES256
+  mintSecretEncoding: MintEncoding // HS256 only: how the secret body is encoded
+  mintKeyEnv: string // env var holding the signing key (mutually exclusive with file)
+  mintKeyFile: string // file path (on the server) holding the signing key
+  mintSubject: string // sub-claim template, e.g. user-{{.userIndex}} (blank = no sub)
+  mintClaimsJSON: string // extra claims as a JSON object (blank = none); values may template {{.userIndex}}/{{.subject}}
+  mintTtlSeconds: number // token lifetime in seconds → exp = now+ttl
+
+  // exec (bring-your-own-token escape hatch): run an operator-supplied COMMAND per
+  // virtual user whose stdout is the token — the universal fallback for auth tmula
+  // cannot model declaratively (social/SDK login, third-party IdP consent). It runs an
+  // arbitrary LOCAL command, so the operator must explicitly confirm the opt-in
+  // (execConfirmed), like bootstrap; the run-start server gate enforces it again. The
+  // command is argv (never a shell), its egress is NOT bound by the target allowlist /
+  // rate cap, and operator secrets belong in the env (KEY=VALUE), never argv.
+  execConfirmed: boolean // operator acknowledged exec runs a local command (the opt-in)
+  execCommandText: string // argv, one element per line (argv[0] is the program); may template {{.userIndex}}
+  execEnvText: string // extra env as KEY=VALUE lines (secrets go here, not argv); values may template {{.userIndex}}
+  execTimeoutSeconds: number // per-invocation timeout in seconds
+
   // replaceMeValues holds the user-supplied secret(s) for any REPLACE_ME_* placeholder
   // an import surfaced (e.g. REPLACE_ME_PASSWORD -> the real password). It is keyed by
   // the placeholder literal; buildAuth substitutes each occurrence in the login/signup
@@ -107,9 +143,19 @@ export interface ExperimentForm {
 export type AuthAuthoringMode = 'simple' | 'advanced'
 
 // AuthMode is the console's selected authentication strategy. It is a UI concept:
-// 'none' attaches no credentialPool (anonymous, the default), while the other three
-// map onto a backend CredentialStrategy (pool / login / bootstrap-signup).
-export type AuthMode = 'none' | 'pool' | 'login' | 'bootstrap'
+// 'none' attaches no credentialPool (anonymous, the default), while the others map
+// onto a backend CredentialStrategy (pool / login / bootstrap-signup / mint / exec).
+export type AuthMode = 'none' | 'pool' | 'login' | 'bootstrap' | 'mint' | 'exec'
+
+// MintAlg is the JWS signing algorithm the mint strategy self-issues a token with,
+// mirroring the backend domain.MintAlg: HS256 (symmetric HMAC secret), RS256 (RSA) or
+// ES256 (ECDSA P-256). Only these three are signed with the standard library.
+export type MintAlg = 'HS256' | 'RS256' | 'ES256'
+
+// MintEncoding declares how an HS256 secret body is encoded, mirroring the backend
+// domain.MintEncoding: raw (verbatim bytes), base64, or base64url. It is meaningful
+// only for HS256; an asymmetric alg reads a PEM and ignores it.
+export type MintEncoding = 'raw' | 'base64' | 'base64url'
 
 // CredFormat is how a pasted/uploaded credential body is encoded, matching the
 // backend credential source formats (auth.Format): csv (a header row with a token
@@ -165,6 +211,16 @@ export interface LoginFlowSpec {
   maxSteps?: number
   tokenVar?: string
   subjectVar?: string
+  // refreshRequest / refreshBody are an OPTIONAL explicit refresh-grant override the
+  // backend builds the mid-run refresh transport from (matching runspec.LoginFlowSpec).
+  // When refreshBody is set it WINS over the backend's auto-derivation — so even a
+  // JSON-body login (which cannot be auto-rewritten) gets a real grant_type=refresh_token
+  // exchange instead of a re-login. refreshRequest is the "METHOD /path" the refresh
+  // POSTs to; it is optional and defaults to the login token endpoint when omitted. Both
+  // omitted is the unchanged auto-derive / re-login behavior. Neither carries a secret —
+  // the refresh token is captured at run time from the live login response.
+  refreshRequest?: string
+  refreshBody?: string
 }
 
 // SignupFlowSpec is the declarative bootstrap-signup journey, matching the backend
@@ -178,6 +234,21 @@ export interface SignupFlowSpec {
   capture: { token?: string; subject?: string }
   teardown?: SignupStepSpec[]
   teardownStart?: string
+}
+
+// MintSpec is the wire shape the server reads to self-issue a JWT per virtual user,
+// mirroring the backend domain.MintSpec (only the fields the console emits): the alg,
+// the HS256 secret encoding, the NON-SECRET signing-key reference (an env var or a
+// file the server resolves IN-PROCESS — never the key itself), the subject template,
+// the extra claims and the TTL (a Go duration string, e.g. "1h0m0s"). The console
+// NEVER sends a key body — only the reference, so the secret never crosses the wire.
+export interface MintSpec {
+  alg: MintAlg
+  secretEncoding?: MintEncoding
+  key?: { env?: string; file?: string }
+  subject?: string
+  claims?: Record<string, string>
+  ttl: string // Go duration string (e.g. "1h0m0s") the backend parses into a time.Duration
 }
 
 // AUTH_FORM_DEFAULTS is the off (anonymous) baseline for the form's auth fields, so
@@ -198,6 +269,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'loginStart'
   | 'loginTokenVar'
   | 'loginSubjectVar'
+  | 'loginRefreshRequest'
+  | 'loginRefreshBody'
   | 'loginScope'
   | 'loginCredText'
   | 'loginCredFormat'
@@ -215,6 +288,17 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'signupTeardownStart'
   | 'keepAccounts'
   | 'authBootstrapConfirmed'
+  | 'mintAlg'
+  | 'mintSecretEncoding'
+  | 'mintKeyEnv'
+  | 'mintKeyFile'
+  | 'mintSubject'
+  | 'mintClaimsJSON'
+  | 'mintTtlSeconds'
+  | 'execConfirmed'
+  | 'execCommandText'
+  | 'execEnvText'
+  | 'execTimeoutSeconds'
   | 'replaceMeValues'
 > = {
   authMode: 'none',
@@ -229,6 +313,8 @@ export const AUTH_FORM_DEFAULTS: Pick<
   loginStart: '',
   loginTokenVar: '',
   loginSubjectVar: '',
+  loginRefreshRequest: '',
+  loginRefreshBody: '',
   loginScope: 'per-user',
   loginCredText: '',
   loginCredFormat: 'csv',
@@ -246,6 +332,17 @@ export const AUTH_FORM_DEFAULTS: Pick<
   signupTeardownStart: '',
   keepAccounts: false,
   authBootstrapConfirmed: false,
+  mintAlg: 'HS256',
+  mintSecretEncoding: 'raw',
+  mintKeyEnv: '',
+  mintKeyFile: '',
+  mintSubject: 'user-{{.userIndex}}',
+  mintClaimsJSON: '',
+  mintTtlSeconds: 3600,
+  execConfirmed: false,
+  execCommandText: '',
+  execEnvText: '',
+  execTimeoutSeconds: 30,
   replaceMeValues: {},
 }
 
@@ -256,12 +353,28 @@ export const AUTH_FORM_DEFAULTS: Pick<
 // it resolves any pasted/uploaded pool into inline entries in the browser (D1).
 export interface CredentialPool {
   id: string
-  strategy: 'pool' | 'login' | 'bootstrap-signup'
+  strategy: 'pool' | 'login' | 'bootstrap-signup' | 'mint' | 'exec'
   entries?: CredentialEntry[]
   loginFlowId?: string
   loginScope?: LoginScope
   signupFlow?: SignupFlowSpec
   keepAccounts?: boolean
+  // mint carries the local-JWT-signing config when strategy is 'mint' (the M1 case).
+  mint?: MintSpec
+  // exec carries the bring-your-own-token command config when strategy is 'exec'.
+  exec?: ExecSpec
+}
+
+// ExecSpec is the wire shape for the exec (bring-your-own-token) strategy: the argv
+// command run per virtual user (argv[0] is the program — never a shell string), optional
+// extra env (where operator secrets belong, NOT argv), and an optional per-invocation
+// timeout as a Go duration string. It carries no secret inline; the command and its env
+// references resolve on the server, behind the operator opt-in gate.
+export interface ExecSpec {
+  command: string[]
+  env?: Record<string, string>
+  timeout?: string
+  maxOutputBytes?: number
 }
 
 // Segment is one persona in an open run: a weighted share of arrivals with its
@@ -953,9 +1066,107 @@ function signupFormPatch(flow: SignupFlowSpec, keepAccounts: boolean): Partial<E
 // null when the form configures no auth (authMode 'none'), so the run stays anonymous
 // and byte-identical to before.
 export interface AuthBuild {
-  authStrategy: 'pool' | 'login' | 'bootstrap-signup'
+  authStrategy: 'pool' | 'login' | 'bootstrap-signup' | 'mint' | 'exec'
   credentialPool: CredentialPool
   loginFlow?: LoginFlowSpec
+}
+
+// secondsToGoDuration formats a whole-second count as the Go duration string the
+// backend parses (time.ParseDuration), e.g. 3600 -> "1h0m0s", 90 -> "1m30s". The
+// mint TTL is authored as a friendly seconds number in the form but crosses the wire
+// as a duration so the backend reads it with the same parser the CLI uses.
+export function secondsToGoDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  let out = ''
+  if (h > 0) out += `${h}h`
+  if (h > 0 || m > 0) out += `${m}m`
+  out += `${sec}s`
+  return out
+}
+
+// goDurationToSeconds parses a Go duration string (the form the backend marshals, e.g.
+// "1h0m0s", "30m", "5s", "1h30m") back to whole seconds, for the attach round-trip. It
+// is forgiving: an unparseable value yields 0 so the caller keeps the form's default.
+export function goDurationToSeconds(dur: string): number {
+  const trimmed = dur.trim()
+  if (!trimmed) return 0
+  let total = 0
+  let matched = false
+  const re = /(\d+(?:\.\d+)?)(h|m|s|ms|us|µs|ns)/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(trimmed)) !== null) {
+    matched = true
+    const n = Number(m[1])
+    switch (m[2]) {
+      case 'h':
+        total += n * 3600
+        break
+      case 'm':
+        total += n * 60
+        break
+      case 's':
+        total += n
+        break
+      // Sub-second units round into the seconds total; mint TTLs are whole seconds.
+      case 'ms':
+        total += n / 1000
+        break
+      default:
+        break
+    }
+  }
+  return matched ? Math.round(total) : 0
+}
+
+// buildMintSpec turns the form's mint fields into the wire MintSpec, throwing a clear
+// error on invalid input (no key reference, a non-positive ttl, or malformed claims
+// JSON) so buildAuth fails fast instead of POSTing a spec the backend will 400. The
+// signing key is sent as a REFERENCE only — mintKeyEnv or mintKeyFile — never a key
+// body, so the secret never leaves the operator's environment. An asymmetric alg omits
+// the HS-only secretEncoding; an empty subject / empty claims are omitted so a minimal
+// mint stays minimal.
+export function buildMintSpec(form: ExperimentForm): MintSpec {
+  const env = form.mintKeyEnv.trim()
+  const file = form.mintKeyFile.trim()
+  if (!env && !file) {
+    throw new Error('mint needs a signing-key reference — set an environment variable or a file path')
+  }
+  if (env && file) {
+    throw new Error('mint takes either a key environment variable or a key file, not both')
+  }
+  if (!(form.mintTtlSeconds > 0)) {
+    throw new Error('mint needs a token lifetime (ttl) greater than zero seconds')
+  }
+  const mint: MintSpec = {
+    alg: form.mintAlg,
+    key: env ? { env } : { file },
+    ttl: secondsToGoDuration(form.mintTtlSeconds),
+  }
+  // secretEncoding is HS-only; an asymmetric alg reads a PEM and ignores it.
+  if (form.mintAlg === 'HS256') mint.secretEncoding = form.mintSecretEncoding
+  const subject = form.mintSubject.trim()
+  if (subject) mint.subject = subject
+  const claimsText = form.mintClaimsJSON.trim()
+  if (claimsText) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(claimsText)
+    } catch {
+      throw new Error('mint claims must be a JSON object of string values')
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error('mint claims must be a JSON object (e.g. {"role":"tester"})')
+    }
+    const claims: Record<string, string> = {}
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      claims[k] = typeof v === 'string' ? v : String(v)
+    }
+    if (Object.keys(claims).length > 0) mint.claims = claims
+  }
+  return mint
 }
 
 // CRED_POOL_ID is the id the console stamps on every credential pool it builds. It
@@ -972,6 +1183,46 @@ const CRED_POOL_ID = 'web-pool'
 // It NEVER produces a file/env source — a 'pool' run resolves its pasted text and
 // uploaded file into inline entries in the browser (parseCredentials), because the
 // server rejects an unresolved source arriving over the wire (D1).
+// buildExecSpec turns the form's exec fields into the wire ExecSpec, throwing a clear
+// error on invalid input (the opt-in not confirmed, an empty command, a non-positive
+// timeout, or a malformed env line) so buildAuth fails fast instead of POSTing a spec the
+// backend will reject. exec runs an arbitrary LOCAL command, so the operator MUST confirm
+// the opt-in (execConfirmed); the run-start server gate enforces it again. The command is
+// argv (one element per line, argv[0] is the program — never a shell string); operator
+// secrets belong in env (KEY=VALUE lines), not argv. An empty env is omitted so a minimal
+// exec stays minimal. maxOutputBytes is left to the backend default.
+export function buildExecSpec(form: ExperimentForm): ExecSpec {
+  if (!form.execConfirmed) {
+    throw new Error('exec runs a local command per virtual user — confirm you allow it before running')
+  }
+  const command = form.execCommandText
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+  if (command.length === 0) {
+    throw new Error('exec needs a command (argv) — one element per line, the first is the program')
+  }
+  if (!(form.execTimeoutSeconds > 0)) {
+    throw new Error('exec needs a per-invocation timeout greater than zero seconds')
+  }
+  const exec: ExecSpec = {
+    command,
+    timeout: secondsToGoDuration(form.execTimeoutSeconds),
+  }
+  const env: Record<string, string> = {}
+  for (const raw of form.execEnvText.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const eq = line.indexOf('=')
+    if (eq <= 0) {
+      throw new Error(`exec env must be KEY=VALUE lines (got ${JSON.stringify(line)})`)
+    }
+    env[line.slice(0, eq).trim()] = line.slice(eq + 1)
+  }
+  if (Object.keys(env).length > 0) exec.env = env
+  return exec
+}
+
 export function buildAuth(form: ExperimentForm): AuthBuild | null {
   switch (form.authMode) {
     case 'none':
@@ -999,6 +1250,16 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
         if (tokenVar) loginFlow.tokenVar = tokenVar
         const subjectVar = form.loginSubjectVar.trim()
         if (subjectVar) loginFlow.subjectVar = subjectVar
+        // Explicit refresh-grant OVERRIDE (advanced only): when a body is given it WINS
+        // over the backend's auto-derivation, so a JSON-body login still refreshes via a
+        // real grant_type=refresh_token exchange. The request line is optional (defaults
+        // to the login token endpoint). Both blank leaves the override off — the backend
+        // auto-derives (form login) or re-logins, unchanged. The simple mini-form never
+        // sets these, so it stays one-field.
+        const refreshBody = form.loginRefreshBody.trim()
+        if (refreshBody) loginFlow.refreshBody = refreshBody
+        const refreshRequest = form.loginRefreshRequest.trim()
+        if (refreshRequest) loginFlow.refreshRequest = refreshRequest
       }
       // The pool references the flow by id ("login") and carries the scope; the flow
       // itself rides at the top level. Send the scope only when it differs from the
@@ -1057,6 +1318,29 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
         keepAccounts: form.keepAccounts,
       }
       return { authStrategy: 'bootstrap-signup', credentialPool }
+    }
+    case 'mint': {
+      // Self-issue a JWT per virtual user by signing locally with a key the operator
+      // holds. buildMintSpec throws on a missing key reference, a non-positive ttl, or
+      // malformed claims, so an invalid mint fails fast. No loginFlow rides along —
+      // mint needs no token acquisition.
+      const mint = buildMintSpec(form)
+      return {
+        authStrategy: 'mint',
+        credentialPool: { id: CRED_POOL_ID, strategy: 'mint', mint },
+      }
+    }
+    case 'exec': {
+      // Run an operator-supplied command per virtual user; its stdout is the token. exec
+      // runs an arbitrary LOCAL command, so the operator must confirm the opt-in here
+      // (the run-start server gate enforces it again). buildExecSpec throws on an
+      // unconfirmed opt-in, an empty command, a malformed env line, or a non-positive
+      // timeout, so an invalid exec fails fast. No loginFlow rides along.
+      const exec = buildExecSpec(form)
+      return {
+        authStrategy: 'exec',
+        credentialPool: { id: CRED_POOL_ID, strategy: 'exec', exec },
+      }
     }
     default:
       return null
@@ -1349,6 +1633,61 @@ export function authFormFromSpec(s: Record<string, unknown>): Partial<Experiment
       if (typeof sf.teardownStart === 'string') patch.signupTeardownStart = sf.teardownStart
     }
     if (typeof flow.keepAccounts === 'boolean') patch.keepAccounts = flow.keepAccounts
+    return patch
+  }
+  if (strategy === 'mint') {
+    // A mint pool carries NO secret (the key is a reference), so its whole config
+    // round-trips. ttl crosses the wire as a Go duration string; parse it back to the
+    // form's seconds. Unrecognized fields are skipped (forgiving, like the rest).
+    const patch: Partial<ExperimentForm> = { authMode: 'mint' }
+    const mint = (s.credentialPool as { mint?: unknown }).mint as
+      | { alg?: unknown; secretEncoding?: unknown; key?: { env?: unknown; file?: unknown }; subject?: unknown; claims?: unknown; ttl?: unknown }
+      | null
+      | undefined
+    if (mint && typeof mint === 'object') {
+      if (mint.alg === 'HS256' || mint.alg === 'RS256' || mint.alg === 'ES256') patch.mintAlg = mint.alg
+      if (mint.secretEncoding === 'raw' || mint.secretEncoding === 'base64' || mint.secretEncoding === 'base64url') {
+        patch.mintSecretEncoding = mint.secretEncoding
+      }
+      if (mint.key && typeof mint.key === 'object') {
+        if (typeof mint.key.env === 'string') patch.mintKeyEnv = mint.key.env
+        if (typeof mint.key.file === 'string') patch.mintKeyFile = mint.key.file
+      }
+      if (typeof mint.subject === 'string') patch.mintSubject = mint.subject
+      if (mint.claims && typeof mint.claims === 'object') patch.mintClaimsJSON = JSON.stringify(mint.claims, null, 2)
+      if (typeof mint.ttl === 'string') {
+        const secs = goDurationToSeconds(mint.ttl)
+        if (secs > 0) patch.mintTtlSeconds = secs
+      }
+    }
+    return patch
+  }
+  if (strategy === 'exec') {
+    // An exec pool carries NO secret inline (operator secrets live in the command's env,
+    // resolved on the server), so its config round-trips — EXCEPT the opt-in: execConfirmed
+    // is never restored as true, so the operator must re-acknowledge that exec runs a local
+    // command (like bootstrap's confirm). The command joins back to one-per-line; env to
+    // KEY=VALUE lines; the Go duration string parses back to seconds.
+    const patch: Partial<ExperimentForm> = { authMode: 'exec', execConfirmed: false }
+    const exec = (s.credentialPool as { exec?: unknown }).exec as
+      | { command?: unknown; env?: unknown; timeout?: unknown }
+      | null
+      | undefined
+    if (exec && typeof exec === 'object') {
+      if (Array.isArray(exec.command)) {
+        patch.execCommandText = exec.command.filter((c): c is string => typeof c === 'string').join('\n')
+      }
+      if (exec.env && typeof exec.env === 'object' && !Array.isArray(exec.env)) {
+        patch.execEnvText = Object.entries(exec.env as Record<string, unknown>)
+          .filter(([, v]) => typeof v === 'string')
+          .map(([k, v]) => `${k}=${v as string}`)
+          .join('\n')
+      }
+      if (typeof exec.timeout === 'string') {
+        const secs = goDurationToSeconds(exec.timeout)
+        if (secs > 0) patch.execTimeoutSeconds = secs
+      }
+    }
     return patch
   }
   // Unknown strategy: leave the form's auth untouched rather than guessing.
