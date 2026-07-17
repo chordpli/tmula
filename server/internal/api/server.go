@@ -210,6 +210,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /reports/shared/{token}", s.getSharedReport)
 	s.mux.HandleFunc("GET /capacity", s.getCapacity)
 	s.mux.HandleFunc("POST /import", s.handleImport)
+	s.mux.HandleFunc("POST /auth/preflight", s.authPreflight)
+	s.mux.HandleFunc("POST /auth/discover", s.authDiscover)
 }
 
 // CreateExperiment validates and registers a run spec in-process, returning the
@@ -269,7 +271,7 @@ func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 	// at StartRun — before any provider/runner — exactly like the prod-lock guard, unless
 	// the operator explicitly enabled exec (WithAllowExec / the --allow-exec flag).
 	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredExec && !s.allowExec {
-		return "", &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command per virtual user and is disabled by default; enable it explicitly with the --allow-exec flag (server WithAllowExec) before running an exec scenario", domain.CredExec)}
+		return "", &guardError{err: fmt.Errorf("the %q credential strategy runs an arbitrary local command per virtual user and is disabled by default; enable it explicitly with the --allow-exec flag (server WithAllowExec) before running an exec scenario (if you don't operate the engine, ask its operator to start it with --allow-exec)", domain.CredExec)}
 	}
 
 	guard, err := safety.NewGuardForEnv(spec.TargetEnv, nil, false)
@@ -297,6 +299,9 @@ func (s *Server) StartRun(id domain.ID) (domain.ID, error) {
 		guard:     guard,
 		cancel:    cancel,
 		done:      make(chan struct{}),
+		// Spec-derived setup notes (e.g. a credential pool shared across more users than
+		// it has entries), assembled before the run is registered so they need no lock.
+		staticNotes: startNotesFor(spec),
 	}
 	// Visualization opt-in: aggregate per-edge traffic (any scale) for the
 	// heatmap, and additionally buffer per-request events for the live-dot graph

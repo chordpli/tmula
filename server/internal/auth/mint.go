@@ -56,14 +56,14 @@ func NewMintProvider(spec domain.MintSpec, key []byte, now nowFunc) (*MintProvid
 	}
 	p := &MintProvider{spec: spec, key: key, now: now, claims: make(map[string]*template.Template, len(spec.Claims))}
 	if strings.TrimSpace(spec.Subject) != "" {
-		t, err := parseClaimTemplate("subject", spec.Subject)
+		t, err := parseClaimTemplate("mint", "subject", spec.Subject)
 		if err != nil {
 			return nil, err
 		}
 		p.subject = t
 	}
 	for name, tmpl := range spec.Claims {
-		t, err := parseClaimTemplate("claim "+name, tmpl)
+		t, err := parseClaimTemplate("mint", "claim "+name, tmpl)
 		if err != nil {
 			return nil, err
 		}
@@ -152,11 +152,13 @@ func isNumericDateClaim(name string) bool {
 
 // parseClaimTemplate parses one claim/subject template under missingkey=error, the
 // same strict mode the request renderer uses, so a typo'd {{.userInxed}} fails loudly
-// at build time rather than silently emitting "<no value>".
-func parseClaimTemplate(name, text string) (*template.Template, error) {
+// at build time rather than silently emitting "<no value>". label prefixes the error
+// with the strategy the template belongs to ("mint" or "usersPattern") so a parse
+// failure names the block the operator authored it in — the same helper serves both.
+func parseClaimTemplate(label, name, text string) (*template.Template, error) {
 	t, err := template.New(name).Option("missingkey=error").Parse(text)
 	if err != nil {
-		return nil, fmt.Errorf("auth: mint %s template: %w", name, err)
+		return nil, fmt.Errorf("auth: %s %s template: %w", label, name, err)
 	}
 	return t, nil
 }

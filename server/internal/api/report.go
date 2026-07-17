@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/obs"
@@ -67,6 +68,54 @@ func authExpiryNote(stats obs.Stats) string {
 	return fmt.Sprintf("auth may have expired or been rejected (%d response(s) were 401/403)", n)
 }
 
+// openSetupFailureThreshold is the fraction of launched open-model sessions whose auth
+// setup may fail before the run additionally raises a finding (not just a note). A few
+// skipped sessions are a note-worthy footnote; more than one in ten failing to
+// authenticate is a material result the run should flag.
+const openSetupFailureThreshold = 0.10
+
+// isSignificantSetupFailure reports whether the auth-setup failure count is large enough
+// (past openSetupFailureThreshold of launched) to warrant a finding, not just a note.
+func isSignificantSetupFailure(setupErrors, launched int) bool {
+	return launched > 0 && float64(setupErrors) > openSetupFailureThreshold*float64(launched)
+}
+
+// setupErrorNote renders the open-model auth-setup note: how many of the launched
+// sessions were skipped because they could not authenticate, one representative cause,
+// and the open=skip vs closed=abort asymmetry so an operator understands why the run
+// still completed instead of failing. The first error is a setup cause (a failed
+// credential acquire), never a secret.
+func setupErrorNote(setupErrors, launched int, firstErr error) string {
+	cause := "unknown"
+	if firstErr != nil {
+		cause = firstErr.Error()
+	}
+	return fmt.Sprintf("%d of %d sessions failed auth setup and were skipped; first error: %s "+
+		"(the open model skips a session it cannot authenticate and keeps going, unlike the closed model, which aborts the whole run on the first auth-setup failure)",
+		setupErrors, launched, cause)
+}
+
+// authSetupFinding builds the finding raised when a material fraction of open-model
+// sessions failed auth setup. It is a threshold-class finding keyed on the stable
+// "auth-setup" metric identity (like "error-rate"), so the same issue keys identically
+// across runs, at warning severity — the run produced data, but a large share of the
+// intended load never authenticated.
+func authSetupFinding(runID domain.ID, setupErrors, launched int, now time.Time) domain.Finding {
+	pct := 0.0
+	if launched > 0 {
+		pct = 100 * float64(setupErrors) / float64(launched)
+	}
+	return domain.Finding{
+		RunID:       runID,
+		Category:    domain.FindingThreshold,
+		Severity:    domain.SeverityWarning,
+		EvidenceRef: "auth-setup",
+		FirstSeen:   now,
+		Count:       setupErrors,
+		Description: fmt.Sprintf("%d of %d open-model sessions (%.1f%%) could not authenticate and were skipped; the load actually exercised is smaller than requested — check the credential pool/login flow", setupErrors, launched, pct),
+	}
+}
+
 // report assembles the report for a run (caller must not hold rs.mu). Workers is
 // taken from the run itself (set at creation, persisted on finalize) so the live
 // report and one rebuilt from the store agree on the topology.
@@ -76,13 +125,51 @@ func (rs *runState) report() Report {
 	findings := append([]domain.Finding(nil), rs.findings...)
 	serverMetrics := append([]domain.MetricSeries(nil), rs.serverMetrics...)
 	metricsErr := rs.metricsErr
+	staticNotes := append([]string(nil), rs.staticNotes...)
 	rs.mu.Unlock()
 	stats := rs.stats()
+	// Static (spec-derived) notes come first — they are run-setup facts (a wrapped
+	// credential pool) — then the stats-derived notes (the 401/403 auth-expiry tell).
+	notes := append(staticNotes, notesFor(stats)...)
 	return Report{
 		Run: exec, Stats: stats, Findings: findings, Workers: exec.Workers,
-		Notes:         notesFor(stats),
+		Notes:         notes,
 		ServerMetrics: serverMetrics, MetricsError: metricsErr,
 	}
+}
+
+// poolWrapNote returns the "credential pool is shared across virtual users" note when a
+// closed run has FEWER pool entries than virtual users, so each entry authenticates
+// several VUs (the pool wraps around by index). It is a spec-derived setup fact — not a
+// finding and not a re-classification — surfaced so an operator knows a 200k-user run is
+// only exercising, say, 1000 distinct principals. It returns "" when the pool covers every
+// user, when there are no inline entries (a mint/bootstrap/exec run mints per-VU), or for
+// the open model (which has no fixed user count to compare against).
+func poolWrapNote(spec RunSpec) string {
+	if spec.IsOpen() || spec.CredentialPool == nil {
+		return ""
+	}
+	n := len(spec.CredentialPool.Entries)
+	if n == 0 {
+		return ""
+	}
+	m := spec.PoolSize()
+	if m <= n {
+		return ""
+	}
+	// Ceiling division: the busiest entry serves this many VUs.
+	k := (m + n - 1) / n
+	return fmt.Sprintf("credential pool has %d entries for %d users; each credential is shared by ~%d virtual users", n, m, k)
+}
+
+// startNotesFor collects the spec-derived run notes known before the run starts. It is
+// the single place StartRun assembles rs.staticNotes, so a new setup note is added here.
+func startNotesFor(spec RunSpec) []string {
+	var notes []string
+	if n := poolWrapNote(spec); n != "" {
+		notes = append(notes, n)
+	}
+	return notes
 }
 
 // reportFor returns a run's report and whether it was found. A live run in the

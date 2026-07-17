@@ -3,32 +3,44 @@ import { useEffect, useRef, useState } from 'react'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  assembleLoginBody,
   AUTH_FORM_DEFAULTS,
+  authFormFromCurl,
   authFormFromImport,
   authFormFromOAuth2Guide,
   buildRunSpec,
   compareURL,
   createExperiment,
+  discoverIssuer,
   findReplaceMePlaceholders,
   formFromRunSpec,
   generateCredentialRows,
   getExperimentSpec,
   getReport,
   hostFromBaseUrl,
+  humanDuration,
   importScenario,
   killRun,
+  localizeError,
+  LOGIN_BODY_MULTI,
+  LOGIN_BODY_SINGLE,
+  loginBodyOverwritable,
   MAX_TRACE_USERS,
   MAX_WEB_PATTERN_ROWS,
   mintManagedIdPAdvisory,
-  OAUTH2_GUIDE_DEFAULTS,
+  oauth2GuideCanCompileOver,
   openIdConnectDiscoveryUrl,
   parseAllowlist,
   parseCredentials,
+  parseCurlCommand,
   parseLoginCredentials,
   placeholderLabel,
+  poolExpiry,
+  preflightAuth,
   probeRun,
   reportHTMLURL,
   runDisabled,
+  runFailureHintKey,
   runIdFromQuery,
   shareTokenFromQuery,
   startRun,
@@ -36,6 +48,7 @@ import {
   traceable,
   type AuthAdvisory,
   type AuthMode,
+  type CredentialEntry,
   type CredFormat,
   type ExperimentForm,
   type ImportResult,
@@ -47,14 +60,17 @@ import {
   type OAuth2Grant,
   type OAuth2GuideForm,
   type OutcomeSummary,
+  type PreflightResult,
   type Report,
   type Stats,
+  type StreamFrame,
 } from './api'
 import {
   ADVANCED_AUTH_ENTRIES,
+  entryPatch,
   isAdvancedAuthMode,
-  modeForEntry,
   PRIMARY_AUTH_ENTRIES,
+  selectedEntry,
   type AuthEntry,
   type AuthEntryOption,
 } from './authEntryModel'
@@ -67,7 +83,7 @@ import LatencyHeatmap from './LatencyHeatmap'
 import LiveGraph from './LiveGraph'
 import { presets, type Preset } from './presets'
 import ReportView, { OutcomeView, StatsView } from './ReportView'
-import { doctorForm, type DoctorIssue } from './scenarioDoctor'
+import { authDoctorIssues, doctorForm, runBlockers, type DoctorIssue } from './scenarioDoctor'
 import Viewer from './Viewer'
 
 // stringify renders a preset's graph/templates the same way the Scenario card's
@@ -129,15 +145,6 @@ const loginTemplatesPlaceholder = `{
   }
 }`
 
-// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
-// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so we can detect when the operator has not
-// edited it yet. LOGIN_BODY_MULTI is the smart default the multi-user path suggests:
-// each virtual user logs in as the NEXT credential-list row, so the body reads the row
-// via the {{.username}}/{{.password}} Go-template markers the backend exposes (NOT the
-// {username}/{password} markers the single-identity body uses).
-const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
-const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
-
 // signupStepsPlaceholder shows the bootstrap signup journey shape: a step list with a
 // bare method/path and an extract that captures the token. teardownPlaceholder shows
 // the matching deprovision step. Both are guidance only until the operator authors
@@ -177,6 +184,11 @@ function Operator() {
   const [runId, setRunId] = useState<string>('')
   const [runMode, setRunMode] = useState<string>('')
   const [status, setStatus] = useState<string>('')
+  // runReason is the terminal frame's failure reason (SSE `reason`, mirroring the
+  // report's run.killReason): WHY a run died, e.g. "api: prewarm login token …".
+  // Kept as the raw backend string — the friendly line above it is derived via
+  // runFailureHintKey at render time so it follows the active language.
+  const [runReason, setRunReason] = useState<string>('')
   const [stats, setStats] = useState<Stats | null>(null)
   // outcome is the journey-outcome headline (completion/drop-off rates) the live
   // graph streams up while a traced run flows; it outlives the stream so the
@@ -184,6 +196,11 @@ function Operator() {
   const [outcome, setOutcome] = useState<OutcomeSummary | null>(null)
   const [report, setReport] = useState<Report | null>(null)
   const [error, setError] = useState<string>('')
+  // showBlockers turns the live run-blockers alert on after a blocked Run click.
+  // ONLY the visibility bit is state — the blockers themselves are re-derived
+  // from the current doctor issues on every render, so fixing a condition makes
+  // its line disappear and a locale switch re-translates the text.
+  const [showBlockers, setShowBlockers] = useState(false)
   // loadedPresetKey is the nameKey of the template just applied from a chip, kept
   // (instead of a rendered string) so the "Loaded template" confirmation re-renders
   // in the active language when the operator switches EN/한국어.
@@ -264,6 +281,7 @@ function Operator() {
         } else {
           // Already terminal: converge straight on the post-run state the stream
           // path would have produced.
+          setRunReason(rep.run.killReason ?? '')
           setStats(rep.stats)
           setHistory((h) => (h.includes(id) ? h : [...h, id]))
           setReport(rep)
@@ -359,23 +377,22 @@ function Operator() {
 
   async function run() {
     setError('')
+    setRunReason('')
     setReport(null)
     setStats(null)
     setOutcome(null)
     setStatus('starting')
     try {
-      const blocking = doctorForm(form).find((i) => i.severity === 'error')
-      if (blocking) {
+      // Doctor errors block the run — but the DISPLAY derives from the current
+      // doctor state on every render (see the blockers alert below), never from
+      // a message captured here: only the "show it" bit is set on click. The
+      // allowlist gate is one of those doctor errors, so no separate check.
+      if (runBlockers(doctorForm(form)).length > 0) {
         setStatus('')
-        setError(t(blocking.messageKey, blocking.vars))
+        setShowBlockers(true)
         return
       }
-      const host = hostFromBaseUrl(form.baseUrl)
-      if (host && !allowlistMatchesHost(parseAllowlist(form.allowlist), host)) {
-        setStatus('')
-        setError(t('run.allowlistBlocked', { host }))
-        return
-      }
+      setShowBlockers(false)
       const spec = buildRunSpec(form)
       const workerCount = spec.workers?.length ?? 0
       setRunMode(
@@ -389,7 +406,7 @@ function Operator() {
       listen(id)
     } catch (e) {
       setStatus('')
-      setError(String(e instanceof Error ? e.message : e))
+      setError(localizeError(e, t))
     }
   }
 
@@ -400,8 +417,12 @@ function Operator() {
     esRef.current = es
     es.onmessage = (ev) => {
       try {
-        const frame = JSON.parse(ev.data) as { status?: string; stats?: Stats }
+        const frame = JSON.parse(ev.data) as StreamFrame
         if (frame.status) setStatus(frame.status)
+        // The terminal frame carries WHY a run died (mirrors run.killReason) —
+        // e.g. a prewarm login failure. Keep it so the alert region can explain
+        // the failure instead of leaving a bare "failed" pill.
+        if (frame.reason) setRunReason(frame.reason)
         if (frame.stats) setStats(frame.stats)
         if (frame.status && frame.status !== 'running' && frame.status !== 'pending') {
           doneRef.current = true
@@ -441,6 +462,7 @@ function Operator() {
   const baseHost = hostFromBaseUrl(form.baseUrl)
   const allowlistCoversBase = !baseHost || allowlistMatchesHost(parseAllowlist(form.allowlist), baseHost)
   const doctorIssues = doctorForm(form)
+  const blockers = runBlockers(doctorIssues)
   const sizeUnit = openModel ? t('unit.maxConcurrency') : t('unit.users')
   const liveCopy =
     liveMode === 'events'
@@ -785,7 +807,13 @@ function Operator() {
         </section>
 
         {/* ---- Auth (P5 / P7) ---- */}
-        <AuthCard form={form} set={set} imported={authImported} advisories={authAdvisories} />
+        <AuthCard
+          form={form}
+          set={set}
+          imported={authImported}
+          advisories={authAdvisories}
+          issues={doctorIssues}
+        />
 
         {/* ---- Run ---- */}
         <section className="card">
@@ -815,12 +843,54 @@ function Operator() {
           </div>
         </section>
 
+        {/* Live run blockers: shown after a blocked Run click, but the CONTENT is
+            derived from the current doctor state on every render — fix a
+            condition and its line disappears; switch language and it
+            re-translates; every current blocker is listed, not just the first. */}
+        {showBlockers && blockers.length > 0 && (
+          <div className="alert" role="alert">
+            <span className="alert__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>
+              <strong>{t('run.blocked')}</strong>
+              <ul className="alert__list">
+                {blockers.map((b, i) => (
+                  <li key={`${b.code}-${i}`}>{t(b.messageKey, b.vars)}</li>
+                ))}
+              </ul>
+            </span>
+          </div>
+        )}
+
         {error && (
           <div className="alert" role="alert">
             <span className="alert__icon" aria-hidden="true">
               <AlertIcon />
             </span>
             <span>{error}</span>
+          </div>
+        )}
+
+        {/* Failure reason (why the run died): the terminal SSE frame's `reason`.
+            Known prewarm failures get a friendly, translated headline (derived at
+            render time so it follows the language); the raw backend reason always
+            shows beneath so nothing is hidden. */}
+        {runReason && statusKind(status) === 'danger' && (
+          <div className="alert" role="alert">
+            <span className="alert__icon" aria-hidden="true">
+              <AlertIcon />
+            </span>
+            <span>
+              {runFailureHintKey(runReason) ? (
+                <>
+                  <strong>{t(runFailureHintKey(runReason)!)}</strong>
+                  <span className="alert__sub">{runReason}</span>
+                </>
+              ) : (
+                runReason
+              )}
+            </span>
           </div>
         )}
 
@@ -1238,27 +1308,44 @@ function AuthCard({
   set,
   imported,
   advisories,
+  issues,
 }: {
   form: ExperimentForm
   set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
   imported: '' | AuthMode
   advisories: AuthAdvisory[]
+  // The full doctor issue list; the card echoes only the auth-scoped ones so a
+  // misconfiguration is visible NEXT TO the fields that caused it, not just in
+  // the far-away Scenario card.
+  issues: DoctorIssue[]
 }) {
   const { t } = useI18n()
+  const authIssues = authDoctorIssues(issues)
+  // advOpen is the single source of truth for the expert fold's open state, kept in sync
+  // with the DOM by onToggle. An effect forces it open whenever the wire mode becomes an
+  // advanced one (a round-tripped mint/exec import), so the selected strategy radio is
+  // never hidden. Deriving `open` from two OR'd sources instead left the fold stuck shut:
+  // React never rewrites a controlled <details> open prop whose value did not change, so a
+  // manual close could not be re-opened by a later import.
+  const [advOpen, setAdvOpen] = useState(() => isAdvancedAuthMode(form.authMode))
+  useEffect(() => {
+    if (isAdvancedAuthMode(form.authMode)) setAdvOpen(true)
+  }, [form.authMode])
   // The managed-IdP mint footgun: when the imported spec's token issuer holds the
   // signing key (Auth0/Cognito/Firebase/Okta or any openIdConnect issuer), a
   // self-issued (mint) token WILL be rejected — warn the moment mint is selected.
   const mintAdvisory = mintManagedIdPAdvisory(advisories)
-  // entry is the UI-layer selection; 'oauth2' is a pseudo-entry whose guide
-  // compiles onto the login wire mode, so it cannot be derived from form.authMode
-  // alone. It self-heals: whenever the remembered entry no longer maps onto the
-  // current wire mode (an import or a round-trip changed it), the wire mode wins.
-  const [entry, setEntry] = useState<AuthEntry | null>(null)
-  const selected: AuthEntry =
-    entry !== null && modeForEntry(entry) === form.authMode ? entry : form.authMode
+  // The UI-layer selection lives ON THE FORM (authEntryOAuth2): 'oauth2' is a
+  // pseudo-entry whose guide compiles onto the login wire mode, so it cannot be
+  // derived from form.authMode alone — and the scenario doctor needs to see it to
+  // speak the guide's language. selectedEntry self-heals: whenever the flag no
+  // longer maps onto the current wire mode (an import or a round-trip changed
+  // it), the wire mode wins.
+  const selected: AuthEntry = selectedEntry(form.authMode, form.authEntryOAuth2)
   function pickEntry(e: AuthEntry) {
-    setEntry(e)
-    set('authMode', modeForEntry(e))
+    const patch = entryPatch(e)
+    set('authEntryOAuth2', patch.authEntryOAuth2)
+    set('authMode', patch.authMode)
   }
   // Surface every REPLACE_ME_* placeholder the active flow's body still carries as a
   // highlighted input the operator must fill — so after an auto-detected import the ONLY
@@ -1299,8 +1386,14 @@ function AuthCard({
         {/* Expert strategies fold behind Advanced (auto-open when one is selected,
             e.g. a round-tripped exec/mint spec): a normal operator never needs mint
             or exec, and surfacing them beside the entry points invited the
-            managed-IdP mint footgun. */}
-        <details className="advanced" open={isAdvancedAuthMode(form.authMode)}>
+            managed-IdP mint footgun. Once the operator opens the fold themselves
+            it stays open for the session — leaving mint/exec must not snap it
+            shut under their cursor (advOpened tracks the user's open). */}
+        <details
+          className="advanced"
+          open={advOpen}
+          onToggle={(e) => setAdvOpen((e.target as HTMLDetailsElement).open)}
+        >
           <summary className="advanced__summary">
             {t('auth.advanced.modes')}
             <span className="field__badge">{t('badge.advanced')}</span>
@@ -1311,6 +1404,24 @@ function AuthCard({
         </details>
 
         {placeholders.length > 0 && <ReplaceMeFields form={form} set={set} placeholders={placeholders} />}
+
+        {/* Auth-scoped doctor issues, echoed here next to the panel that caused
+            them (the Scenario card's doctor panel still shows the full list). */}
+        {authIssues.length > 0 && (
+          <div
+            className={`doctor doctor--${authIssues.some((i) => i.severity === 'error') ? 'error' : 'warning'}`}
+            role="status"
+          >
+            <ul className="doctor__list">
+              {authIssues.map((item, i) => (
+                <li key={`${item.code}-${i}`} className={`doctor__item doctor__item--${item.severity}`}>
+                  <span className="doctor__severity">{t(`doctor.severity.${item.severity}`)}</span>
+                  <span>{t(item.messageKey, item.vars)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {form.authMode === 'pool' && <AuthPoolFields form={form} set={set} />}
         {selected === 'oauth2' && (
@@ -1387,6 +1498,78 @@ function ReplaceMeFields({
   )
 }
 
+// AuthPreflight is the "Test login / Test signup / Test token" button every auth
+// panel carries: one click sends the SAME RunSpec buildRunSpec would submit to
+// POST /api/auth/preflight, where the server performs exactly ONE credential
+// acquisition — no load, no run. Success shows a compact confirmation naming
+// where the token was found; a failed acquisition (200 ok:false) shows the
+// server's reason INLINE in the panel, next to the fields that caused it, so the
+// operator never has to hunt in the far-away run bar. A local build error (e.g.
+// malformed credential text) surfaces the same way. `kind` only picks the copy.
+function AuthPreflight({ form, kind }: { form: ExperimentForm; kind: 'login' | 'signup' | 'token' }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<PreflightResult | null>(null)
+  const [err, setErr] = useState('')
+
+  async function test() {
+    setBusy(true)
+    setErr('')
+    setResult(null)
+    try {
+      const spec = buildRunSpec(form)
+      setResult(await preflightAuth(spec))
+    } catch (e) {
+      setErr(localizeError(e, t))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="import__actions">
+        <button type="button" className="btn btn--ghost" onClick={test} disabled={busy}>
+          <CheckMini />
+          {busy ? t('auth.preflight.testing') : t(`auth.preflight.button.${kind}`)}
+        </button>
+        <span className="field__help">{t('auth.preflight.hint')}</span>
+      </div>
+      {result?.ok && (
+        <p className="authpanel__ok" role="status">
+          <CheckMini />
+          <span>
+            {t(`auth.preflight.ok.${kind}`)}
+            {result.tokenSource &&
+              ' — ' +
+                (result.tokenPrefix
+                  ? t('auth.preflight.okDetail', { source: result.tokenSource, prefix: result.tokenPrefix })
+                  : t('auth.preflight.okSource', { source: result.tokenSource }))}
+            {result.subject && ' · ' + t('auth.preflight.okSubject', { subject: result.subject })}
+          </span>
+        </p>
+      )}
+      {result && !result.ok && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>
+            {result.httpStatus
+              ? t('auth.preflight.fail', { status: result.httpStatus })
+              : t('auth.preflight.failPlain')}
+            {result.reason && <span className="alert__sub">{result.reason}</span>}
+          </span>
+        </div>
+      )}
+      {err && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{t('auth.preflight.error', { error: err })}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // AuthPoolFields authors a token pool: a format selector, a file upload, and a textarea
 // of pasted credentials. The file and textarea are BOTH parsed in the browser — the
 // file's text is loaded into the textarea on pick (so the operator sees exactly what
@@ -1404,15 +1587,23 @@ function AuthPoolFields({
 
   // Live parse of the pasted text for the count / inline error. It never throws out of
   // render: a malformed body surfaces as a short message, an empty body as nothing.
-  let count = 0
+  let entries: CredentialEntry[] = []
   let parseError = ''
   if (form.authPoolText.trim()) {
     try {
-      count = parseCredentials(form.authPoolFormat, form.authPoolText).length
+      entries = parseCredentials(form.authPoolFormat, form.authPoolText)
     } catch (e) {
-      parseError = e instanceof Error ? e.message : String(e)
+      parseError = localizeError(e, t)
     }
   }
+  const count = entries.length
+  // Token paste intelligence: when entries look like JWTs, decode (NOT verify)
+  // the payload and surface the earliest exp — expired or expiring before the
+  // configured run duration is a warning, otherwise a quiet fact. Opaque tokens
+  // yield null and say nothing.
+  const expiry = count > 0 ? poolExpiry(entries, Date.now()) : null
+  const runMs = form.workloadKind === 'open' ? form.durationSeconds * 1000 : 0
+  const expiresMidRun = !!expiry && !expiry.expired && runMs > 0 && expiry.msLeft < runMs
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -1464,6 +1655,10 @@ function AuthPoolFields({
         />
       </Field>
 
+      {/* Discoverability: the pool carries Basic-auth credentials just fine —
+          spell out the {{basicAuth}} recipe so nobody hand-base64s a header. */}
+      <p className="card__hint">{t('auth.pool.basicHint')}</p>
+
       {parseError ? (
         <div className="authpanel__err" role="alert">
           <AlertIcon />
@@ -1476,6 +1671,29 @@ function AuthPoolFields({
         </p>
       ) : null}
 
+      {/* JWT expiry feedback next to the parse count: already expired and
+          expiring-before-the-run-ends warn loudly; a comfortable expiry is a
+          quiet informational line. */}
+      {expiry &&
+        (expiry.expired ? (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{t('auth.pool.expired')}</span>
+          </div>
+        ) : expiresMidRun ? (
+          <div className="authpanel__warn" role="alert">
+            <AlertIcon />
+            <span>
+              {t('auth.pool.expirySoon', {
+                in: humanDuration(expiry.msLeft),
+                duration: form.durationSeconds,
+              })}
+            </span>
+          </div>
+        ) : (
+          <p className="card__hint">{t('auth.pool.expiry', { in: humanDuration(expiry.msLeft) })}</p>
+        ))}
+
       <PatternGenerator
         format={form.authPoolFormat === 'jsonl' ? 'tokens' : (form.authPoolFormat as 'csv' | 'tokens')}
         onGenerated={(text) => {
@@ -1485,6 +1703,8 @@ function AuthPoolFields({
           set('authPoolText', text)
         }}
       />
+
+      <AuthPreflight form={form} kind="token" />
     </div>
   )
 }
@@ -1518,7 +1738,7 @@ function PatternGenerator({
       onGenerated(text)
       setNote(t('auth.pattern.generated', { count }))
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(localizeError(e, t))
     }
   }
 
@@ -1551,14 +1771,23 @@ function PatternGenerator({
           </Field>
         </div>
         <div className="field-row field-row--2">
-          <Field label={t('auth.pattern.count')}>
+          <Field
+            label={t('auth.pattern.count')}
+            help={t('auth.pattern.countHint', { max: MAX_WEB_PATTERN_ROWS.toLocaleString() })}
+          >
             <input
               className="input"
               type="number"
               min={1}
               max={MAX_WEB_PATTERN_ROWS}
               value={count}
-              onChange={(e) => setCount(Math.max(1, Math.floor(Number(e.target.value) || 0)))}
+              onChange={(e) =>
+                // Clamp to the real browser cap so a typed 50000 can never reach
+                // the generator's over-cap error — the field simply stops at it.
+                setCount(
+                  Math.min(MAX_WEB_PATTERN_ROWS, Math.max(1, Math.floor(Number(e.target.value) || 0))),
+                )
+              }
             />
           </Field>
           <div style={{ display: 'flex', alignItems: 'flex-end' }}>
@@ -1601,22 +1830,58 @@ function AuthLoginFields({
   const { t } = useI18n()
   const simple = form.loginMode === 'simple'
   const hasCredList = form.loginCredText.trim().length > 0
-  // Smart default: when the operator supplies a credential list, the per-row body should
-  // pull the row in via {{.username}}/{{.password}}. Suggest the multi-user body ONLY
-  // when the current body is still untouched (the single-identity default) so we never
-  // clobber a hand-edited body; the operator can also apply it from the hint.
-  const bodyIsDefault = form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
-  const suggestMultiBody = hasCredList && bodyIsDefault
+  // The quick form may only regenerate an overwritable body (empty / shipped
+  // default / previously generated) — a hand-edited or imported body is the
+  // source of truth and shows the "custom body" note + explicit reset instead.
+  const canQuick = loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)
+  // Legacy affordance: a still-default single-identity body next to a credential
+  // list offers the one-click multi-user upgrade.
+  const suggestMultiBody = hasCredList && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE
+
+  // assembleBody writes the quick-form answers into loginBodyTemplate. Row
+  // markers when a credential list is present; the literal values otherwise.
+  function assembleBody(useRowMarkers: boolean) {
+    set(
+      'loginBodyTemplate',
+      assembleLoginBody(
+        form.loginQuickUserField,
+        form.loginQuickPassField,
+        form.loginQuickUser,
+        form.loginQuickPass,
+        useRowMarkers,
+      ),
+    )
+    set('loginBodyGenerated', true)
+  }
+
+  // assembleNow flushes on BLUR (not per keystroke), so the masked password never
+  // streams into a visible textarea while it is typed. It never overwrites a
+  // hand-edited body, and it refuses to generate an empty-credential body from a
+  // stray focus.
+  function assembleNow() {
+    if (!loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)) return
+    if (!hasCredList && !form.loginQuickUser && !form.loginQuickPass) return
+    assembleBody(hasCredList)
+  }
+
   function setCredText(text: string) {
     set('loginCredText', text)
-    // The first time a list appears, auto-upgrade an untouched body to the per-row
-    // template so the common case just works; a hand-edited body is left as-is.
-    if (text.trim() && form.loginBodyTemplate.trim() === LOGIN_BODY_SINGLE) {
-      set('loginBodyTemplate', LOGIN_BODY_MULTI)
+    // A list means per-row login: re-assemble an overwritable body with the
+    // {{.username}}/{{.password}} row markers so the common case just works. A
+    // hand-edited body is left as-is (the doctor warns if it ignores the rows).
+    if (text.trim() && loginBodyOverwritable(form.loginBodyTemplate, form.loginBodyGenerated)) {
+      set(
+        'loginBodyTemplate',
+        assembleLoginBody(form.loginQuickUserField, form.loginQuickPassField, form.loginQuickUser, form.loginQuickPass, true),
+      )
+      set('loginBodyGenerated', true)
     }
   }
   return (
     <div className="authpanel">
+      {/* Curl paste: the login your API docs hand you, applied in one click. */}
+      <CurlPastePanel set={set} />
+
       {simple ? (
         <>
           <div className="field-row field-row--2">
@@ -1659,32 +1924,50 @@ function AuthLoginFields({
             </Field>
           </div>
 
-          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
-
-          <Field
-            label={t('auth.login.body')}
-            help={t('auth.login.bodyHint')}
-            tip={<HelpTip label={t('auth.login.body')} text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')} />}
-          >
-            <textarea
-              className="textarea"
-              value={form.loginBodyTemplate}
-              onChange={(e) => set('loginBodyTemplate', e.target.value)}
-              rows={4}
-              placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
-              spellCheck={false}
-            />
-          </Field>
-          {suggestMultiBody && (
-            <button
-              type="button"
-              className="btn btn--ghost"
-              style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
-              onClick={() => set('loginBodyTemplate', LOGIN_BODY_MULTI)}
-            >
-              {t('auth.login.body.useMulti')}
-            </button>
+          {/* The QUICK FORM: first contact fills Username + Password and the JSON
+              body assembles itself — no JSON authoring, no inert {username}
+              markers. With a credential list the body templates the rows instead,
+              so the single-identity inputs step aside. */}
+          {canQuick && !hasCredList && (
+            <div className="field-row field-row--2">
+              <Field label={t('auth.login.quick.user')} help={t('auth.login.quick.userHint')}>
+                <input
+                  className="input"
+                  value={form.loginQuickUser}
+                  onChange={(e) => set('loginQuickUser', e.target.value)}
+                  onBlur={assembleNow}
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+              </Field>
+              <Field label={t('auth.login.quick.pass')} help={t('auth.login.quick.passHint')}>
+                <input
+                  className="input"
+                  type="password"
+                  value={form.loginQuickPass}
+                  onChange={(e) => set('loginQuickPass', e.target.value)}
+                  onBlur={assembleNow}
+                  autoComplete="off"
+                />
+              </Field>
+            </div>
           )}
+          {canQuick && hasCredList && <p className="card__hint">{t('auth.login.quick.rows')}</p>}
+          {!canQuick && (
+            <div className="stack" style={{ gap: 8 }}>
+              <p className="card__hint">{t('auth.login.quick.custom')}</p>
+              <button
+                type="button"
+                className="btn btn--ghost"
+                style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+                onClick={() => assembleBody(hasCredList)}
+              >
+                {t('auth.login.quick.reset')}
+              </button>
+            </div>
+          )}
+
+          <AuthLoginCredList form={form} set={set} onCredText={setCredText} />
         </>
       ) : (
         <AuthLoginAdvancedBody form={form} set={set} />
@@ -1702,6 +1985,72 @@ function AuthLoginFields({
             label={t('auth.advanced.rawLogin')}
             sub={t('auth.advanced.rawLoginSub')}
           />
+          {/* The raw body textarea lives HERE now (item: no JSON authoring on
+              first contact): editing it marks the body hand-authored, which
+              stops the quick form from regenerating over it. The field-name
+              overrides feed the quick-form assembly. */}
+          {simple && (
+            <>
+              <div className="field-row field-row--2">
+                <Field label={t('auth.login.quick.userField')} help={t('auth.login.quick.userFieldHint')}>
+                  <input
+                    className="input"
+                    value={form.loginQuickUserField}
+                    onChange={(e) => set('loginQuickUserField', e.target.value)}
+                    onBlur={assembleNow}
+                    placeholder="username"
+                    spellCheck={false}
+                  />
+                </Field>
+                <Field label={t('auth.login.quick.passField')} help={t('auth.login.quick.passFieldHint')}>
+                  <input
+                    className="input"
+                    value={form.loginQuickPassField}
+                    onChange={(e) => set('loginQuickPassField', e.target.value)}
+                    onBlur={assembleNow}
+                    placeholder="password"
+                    spellCheck={false}
+                  />
+                </Field>
+              </div>
+              <Field
+                label={t('auth.login.body')}
+                help={t('auth.login.bodyHint')}
+                tip={
+                  <HelpTip
+                    label={t('auth.login.body')}
+                    text={t(hasCredList ? 'auth.login.body.multiTip' : 'auth.login.body.tip')}
+                  />
+                }
+              >
+                <textarea
+                  className="textarea"
+                  value={form.loginBodyTemplate}
+                  onChange={(e) => {
+                    set('loginBodyTemplate', e.target.value)
+                    // Hand edit: this body is now the source of truth.
+                    set('loginBodyGenerated', false)
+                  }}
+                  rows={4}
+                  placeholder={hasCredList ? LOGIN_BODY_MULTI : LOGIN_BODY_SINGLE}
+                  spellCheck={false}
+                />
+              </Field>
+              {suggestMultiBody && (
+                <button
+                  type="button"
+                  className="btn btn--ghost"
+                  style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 13 }}
+                  onClick={() => {
+                    set('loginBodyTemplate', LOGIN_BODY_MULTI)
+                    set('loginBodyGenerated', true)
+                  }}
+                >
+                  {t('auth.login.body.useMulti')}
+                </button>
+              )}
+            </>
+          )}
           <div className="field-row field-row--2">
             <Field
               label={t('auth.login.tokenVar')}
@@ -1770,7 +2119,89 @@ function AuthLoginFields({
           )}
         </div>
       </details>
+
+      <AuthPreflight form={form} kind="login" />
     </div>
+  )
+}
+
+// CURL_PLACEHOLDER shows the shape the curl parser reads — a code sample, so it
+// stays identical in every language.
+const CURL_PLACEHOLDER =
+  'curl -X POST https://api.example.com/login -H \'Content-Type: application/json\' -d \'{"username":"alice","password":"secret"}\''
+
+// CurlPastePanel fills the login authoring from a pasted curl command: the one
+// your API docs already give you. parseCurlCommand reads -X/-H/-d/--url (and
+// tolerates the usual noise flags); authFormFromCurl maps the result onto the
+// simple mini-form — or onto a compiled advanced flow when the curl carries
+// headers, so nothing is silently dropped. Anything unparseable shows a friendly
+// line and touches NO state.
+function CurlPastePanel({
+  set,
+}: {
+  set: <K extends keyof ExperimentForm>(key: K, value: ExperimentForm[K]) => void
+}) {
+  const { t } = useI18n()
+  const [text, setText] = useState('')
+  const [applied, setApplied] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  function apply() {
+    const parsed = parseCurlCommand(text)
+    if (!parsed) {
+      // Leave every login field exactly as it was — only the friendly note shows.
+      setFailed(true)
+      setApplied(false)
+      return
+    }
+    const patch = authFormFromCurl(parsed)
+    for (const [k, v] of Object.entries(patch)) {
+      set(k as keyof ExperimentForm, v as ExperimentForm[keyof ExperimentForm] as never)
+    }
+    setFailed(false)
+    setApplied(true)
+  }
+
+  return (
+    <details className="advanced">
+      <summary className="advanced__summary">
+        {t('auth.login.curl.toggle')}
+        <span className="field__badge">{t('badge.optional')}</span>
+      </summary>
+      <div className="stack advanced__body" style={{ gap: 16 }}>
+        <p className="card__hint">{t('auth.login.curl.hint')}</p>
+        <textarea
+          className="textarea"
+          rows={3}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value)
+            setApplied(false)
+            setFailed(false)
+          }}
+          placeholder={CURL_PLACEHOLDER}
+          spellCheck={false}
+        />
+        <div className="import__actions">
+          <button type="button" className="btn btn--ghost" onClick={apply} disabled={!text.trim()}>
+            <ImportIcon />
+            {t('auth.login.curl.apply')}
+          </button>
+          {applied && (
+            <span className="import__ok" role="status">
+              <CheckMini />
+              {t('auth.login.curl.applied')}
+            </span>
+          )}
+        </div>
+        {failed && (
+          <div className="authpanel__err" role="alert">
+            <AlertIcon />
+            <span>{t('auth.login.curl.error')}</span>
+          </div>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -1802,7 +2233,7 @@ function AuthLoginCredList({
     try {
       count = parseLoginCredentials(form.loginCredFormat, form.loginCredText).length
     } catch (e) {
-      parseError = e instanceof Error ? e.message : String(e)
+      parseError = localizeError(e, t)
     }
   }
 
@@ -1934,11 +2365,16 @@ const OAUTH2_GRANTS: { grant: OAuth2Grant; labelKey: string; descKey: string }[]
 // service" entry): answer a token URL and "how do you log in?" and the guide
 // compiles the answers onto the existing login form fields via
 // authFormFromOAuth2Guide — a frontend assembly layer, not a new wire strategy.
-// The three token grants recompile live on every answer (the generated flow JSON
-// stays reviewable under Advanced); the access-token answer applies via an
-// explicit button because it switches the wire mode to pool (which unmounts this
-// panel). The guide's own answers are component state, so the wire form and
-// AUTH_FORM_DEFAULTS stay untouched.
+// The guide's answers live on the FORM (form.oauth2Guide), so switching entry
+// points and back preserves every answer. Compilation is guarded two ways:
+//   - No clobber: the compiled flow only overwrites loginGraphJSON /
+//     loginTemplatesJSON / loginCredText while those are the shipped default or
+//     were themselves guide-generated (oauth2GuideCanCompileOver). A hand-authored
+//     flow shows an explicit Regenerate button instead.
+//   - Credentials compile on blur/apply, not per keystroke, so a masked password
+//     never streams into the credential-list textarea in plaintext as it is typed.
+// The access-token answer applies via an explicit button because it switches the
+// wire mode to pool (which unmounts this panel).
 function AuthOAuth2GuideFields({
   form,
   set,
@@ -1952,7 +2388,29 @@ function AuthOAuth2GuideFields({
   discoveryUrl: string
 }) {
   const { t } = useI18n()
-  const [guide, setGuide] = useState<OAuth2GuideForm>(OAUTH2_GUIDE_DEFAULTS)
+  const guide = form.oauth2Guide
+  const canCompileOver = oauth2GuideCanCompileOver(form)
+  // Issuer discovery ("Fetch endpoints"): transient request state only — the
+  // issuer answer itself lives on the form like every other guide answer.
+  const [discBusy, setDiscBusy] = useState(false)
+  const [discOk, setDiscOk] = useState(false)
+  const [discErr, setDiscErr] = useState('')
+
+  async function fetchEndpoints() {
+    setDiscBusy(true)
+    setDiscOk(false)
+    setDiscErr('')
+    try {
+      const d = await discoverIssuer(guide.issuer.trim(), parseAllowlist(form.allowlist))
+      // Fill the Token URL (still editable) and recompile like a typed answer.
+      update({ tokenUrl: d.tokenEndpoint })
+      setDiscOk(true)
+    } catch (e) {
+      setDiscErr(localizeError(e, t))
+    } finally {
+      setDiscBusy(false)
+    }
+  }
 
   function applyCompiled(g: OAuth2GuideForm) {
     const compiled = authFormFromOAuth2Guide(g)
@@ -1960,18 +2418,80 @@ function AuthOAuth2GuideFields({
       set(k as keyof ExperimentForm, v as ExperimentForm[keyof ExperimentForm] as never)
     }
   }
-  function update(patch: Partial<OAuth2GuideForm>) {
+  // update stores an answer; unless compile is false (the credential fields,
+  // which compile on blur) it also recompiles the flow — but ONLY over a default
+  // or guide-generated flow. The access-token answer never auto-compiles: it is
+  // applied via the explicit button below, so typing the token does not switch
+  // the mode mid-keystroke.
+  function update(patch: Partial<OAuth2GuideForm>, compile = true) {
     const next = { ...guide, ...patch }
-    setGuide(next)
-    // The access-token answer compiles to a pool patch — applied via the explicit
-    // button below, so typing the token does not switch the mode mid-keystroke.
-    if (next.grant !== 'accessToken') applyCompiled(next)
+    set('oauth2Guide', next)
+    if (compile && canCompileOver && next.grant !== 'accessToken') applyCompiled(next)
+  }
+  // compileNow flushes the current answers into the login flow (used on blur of
+  // the credential fields). Same guards as update().
+  function compileNow() {
+    if (canCompileOver && guide.grant !== 'accessToken') applyCompiled(guide)
   }
 
   const showClient = guide.grant !== 'accessToken'
   return (
     <div className="authpanel">
       <p className="card__hint">{t('auth.oauth2.lead')}</p>
+
+      {/* No-clobber guard: the flow below was hand-edited, so answers no longer
+          auto-compile. Regenerate is the explicit confirmation to overwrite. */}
+      {!canCompileOver && guide.grant !== 'accessToken' && (
+        <div className="authpanel__warn" role="status">
+          <AlertIcon />
+          <span>
+            <span className="authpanel__confirmLabel">{t('auth.oauth2.handAuthored')}</span>
+            <button
+              type="button"
+              className="btn btn--ghost"
+              style={{ marginTop: 8, padding: '6px 12px', fontSize: 13 }}
+              onClick={() => applyCompiled(guide)}
+            >
+              {t('auth.oauth2.regenerate')}
+            </button>
+          </span>
+        </div>
+      )}
+
+      {/* Issuer discovery: for the operator who does NOT know their token URL.
+          Paste the IdP base URL, fetch its discovery document server-side, and
+          the Token URL below fills in (still editable). */}
+      <Field label={t('auth.oauth2.issuer')} help={t('auth.oauth2.issuerHint')}>
+        <input
+          className="input"
+          value={guide.issuer}
+          onChange={(e) => update({ issuer: e.target.value }, false)}
+          placeholder="https://idp.example.com"
+          spellCheck={false}
+        />
+      </Field>
+      <div className="import__actions">
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={fetchEndpoints}
+          disabled={discBusy || !guide.issuer.trim()}
+        >
+          {discBusy ? t('auth.oauth2.discovering') : t('auth.oauth2.discoverButton')}
+        </button>
+        {discOk && (
+          <span className="import__ok" role="status">
+            <CheckMini />
+            {t('auth.oauth2.discovered')}
+          </span>
+        )}
+      </div>
+      {discErr && (
+        <div className="authpanel__err" role="alert">
+          <AlertIcon />
+          <span>{t('auth.oauth2.discoverFailed', { error: discErr })}</span>
+        </div>
+      )}
 
       <Field label={t('auth.oauth2.tokenUrl')} help={t('auth.oauth2.tokenUrlHint')}>
         <input
@@ -1982,6 +2502,9 @@ function AuthOAuth2GuideFields({
           spellCheck={false}
         />
       </Field>
+      {/* Static shape examples for the big managed IdPs, so "what does my token
+          URL even look like" has an answer right under the field. */}
+      <p className="card__hint">{t('auth.oauth2.tokenUrlExamples')}</p>
       {discoveryUrl && (
         <p className="authpanel__ok" role="status">
           <CheckMini />
@@ -2016,7 +2539,8 @@ function AuthOAuth2GuideFields({
               <input
                 className="input"
                 value={guide.username}
-                onChange={(e) => update({ username: e.target.value })}
+                onChange={(e) => update({ username: e.target.value }, false)}
+                onBlur={compileNow}
                 spellCheck={false}
                 autoComplete="off"
               />
@@ -2026,7 +2550,8 @@ function AuthOAuth2GuideFields({
                 className="input"
                 type="password"
                 value={guide.password}
-                onChange={(e) => update({ password: e.target.value })}
+                onChange={(e) => update({ password: e.target.value }, false)}
+                onBlur={compileNow}
                 autoComplete="off"
               />
             </Field>
@@ -2041,7 +2566,8 @@ function AuthOAuth2GuideFields({
                 <textarea
                   className="textarea"
                   value={guide.users}
-                  onChange={(e) => update({ users: e.target.value })}
+                  onChange={(e) => update({ users: e.target.value }, false)}
+                  onBlur={compileNow}
                   rows={5}
                   placeholder={'username,password\nalice,pw-a\nbob,pw-b'}
                   spellCheck={false}
@@ -2136,6 +2662,10 @@ function AuthOAuth2GuideFields({
           </div>
         </details>
       )}
+
+      {/* The access-token answer becomes a pool via the explicit apply button —
+          until then there is no assembled flow to test, so no preflight here. */}
+      {guide.grant !== 'accessToken' && <AuthPreflight form={form} kind="login" />}
     </div>
   )
 }
@@ -2219,7 +2749,7 @@ function AuthBootstrapFields({
                 value={form.signupBodyTemplate}
                 onChange={(e) => set('signupBodyTemplate', e.target.value)}
                 rows={4}
-                placeholder={'{"email": "test+{{.userIndex}}@example.com", "password": "{password}"}'}
+                placeholder={'{"email": "test+{{.userIndex}}@example.com", "password": "a-real-password"}'}
                 spellCheck={false}
               />
             </Field>
@@ -2334,6 +2864,10 @@ function AuthBootstrapFields({
             )}
           </div>
         </details>
+
+        {/* Inside the fieldset: testing a signup CREATES a real account, so the
+            button stays disabled until the non-production gate is confirmed. */}
+        <AuthPreflight form={form} kind="signup" />
       </fieldset>
     </div>
   )
@@ -2472,6 +3006,8 @@ function AuthMintFields({
           <span>{claimsError}</span>
         </div>
       )}
+
+      <AuthPreflight form={form} kind="token" />
     </div>
   )
 }

@@ -212,7 +212,8 @@ const en: Record<string, string> = {
   'auth.mode.pool': 'I already have tokens',
   'auth.mode.pool.desc': 'Easiest. Paste one bearer token or API key, or a list of pre-issued tokens — one per user.',
   'auth.mode.login': 'Log in to get tokens',
-  'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
+  'auth.mode.login.desc':
+    'Give your login URL and a body — tmula logs in and captures the token for you. Cookie-session logins work too: the session cookie is captured automatically.',
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
   'auth.mode.mint': 'Sign a token locally (self-issued JWT)',
@@ -225,12 +226,13 @@ const en: Record<string, string> = {
   // Auth · pattern generator (generate N rows from a subject/token template)
   'auth.pattern.toggle': 'Generate accounts from a pattern',
   'auth.pattern.hint':
-    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For a very large pool (100k+), use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
+    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For more than 10,000 rows, use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
   'auth.pattern.subject': 'Subject template',
   'auth.pattern.subjectHint': 'e.g. user{{.userIndex}} \u2014 leave empty for a bare token list.',
   'auth.pattern.token': 'Secret template',
   'auth.pattern.tokenHint': 'e.g. pw-{{.userIndex}} (the password for login, or a token for a pool). Not for opaque JWTs \u2014 those come from mint.',
   'auth.pattern.count': 'Count',
+  'auth.pattern.countHint': 'Up to {max} rows can be generated in the browser; beyond that, use the CLI usersPattern.',
   'auth.pattern.generate': 'Generate',
   'auth.pattern.generated': 'Generated {count} rows.',
 
@@ -240,11 +242,20 @@ const en: Record<string, string> = {
     'Answer two questions \u2014 the token URL and how you log in \u2014 and tmula assembles the login flow for you.',
   'auth.oauth2.lead':
     'No OAuth2 knowledge needed: give the token URL, say how you log in, and tmula builds the token exchange (and keeps it refreshed mid-run).',
+  'auth.oauth2.issuer': 'Issuer URL (optional)',
+  'auth.oauth2.issuerHint':
+    'Don’t know your token URL? Paste your IdP’s base URL (the issuer) and fetch its endpoints from the discovery document.',
+  'auth.oauth2.discoverButton': 'Fetch endpoints',
+  'auth.oauth2.discovering': 'Fetching…',
+  'auth.oauth2.discovered': 'Token endpoint discovered — filled into the Token URL below (still editable).',
+  'auth.oauth2.discoverFailed': 'Could not discover the endpoints: {error}',
   'auth.oauth2.tokenUrl': 'Token URL',
   'auth.oauth2.tokenUrlHint':
     'The endpoint that issues tokens (e.g. https://idp.example.com/oauth/token). For an openIdConnect service, use the token_endpoint from its discovery document.',
   'auth.oauth2.discovery':
     'This service publishes an OpenID Connect discovery document at {url} \u2014 open it and copy its token_endpoint into the Token URL above.',
+  'auth.oauth2.tokenUrlExamples':
+    'Typical shapes \u2014 Keycloak: https://<host>/realms/<realm>/protocol/openid-connect/token \u00b7 Auth0: https://<tenant>.auth0.com/oauth/token \u00b7 Cognito: https://<domain>.auth.<region>.amazoncognito.com/oauth2/token',
   'auth.oauth2.grant': 'How do you log in?',
   'auth.oauth2.grantHint': 'Pick the answer that matches what you have \u2014 tmula picks the grant.',
   'auth.oauth2.grant.password': 'With a username and password',
@@ -253,7 +264,7 @@ const en: Record<string, string> = {
   'auth.oauth2.grant.cc.desc': 'A machine identity: client_id + client_secret, one token shared by every user.',
   'auth.oauth2.grant.refresh': 'I\u2019m already logged in on an app or browser',
   'auth.oauth2.grant.refresh.desc':
-    'Paste a refresh token copied once from the app/devtools \u2014 the answer for services that need a human consent screen (Auth0, Cognito, social login).',
+    'Paste a refresh token copied once from the app/devtools \u2014 the answer for services that need a human consent screen (Auth0, Cognito, social login; the usual path when your service uses the \u201cauthorization code\u201d flow).',
   'auth.oauth2.grant.access': 'I only have an access token',
   'auth.oauth2.grant.access.desc': 'Use it as a token pool. If it expires mid-run, requests will start failing.',
   'auth.oauth2.username': 'Username',
@@ -278,6 +289,25 @@ const en: Record<string, string> = {
   'auth.oauth2.advanced': 'Generated login flow (JSON)',
   'auth.oauth2.advancedHint':
     'This is what the guide assembled \u2014 the same raw flow the Login mode edits. Changing an answer above regenerates it.',
+  'auth.oauth2.handAuthored':
+    'The login flow JSON was hand-edited, so the guide no longer overwrites it automatically. Regenerate replaces it with a flow built from the answers above.',
+  'auth.oauth2.regenerate': 'Regenerate the login flow',
+
+  // Auth · preflight (the "Test login / Test signup / Test token" button)
+  'auth.preflight.button.login': 'Test login',
+  'auth.preflight.button.signup': 'Test signup',
+  'auth.preflight.button.token': 'Test token',
+  'auth.preflight.testing': 'Testing…',
+  'auth.preflight.hint': 'Sends ONE real credential request to the target with the settings above — no load, no run.',
+  'auth.preflight.ok.login': 'Logged in',
+  'auth.preflight.ok.signup': 'Signed up',
+  'auth.preflight.ok.token': 'Token accepted',
+  'auth.preflight.okDetail': 'token found in {source}, starts with {prefix}',
+  'auth.preflight.okSource': 'token found in {source}',
+  'auth.preflight.okSubject': 'subject {subject}',
+  'auth.preflight.fail': 'The test failed (HTTP {status}).',
+  'auth.preflight.failPlain': 'The test failed.',
+  'auth.preflight.error': 'Could not run the test: {error}',
 
   // Auth · the Advanced fold hiding the expert strategies (mint / exec)
   'auth.advanced.modes': 'More ways to authenticate (expert)',
@@ -304,6 +334,14 @@ const en: Record<string, string> = {
   'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
   'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
   'auth.pool.count': '{count} credential(s) parsed',
+  'auth.pool.basicHint':
+    'Basic-auth recipe: put the username in subject and the password in token, then send Authorization: Basic {{basicAuth .subject .token}} from your scenario template headers.',
+  // JWT expiry feedback (decoded client-side, never verified).
+  'auth.pool.expiry': 'First token expires in {in}.',
+  'auth.pool.expirySoon':
+    'First token expires in {in} — before this run ends ({duration}s). Requests will start failing mid-run; paste fresher tokens or shorten the run.',
+  'auth.pool.expired':
+    'A pasted token is already expired — requests would fail immediately. Paste a fresh token.',
 
   // Auth · login
   'auth.tokenVar.autoPlaceholder': 'auto-detect',
@@ -329,12 +367,36 @@ const en: Record<string, string> = {
   'auth.login.scope.perUser': 'Per user — one token per virtual user',
   'auth.login.scope.shared': 'Shared — one token for all (client_credentials)',
   'auth.login.body': 'Login body',
-  'auth.login.bodyHint': 'The request body tmula sends to log in. Use {username}/{password} markers, or template a credential-list row.',
+  'auth.login.bodyHint':
+    'The request body tmula sends to log in. Put the real credentials inline — a {username}/{password} marker is NOT substituted — or template a credential-list row with {{.username}}/{{.password}}.',
   'auth.login.body.tip':
-    'The body sent to your login URL. For a single identity, put your credentials inline (or use the {username}/{password} markers). To log in many users, supply a credential list below and reference each row with {{.username}}/{{.password}}.',
+    'The body sent to your login URL. For a single identity, put your real credentials inline — the {username}/{password} markers are placeholders for YOU to replace; nothing fills them in automatically. To log in many users, supply a credential list below and reference each row with {{.username}}/{{.password}}.',
   'auth.login.body.multiTip':
     'You supplied a credential list, so each virtual user logs in as the NEXT row. Reference the row with {{.username}} and {{.password}} — tmula fills them in per user. {{.userIndex}} is the virtual-user number; use a pattern like user{{.userIndex}} when you have no list. The list wraps (user i uses row i mod N).',
   'auth.login.body.useMulti': 'Use the credential-list body ({{.username}} / {{.password}})',
+
+  // Auth · login · curl paste
+  'auth.login.curl.toggle': 'Paste a curl command',
+  'auth.login.curl.hint':
+    'Paste the login curl your API docs give you — tmula fills the URL, method, headers and body from it.',
+  'auth.login.curl.apply': 'Fill from curl',
+  'auth.login.curl.applied': 'Filled the login from the curl command.',
+  'auth.login.curl.error': 'Couldn’t parse this curl — fill the fields manually.',
+
+  // Auth · login · quick form (no JSON authoring on first contact)
+  'auth.login.quick.user': 'Username',
+  'auth.login.quick.userHint': 'tmula builds the JSON login body from these two fields — no JSON needed.',
+  'auth.login.quick.pass': 'Password',
+  'auth.login.quick.passHint': 'Substituted into the body when you leave the field; part of this run’s spec on the control plane.',
+  'auth.login.quick.userField': 'Username field name',
+  'auth.login.quick.userFieldHint': 'The JSON key the login API expects for the username (default: username).',
+  'auth.login.quick.passField': 'Password field name',
+  'auth.login.quick.passFieldHint': 'The JSON key the login API expects for the password (default: password).',
+  'auth.login.quick.rows':
+    'A credential list is supplied — the login body templates each row in via {{.username}}/{{.password}} automatically.',
+  'auth.login.quick.custom':
+    'This login uses a custom body (imported or hand-edited) — review or edit it under Advanced. It will not be overwritten.',
+  'auth.login.quick.reset': 'Start over with the quick form',
 
   // Auth · login · simple-form URL, the import "secrets to fill" panel, and Advanced toggle
   'auth.login.url': 'Login URL',
@@ -342,7 +404,8 @@ const en: Record<string, string> = {
   'auth.login.method': 'Login HTTP method',
   'auth.secrets.title': 'Secrets to fill in',
   'auth.secrets.hint': 'Almost done — the import filled in everything except the secret(s) below. Enter them and the login is ready.',
-  'auth.secrets.fieldHint': 'Filled in here in your browser and substituted at send time — the value is never stored.',
+  'auth.secrets.fieldHint':
+    'Filled in here and substituted into the body at send time. Never stored in your browser — but it does become part of this run’s spec on the control plane, like any login body.',
   'auth.advanced.login': 'Advanced',
   'auth.advanced.rawLogin': 'Edit the raw login flow (JSON)',
   'auth.advanced.rawLoginSub': 'Switch off the simple form and author the login graph and templates as raw JSON.',
@@ -381,9 +444,10 @@ const en: Record<string, string> = {
   'auth.bootstrap.signupUrlHint': 'The endpoint that registers a new account. Pick the method and give the path, e.g. POST /register.',
   'auth.bootstrap.signupMethod': 'Signup HTTP method',
   'auth.bootstrap.body': 'Signup body',
-  'auth.bootstrap.bodyHint': 'The request body tmula sends to sign up. Use {{.userIndex}} so each account is unique, and {password} for the password.',
+  'auth.bootstrap.bodyHint':
+    'The request body tmula sends to sign up. Use {{.userIndex}} so each account is unique, and write the password as a real value — a {password} marker is NOT substituted.',
   'auth.bootstrap.body.tip':
-    'The body posted to your signup URL, rendered once per account. {{.userIndex}} is the virtual-user number — put it in the email or username (e.g. test+{{.userIndex}}@example.com) so every signup is distinct. {password} fills in the password tmula reuses to log in.',
+    'The body posted to your signup URL, rendered once per account. {{.userIndex}} is the virtual-user number — put it in the email or username (e.g. test+{{.userIndex}}@example.com) so every signup is distinct. Write the password literally: nothing fills a {password} marker in, so it would be sent as-is.',
   'auth.bootstrap.teardownUrl': 'Teardown URL',
   'auth.bootstrap.teardownUrlHint': 'The endpoint that deletes one account after the run. {{.subject}} is the account id, e.g. DELETE /accounts/{{.subject}}.',
   'auth.bootstrap.teardownMethod': 'Teardown HTTP method',
@@ -490,7 +554,65 @@ const en: Record<string, string> = {
   'doctor.authMintKey':
     'Local signing is selected but no signing key is referenced — set a key environment variable or a key file so tmula can sign.',
   'doctor.authMintClaims': 'Extra claims JSON is invalid: {error}',
+  'doctor.authLoginBodyMarker':
+    'The login body still contains a literal {username}/{password} marker — nothing fills it in, so it would be sent as-is. Enter the real credentials, or reference a credential-list row with {{.username}}/{{.password}}.',
+  'doctor.authSignupBodyMarker':
+    'The signup body still contains a literal {username}/{password} marker — nothing fills it in, so it would be sent as-is. Write the real value (the password the test accounts should use).',
+  'doctor.authReplaceMe':
+    'An auth field still contains the {placeholder} placeholder — fill in the real value before running.',
+  'doctor.authTokenUnreferenced':
+    'Auth is configured, but no scenario template references {{.token}} (or {{basicAuth …}}) — every request would go out without the credential. Add e.g. "Authorization": "Bearer {{.token}}" to a template’s headers.',
+  'doctor.authTokenWithoutAuth':
+    'A scenario template references {{.token}}, but auth is set to None — the marker would be sent literally. Configure auth or remove the reference.',
+  'doctor.authOAuth2TokenUrl':
+    'OAuth2 is selected but the token URL is empty — paste the token endpoint of your IdP (or fetch it from the issuer URL).',
+  'doctor.authOAuth2AccessNotApplied':
+    'You pasted an access token but have not applied it — click "Use as a token pool" so the run actually uses it.',
+  'doctor.authOAuth2AccessEmpty':
+    '"I only have an access token" is selected but no token is pasted yet.',
 
+  // Form errors thrown by the api.ts credential parsers / pattern generator /
+  // auth builders (FormError). The en values are byte-identical to the messages
+  // these sites always threw, so tests and logs are unchanged; the ko values are
+  // what the UI shows through localizeError.
+  'err.credFormatUnknown': 'unknown credential format "{format}"',
+  'err.credCsvEmpty': 'CSV credential text is empty',
+  'err.credCsvNoTokenCol': 'CSV credentials need a "token" column header',
+  'err.credCsvRowMissingToken': 'a CSV row is missing its token column',
+  'err.credCsvNoRows': 'CSV credentials have no data rows (need at least one credential)',
+  'err.credJsonlBadJson': 'a JSONL credential line is not valid JSON',
+  'err.credJsonlShape': 'each JSONL credential line must be a {subject, token} object',
+  'err.credJsonlMissingToken': 'a JSONL credential is missing its token',
+  'err.credJsonlNoRows': 'JSONL credentials have no rows (need at least one credential)',
+  'err.credTokensEmpty': 'token credentials have no non-blank line (need at least one credential)',
+  'err.loginCredFormatUnknown': 'unknown login credential format "{format}"',
+  'err.loginCredEmpty': 'login credential text is empty',
+  'err.loginCredCsvHeader': 'login credentials need a header with "username" and "password" columns',
+  'err.loginCredRowMissingUsername': 'a login credential row is missing its username',
+  'err.loginCredRowMissingPassword': 'a login credential row is missing its password',
+  'err.loginCredCsvNoRows': 'login credentials have no data rows (need at least one username,password)',
+  'err.loginCredJsonlBadJson': 'a login credential line is not valid JSON',
+  'err.loginCredJsonlShape': 'each login credential line must be a {username, password} object',
+  'err.loginCredJsonlMissingUsername': 'a login credential is missing its username',
+  'err.loginCredJsonlMissingPassword': 'a login credential is missing its password',
+  'err.loginCredJsonlNoRows': 'login credentials have no rows (need at least one username/password)',
+  'err.patternCount': 'pattern needs a positive count',
+  'err.patternOverCap':
+    "pattern count {count} exceeds the browser limit of {max} \u2014 use the CLI scenario file's usersPattern for a larger pool",
+  'err.patternTokenEmpty': 'pattern needs a token (or password) template',
+  'err.loginPathMissing': 'login needs a request path (e.g. /login)',
+  'err.signupPathMissing': 'signup needs a request path (e.g. /register)',
+  'err.mintKeyMissing': 'mint needs a signing-key reference \u2014 set an environment variable or a file path',
+  'err.mintKeyBoth': 'mint takes either a key environment variable or a key file, not both',
+  'err.mintTtl': 'mint needs a token lifetime (ttl) greater than zero seconds',
+  'err.mintClaimsJson': 'mint claims must be a JSON object of string values',
+  'err.mintClaimsObject': 'mint claims must be a JSON object (e.g. {"role":"tester"})',
+  'err.execUnconfirmed': 'exec runs a local command per virtual user \u2014 confirm you allow it before running',
+  'err.execCommandEmpty': 'exec needs a command (argv) \u2014 one element per line, the first is the program',
+  'err.execTimeout': 'exec needs a per-invocation timeout greater than zero seconds',
+  'err.execEnvLine': 'exec env must be KEY=VALUE lines (got {line})',
+  'err.bootstrapUnconfirmed':
+    'confirm this targets a non-production system before running bootstrap (it creates/deletes real accounts)',
   // Presets (Feature A)
   'presets.label': 'Start from a template',
   'presets.hint': 'One click fills the scenario below — then tweak it however you like.',
@@ -563,6 +685,11 @@ const en: Record<string, string> = {
   'run.noteOpen': '~**{rate}** users/sec for **{duration}s**',
   'run.noteClosed': '**{users}** virtual users · up to **{steps}** steps',
   'run.connLost': 'Connection lost while streaming progress.',
+  'run.blocked': 'Fix these before running:',
+  // Friendly headlines for the known "the run died before any traffic flowed"
+  // failure reasons (the raw backend reason is always shown beneath them).
+  'run.failLoginPrewarm': 'Login failed before the run started — check the login URL and credentials.',
+  'run.failBootstrapPrewarm': 'Account creation failed before the run started — check the signup URL and body.',
   'mode.local': 'local',
   'mode.distributed': 'distributed ({count} worker{plural})',
   'live.events': 'animating each request (≤{max} {unit})',
@@ -585,6 +712,7 @@ const en: Record<string, string> = {
   // Report links
   'report.viewHtml': 'View full HTML report',
   'report.compare': 'Compare with previous run',
+  'report.killReason': 'The run ended early',
 
   // Stats (StatsView)
   'stat.requests': 'Requests',
@@ -812,7 +940,8 @@ const ko: Record<string, string> = {
   'auth.mode.pool': '이미 토큰이 있어요',
   'auth.mode.pool.desc': '가장 쉬운 길. bearer 토큰이나 API 키 하나, 또는 미리 발급한 토큰 목록을 붙여넣거나 업로드합니다 — 사용자마다 하나씩 배정됩니다.',
   'auth.mode.login': '로그인해서 토큰을 받아요',
-  'auth.mode.login.desc': '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다.',
+  'auth.mode.login.desc':
+    '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다. 쿠키 세션 로그인도 됩니다 — 세션 쿠키는 자동으로 캡처됩니다.',
   'auth.mode.bootstrap': '계정을 만들어서 테스트해요',
   'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다. 비프로덕션 전용, 확인 게이트가 있습니다.',
   'auth.mode.mint': '토큰을 로컬에서 서명(자체 발급 JWT)',
@@ -825,12 +954,13 @@ const ko: Record<string, string> = {
   // Auth · 패턴 생성기 (subject/token 템플릿으로 N개 행 생성)
   'auth.pattern.toggle': '패턴으로 계정 생성',
   'auth.pattern.hint':
-    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 아주 큰 풀(10만+)은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
+    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 10,000행이 넘는 풀은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
   'auth.pattern.subject': 'Subject 템플릿',
   'auth.pattern.subjectHint': '예: user{{.userIndex}} \u2014 비우면 토큰만 있는 목록이 됩니다.',
   'auth.pattern.token': 'Secret 템플릿',
   'auth.pattern.tokenHint': '예: pw-{{.userIndex}} (로그인의 비밀번호 또는 풀의 토큰). 불투명 JWT에는 쓸 수 없습니다 \u2014 그건 mint의 몫입니다.',
   'auth.pattern.count': '개수',
+  'auth.pattern.countHint': '브라우저에서는 최대 {max}행까지 생성할 수 있습니다. 그 이상은 CLI usersPattern을 사용하세요.',
   'auth.pattern.generate': '생성',
   'auth.pattern.generated': '{count}개 행을 생성했습니다.',
 
@@ -839,11 +969,20 @@ const ko: Record<string, string> = {
   'auth.mode.oauth2.desc': '토큰 URL과 로그인 방식, 두 가지만 답하면 tmula가 로그인 흐름을 만들어 줍니다.',
   'auth.oauth2.lead':
     'OAuth2 지식이 없어도 됩니다: 토큰 URL을 넣고 로그인 방식을 고르면 tmula가 토큰 교환을 조립하고, 실행 중에도 갱신합니다.',
+  'auth.oauth2.issuer': '발급자(Issuer) URL (선택)',
+  'auth.oauth2.issuerHint':
+    '토큰 URL을 모르시나요? IdP의 기본 URL(발급자)을 붙여넣고 discovery 문서에서 엔드포인트를 가져오세요.',
+  'auth.oauth2.discoverButton': '엔드포인트 가져오기',
+  'auth.oauth2.discovering': '가져오는 중…',
+  'auth.oauth2.discovered': '토큰 엔드포인트를 찾았습니다 — 아래 토큰 URL에 채웠습니다(수정 가능).',
+  'auth.oauth2.discoverFailed': '엔드포인트를 가져오지 못했습니다: {error}',
   'auth.oauth2.tokenUrl': '토큰 URL',
   'auth.oauth2.tokenUrlHint':
     '토큰을 발급하는 엔드포인트입니다(예: https://idp.example.com/oauth/token). openIdConnect 서비스라면 discovery 문서의 token_endpoint를 넣으세요.',
   'auth.oauth2.discovery':
     '이 서비스는 {url} 에 OpenID Connect discovery 문서를 게시합니다 \u2014 열어서 token_endpoint 값을 위의 토큰 URL에 붙여넣으세요.',
+  'auth.oauth2.tokenUrlExamples':
+    '흔한 형태 \u2014 Keycloak: https://<호스트>/realms/<realm>/protocol/openid-connect/token · Auth0: https://<테넌트>.auth0.com/oauth/token · Cognito: https://<도메인>.auth.<리전>.amazoncognito.com/oauth2/token',
   'auth.oauth2.grant': '어떻게 로그인하나요?',
   'auth.oauth2.grantHint': '가진 것에 맞는 답을 고르면 tmula가 grant를 알아서 고릅니다.',
   'auth.oauth2.grant.password': '아이디/비밀번호로',
@@ -852,7 +991,7 @@ const ko: Record<string, string> = {
   'auth.oauth2.grant.cc.desc': '머신 아이덴티티: client_id + client_secret, 토큰 하나를 모든 사용자가 공유합니다.',
   'auth.oauth2.grant.refresh': '앱/브라우저에서 이미 로그인했어요',
   'auth.oauth2.grant.refresh.desc':
-    '앱이나 개발자도구에서 refresh token을 1회 복사해 붙여넣으세요 \u2014 사람 동의 화면이 필요한 서비스(Auth0, Cognito, 소셜 로그인)의 정답 경로입니다.',
+    '앱이나 개발자도구에서 refresh token을 1회 복사해 붙여넣으세요 \u2014 사람 동의 화면이 필요한 서비스(Auth0, Cognito, 소셜 로그인)의 정답 경로이며, 서비스가 “authorization code” 플로우를 쓴다면 보통 이 길입니다.',
   'auth.oauth2.grant.access': 'access token만 있어요',
   'auth.oauth2.grant.access.desc': '토큰 풀로 사용합니다. 실행 중에 만료되면 요청이 실패하기 시작할 수 있습니다.',
   'auth.oauth2.username': '아이디',
@@ -876,6 +1015,26 @@ const ko: Record<string, string> = {
   'auth.oauth2.advanced': '생성된 로그인 흐름 (JSON)',
   'auth.oauth2.advancedHint':
     '가이드가 조립한 결과입니다 \u2014 로그인 모드가 편집하는 것과 같은 raw 흐름입니다. 위 답을 바꾸면 다시 생성됩니다.',
+
+  'auth.oauth2.handAuthored':
+    '로그인 흐름 JSON이 직접 수정된 상태라 가이드가 더 이상 자동으로 덮어쓰지 않습니다. 다시 생성을 누르면 위 답변으로 만든 흐름으로 교체합니다.',
+  'auth.oauth2.regenerate': '로그인 흐름 다시 생성',
+
+  // Auth · 사전 점검("로그인 테스트 / 가입 테스트 / 토큰 테스트" 버튼)
+  'auth.preflight.button.login': '로그인 테스트',
+  'auth.preflight.button.signup': '가입 테스트',
+  'auth.preflight.button.token': '토큰 테스트',
+  'auth.preflight.testing': '테스트 중…',
+  'auth.preflight.hint': '위 설정 그대로 대상에 실제 자격 증명 요청을 딱 한 번 보냅니다 — 부하도, 실행도 없습니다.',
+  'auth.preflight.ok.login': '로그인 성공',
+  'auth.preflight.ok.signup': '가입 성공',
+  'auth.preflight.ok.token': '토큰 확인됨',
+  'auth.preflight.okDetail': '{source}에서 토큰 발견, {prefix}(으)로 시작',
+  'auth.preflight.okSource': '{source}에서 토큰 발견',
+  'auth.preflight.okSubject': 'subject {subject}',
+  'auth.preflight.fail': '테스트가 실패했습니다 (HTTP {status}).',
+  'auth.preflight.failPlain': '테스트가 실패했습니다.',
+  'auth.preflight.error': '테스트를 실행할 수 없습니다: {error}',
 
   // Auth · 전문가 전략(mint / exec)을 감추는 Advanced 접힘
   'auth.advanced.modes': '다른 인증 방법 (전문가)',
@@ -902,6 +1061,14 @@ const ko: Record<string, string> = {
   'auth.pool.placeholder.jsonl': '{"subject":"alice","token":"eyJhbGci..."}\n{"subject":"bob","token":"eyJhbGci..."}',
   'auth.pool.placeholder.tokens': 'eyJhbGciOiJIUzI1Ni...\neyJhbGciOiJIUzI1Ni...',
   'auth.pool.count': '자격 증명 {count}개 파싱됨',
+  'auth.pool.basicHint':
+    'Basic 인증 레시피: subject에 아이디, token에 비밀번호를 넣고, 시나리오 템플릿 headers에서 Authorization: Basic {{basicAuth .subject .token}}을 보내세요.',
+  // JWT 만료 피드백 (브라우저에서 디코드만 하며 검증하지 않습니다).
+  'auth.pool.expiry': '가장 빠른 토큰이 {in} 후 만료됩니다.',
+  'auth.pool.expirySoon':
+    '가장 빠른 토큰이 {in} 후 만료됩니다 — 이 실행이 끝나기 전({duration}초)입니다. 실행 도중 요청이 실패하기 시작하니, 새 토큰을 붙여넣거나 실행을 줄이세요.',
+  'auth.pool.expired':
+    '붙여넣은 토큰 중 이미 만료된 것이 있습니다 — 요청이 즉시 실패합니다. 새 토큰을 붙여넣으세요.',
 
   // Auth · 로그인
   'auth.tokenVar.autoPlaceholder': '자동 감지',
@@ -927,12 +1094,36 @@ const ko: Record<string, string> = {
   'auth.login.scope.perUser': '사용자별 — 가상 사용자마다 토큰 1개',
   'auth.login.scope.shared': '공유 — 전체가 토큰 1개 (client_credentials)',
   'auth.login.body': '로그인 본문',
-  'auth.login.bodyHint': '로그인할 때 tmula가 보내는 요청 본문입니다. {username}/{password} 마커를 쓰거나, 자격 증명 목록의 행을 템플릿으로 넣으세요.',
+  'auth.login.bodyHint':
+    '로그인할 때 tmula가 보내는 요청 본문입니다. 실제 자격 증명을 직접 넣으세요 — {username}/{password} 마커는 치환되지 않습니다 — 또는 자격 증명 목록의 행을 {{.username}}/{{.password}}로 참조하세요.',
   'auth.login.body.tip':
-    '로그인 URL로 보내는 본문입니다. 단일 신원이면 자격 증명을 직접 넣거나 {username}/{password} 마커를 쓰세요. 여러 사용자를 로그인시키려면 아래에 자격 증명 목록을 주고, {{.username}}/{{.password}}로 각 행을 참조하세요.',
+    '로그인 URL로 보내는 본문입니다. 단일 신원이면 실제 자격 증명을 직접 넣으세요 — {username}/{password} 마커는 직접 바꿔 넣어야 하는 자리표시자일 뿐, 아무것도 자동으로 채워 주지 않습니다. 여러 사용자를 로그인시키려면 아래에 자격 증명 목록을 주고, {{.username}}/{{.password}}로 각 행을 참조하세요.',
   'auth.login.body.multiTip':
     '자격 증명 목록을 주었으므로 각 가상 사용자는 다음 행으로 로그인합니다. {{.username}}와 {{.password}}로 행을 참조하면 tmula가 사용자마다 채워 넣습니다. {{.userIndex}}는 가상 사용자 번호로, 목록이 없을 때 user{{.userIndex}} 같은 패턴에 쓰세요. 목록은 순환합니다(사용자 i는 i mod N 행을 사용).',
   'auth.login.body.useMulti': '자격 증명 목록 본문 사용 ({{.username}} / {{.password}})',
+
+  // Auth · 로그인 · curl 붙여넣기
+  'auth.login.curl.toggle': 'curl 명령 붙여넣기',
+  'auth.login.curl.hint':
+    'API 문서에 있는 로그인 curl을 붙여넣으면 tmula가 URL·메서드·헤더·본문을 채웁니다.',
+  'auth.login.curl.apply': 'curl로 채우기',
+  'auth.login.curl.applied': 'curl 명령으로 로그인을 채웠습니다.',
+  'auth.login.curl.error': '이 curl을 해석하지 못했습니다 — 필드를 직접 채워 주세요.',
+
+  // Auth · 로그인 · 퀵 폼 (첫 사용에 JSON 작성 불필요)
+  'auth.login.quick.user': '아이디',
+  'auth.login.quick.userHint': '이 두 칸만 채우면 tmula가 JSON 로그인 본문을 만들어 줍니다 — JSON이 필요 없습니다.',
+  'auth.login.quick.pass': '비밀번호',
+  'auth.login.quick.passHint': '칸을 벗어날 때 본문에 채워집니다. 이 실행의 spec으로 컨트롤 플레인에 남습니다.',
+  'auth.login.quick.userField': '아이디 필드 이름',
+  'auth.login.quick.userFieldHint': '로그인 API가 기대하는 아이디의 JSON 키입니다(기본값: username).',
+  'auth.login.quick.passField': '비밀번호 필드 이름',
+  'auth.login.quick.passFieldHint': '로그인 API가 기대하는 비밀번호의 JSON 키입니다(기본값: password).',
+  'auth.login.quick.rows':
+    '자격 증명 목록이 있습니다 — 로그인 본문이 각 행을 {{.username}}/{{.password}}로 자동으로 채워 넣습니다.',
+  'auth.login.quick.custom':
+    '이 로그인은 직접 작성했거나 가져온 본문을 사용합니다 — 고급에서 확인·수정하세요. 덮어쓰지 않습니다.',
+  'auth.login.quick.reset': '퀵 폼으로 다시 시작',
 
   // Auth · 로그인 · 간단 양식 URL, 가져오기 "비밀값 입력" 패널, 고급 토글
   'auth.login.url': '로그인 URL',
@@ -940,7 +1131,8 @@ const ko: Record<string, string> = {
   'auth.login.method': '로그인 HTTP 메서드',
   'auth.secrets.title': '입력할 비밀값',
   'auth.secrets.hint': '거의 다 됐습니다 — 가져오기가 아래 비밀값만 남기고 모두 채웠습니다. 입력하면 로그인 준비가 끝납니다.',
-  'auth.secrets.fieldHint': '브라우저에서 입력되어 전송 시점에 본문에 채워집니다 — 값은 저장되지 않습니다.',
+  'auth.secrets.fieldHint':
+    '여기에 입력되어 전송 시점에 본문에 채워집니다. 브라우저에는 저장되지 않지만, 다른 로그인 본문과 마찬가지로 이 실행의 spec으로 컨트롤 플레인에 남습니다.',
   'auth.advanced.login': '고급',
   'auth.advanced.rawLogin': '원본 로그인 흐름 편집 (JSON)',
   'auth.advanced.rawLoginSub': '간단 양식을 끄고 로그인 그래프와 템플릿을 원본 JSON으로 직접 작성합니다.',
@@ -979,9 +1171,10 @@ const ko: Record<string, string> = {
   'auth.bootstrap.signupUrlHint': '새 계정을 등록하는 엔드포인트입니다. 메서드를 고르고 경로를 입력하세요. 예: POST /register.',
   'auth.bootstrap.signupMethod': '가입 HTTP 메서드',
   'auth.bootstrap.body': '가입 본문',
-  'auth.bootstrap.bodyHint': 'tmula가 가입할 때 보내는 요청 본문입니다. 계정마다 고유하도록 {{.userIndex}}를, 비밀번호에는 {password}를 사용하세요.',
+  'auth.bootstrap.bodyHint':
+    'tmula가 가입할 때 보내는 요청 본문입니다. 계정마다 고유하도록 {{.userIndex}}를 사용하고, 비밀번호는 실제 값을 그대로 적으세요 — {password} 마커는 치환되지 않습니다.',
   'auth.bootstrap.body.tip':
-    '가입 URL로 보내는 본문이며 계정마다 한 번씩 렌더링됩니다. {{.userIndex}}는 가상 사용자 번호입니다 — 이메일이나 사용자명에 넣어(예: test+{{.userIndex}}@example.com) 가입이 서로 겹치지 않게 하세요. {password}에는 tmula가 로그인에 재사용할 비밀번호가 채워집니다.',
+    '가입 URL로 보내는 본문이며 계정마다 한 번씩 렌더링됩니다. {{.userIndex}}는 가상 사용자 번호입니다 — 이메일이나 사용자명에 넣어(예: test+{{.userIndex}}@example.com) 가입이 서로 겹치지 않게 하세요. 비밀번호는 문자 그대로 적으세요: {password} 마커는 아무것도 채워 주지 않아 그대로 전송됩니다.',
   'auth.bootstrap.teardownUrl': '정리 URL',
   'auth.bootstrap.teardownUrlHint': '실행 후 계정 하나를 삭제하는 엔드포인트입니다. {{.subject}}는 계정 id입니다. 예: DELETE /accounts/{{.subject}}.',
   'auth.bootstrap.teardownMethod': '정리 HTTP 메서드',
@@ -1088,7 +1281,62 @@ const ko: Record<string, string> = {
   'doctor.authMintKey':
     '로컬 서명이 선택되었지만 서명 키가 참조되지 않았습니다 — tmula가 서명할 수 있도록 키 환경 변수나 키 파일을 설정하세요.',
   'doctor.authMintClaims': '추가 클레임 JSON이 올바르지 않습니다: {error}',
+  'doctor.authLoginBodyMarker':
+    '로그인 본문에 아직 {username}/{password} 마커가 그대로 남아 있습니다 — 아무것도 값을 채워 주지 않아 문자 그대로 전송됩니다. 실제 자격 증명을 입력하거나, 자격 증명 목록의 행을 {{.username}}/{{.password}}로 참조하세요.',
+  'doctor.authSignupBodyMarker':
+    '가입 본문에 아직 {username}/{password} 마커가 그대로 남아 있습니다 — 아무것도 값을 채워 주지 않아 문자 그대로 전송됩니다. 테스트 계정이 사용할 실제 값을 입력하세요.',
+  'doctor.authReplaceMe':
+    '인증 필드에 아직 {placeholder} 자리표시자가 남아 있습니다 — 실행 전에 실제 값을 입력하세요.',
+  'doctor.authTokenUnreferenced':
+    '인증이 설정되어 있지만 어떤 시나리오 템플릿도 {{.token}}(또는 {{basicAuth …}})를 참조하지 않습니다 — 모든 요청이 자격 증명 없이 나갑니다. 템플릿 headers에 예: "Authorization": "Bearer {{.token}}"을 추가하세요.',
+  'doctor.authTokenWithoutAuth':
+    '시나리오 템플릿이 {{.token}}을 참조하지만 인증이 없음으로 설정되어 있습니다 — 마커가 문자 그대로 전송됩니다. 인증을 설정하거나 참조를 제거하세요.',
+  'doctor.authOAuth2TokenUrl':
+    'OAuth2가 선택되었지만 토큰 URL이 비어 있습니다 — IdP의 토큰 엔드포인트를 붙여넣으세요(또는 발급자 URL로 가져오세요).',
+  'doctor.authOAuth2AccessNotApplied':
+    'access token을 붙여넣었지만 아직 적용하지 않았습니다 — "토큰 풀로 사용"을 눌러야 실행이 실제로 사용합니다.',
+  'doctor.authOAuth2AccessEmpty':
+    '"access token만 있어요"를 선택했지만 아직 토큰을 붙여넣지 않았습니다.',
 
+  // api.ts의 자격 증명 파서 / 패턴 생성기 / 인증 빌더가 던지는 폼 오류(FormError).
+  'err.credFormatUnknown': '알 수 없는 자격 증명 형식 "{format}"입니다.',
+  'err.credCsvEmpty': 'CSV 자격 증명 텍스트가 비어 있습니다.',
+  'err.credCsvNoTokenCol': 'CSV 자격 증명에는 "token" 열 헤더가 필요합니다.',
+  'err.credCsvRowMissingToken': 'token 열이 비어 있는 CSV 행이 있습니다.',
+  'err.credCsvNoRows': 'CSV 자격 증명에 데이터 행이 없습니다(최소 1개 필요).',
+  'err.credJsonlBadJson': '올바른 JSON이 아닌 JSONL 자격 증명 줄이 있습니다.',
+  'err.credJsonlShape': 'JSONL 자격 증명은 줄마다 {subject, token} 객체여야 합니다.',
+  'err.credJsonlMissingToken': 'token이 없는 JSONL 자격 증명이 있습니다.',
+  'err.credJsonlNoRows': 'JSONL 자격 증명에 행이 없습니다(최소 1개 필요).',
+  'err.credTokensEmpty': '토큰 자격 증명에 비어 있지 않은 줄이 없습니다(최소 1개 필요).',
+  'err.loginCredFormatUnknown': '알 수 없는 로그인 자격 증명 형식 "{format}"입니다.',
+  'err.loginCredEmpty': '로그인 자격 증명 텍스트가 비어 있습니다.',
+  'err.loginCredCsvHeader': '로그인 자격 증명에는 "username"과 "password" 열이 있는 헤더가 필요합니다.',
+  'err.loginCredRowMissingUsername': 'username이 비어 있는 로그인 자격 증명 행이 있습니다.',
+  'err.loginCredRowMissingPassword': 'password가 비어 있는 로그인 자격 증명 행이 있습니다.',
+  'err.loginCredCsvNoRows': '로그인 자격 증명에 데이터 행이 없습니다(username,password 최소 1개 필요).',
+  'err.loginCredJsonlBadJson': '올바른 JSON이 아닌 로그인 자격 증명 줄이 있습니다.',
+  'err.loginCredJsonlShape': '로그인 자격 증명은 줄마다 {username, password} 객체여야 합니다.',
+  'err.loginCredJsonlMissingUsername': 'username이 없는 로그인 자격 증명이 있습니다.',
+  'err.loginCredJsonlMissingPassword': 'password가 없는 로그인 자격 증명이 있습니다.',
+  'err.loginCredJsonlNoRows': '로그인 자격 증명에 행이 없습니다(username/password 최소 1개 필요).',
+  'err.patternCount': '패턴에는 1 이상의 개수가 필요합니다.',
+  'err.patternOverCap':
+    '패턴 개수 {count}가 브라우저 한도 {max}를 초과합니다 \u2014 더 큰 풀은 CLI 시나리오 파일의 usersPattern을 사용하세요.',
+  'err.patternTokenEmpty': '패턴에는 token(또는 password) 템플릿이 필요합니다.',
+  'err.loginPathMissing': '로그인에는 요청 경로가 필요합니다(예: /login).',
+  'err.signupPathMissing': '가입에는 요청 경로가 필요합니다(예: /register).',
+  'err.mintKeyMissing': 'mint에는 서명 키 참조가 필요합니다 \u2014 환경 변수나 파일 경로를 설정하세요.',
+  'err.mintKeyBoth': 'mint는 키 환경 변수와 키 파일 중 하나만 받습니다. 둘 다는 안 됩니다.',
+  'err.mintTtl': 'mint에는 0초보다 큰 토큰 수명(ttl)이 필요합니다.',
+  'err.mintClaimsJson': 'mint 클레임은 문자열 값의 JSON 객체여야 합니다.',
+  'err.mintClaimsObject': 'mint 클레임은 JSON 객체여야 합니다(예: {"role":"tester"}).',
+  'err.execUnconfirmed': 'exec는 가상 사용자마다 로컬 명령을 실행합니다 \u2014 실행 전에 허용을 확인하세요.',
+  'err.execCommandEmpty': 'exec에는 명령(argv)이 필요합니다 \u2014 한 줄에 하나씩, 첫 줄이 프로그램입니다.',
+  'err.execTimeout': 'exec에는 0초보다 큰 호출 제한 시간이 필요합니다.',
+  'err.execEnvLine': 'exec 환경 변수는 KEY=VALUE 줄이어야 합니다(입력: {line}).',
+  'err.bootstrapUnconfirmed':
+    '부트스트랩 실행 전에 대상이 비프로덕션 시스템인지 확인해야 합니다(실제 계정을 만들고 삭제합니다).',
   // Presets (Feature A)
   'presets.label': '템플릿으로 시작하기',
   'presets.hint': '클릭 한 번으로 아래 시나리오가 채워집니다. 이후 원하는 대로 수정하세요.',
@@ -1161,6 +1409,11 @@ const ko: Record<string, string> = {
   'run.noteOpen': '약 초당 **{rate}**명씩 **{duration}초** 동안',
   'run.noteClosed': '가상 사용자 **{users}**명 · 최대 **{steps}**단계',
   'run.connLost': '진행 상황을 스트리밍하는 중 연결이 끊겼습니다.',
+  'run.blocked': '실행 전에 이 문제를 해결하세요:',
+  // "트래픽이 흐르기도 전에 실행이 죽은" 알려진 실패 사유의 친절한 헤드라인
+  // (원본 백엔드 사유는 항상 그 아래에 함께 표시됩니다).
+  'run.failLoginPrewarm': '실행이 시작되기 전에 로그인에 실패했습니다 — 로그인 URL과 자격 증명을 확인하세요.',
+  'run.failBootstrapPrewarm': '실행이 시작되기 전에 계정 생성에 실패했습니다 — 가입 URL과 본문을 확인하세요.',
   'mode.local': '로컬',
   'mode.distributed': '분산 (워커 {count}대)',
   'live.events': '요청마다 애니메이션 (≤{max} {unit})',
@@ -1183,6 +1436,7 @@ const ko: Record<string, string> = {
   // Report links
   'report.viewHtml': '전체 HTML 보고서 보기',
   'report.compare': '이전 실행과 비교',
+  'report.killReason': '실행이 일찍 종료되었습니다',
 
   // Stats (StatsView)
   'stat.requests': '요청 수',

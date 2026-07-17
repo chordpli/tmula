@@ -253,7 +253,22 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 	if err != nil {
 		return obs.Stats{}, nil, err
 	}
-	return res.Stats, res.Findings, nil
+	findings := res.Findings
+	// Open-model auth-setup skips are otherwise INVISIBLE: a session whose credential
+	// could not be acquired is dropped and the run reports the survivors as healthy. The
+	// scheduler counts them (res.SetupErrors) but they never reach the report on their
+	// own — surface them here as a run note, and past a threshold as a finding, so a run
+	// where most sessions failed to authenticate is not mistaken for a clean one.
+	if res.SetupErrors > 0 {
+		note := setupErrorNote(res.SetupErrors, res.Launched, res.FirstSetupError)
+		rs.mu.Lock()
+		rs.staticNotes = append(rs.staticNotes, note)
+		rs.mu.Unlock()
+		if isSignificantSetupFailure(res.SetupErrors, res.Launched) {
+			findings = append(findings, authSetupFinding(rs.exec.ID, res.SetupErrors, res.Launched, s.now()))
+		}
+	}
+	return res.Stats, findings, nil
 }
 
 // runnerFor builds the load.Runner for a run: always guarded by the run's

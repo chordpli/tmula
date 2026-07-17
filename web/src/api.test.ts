@@ -2,8 +2,10 @@ import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   addBaseUrlHostToAllowlist,
   allowlistMatchesHost,
+  assembleLoginBody,
   AUTH_FORM_DEFAULTS,
   applyReplaceMe,
+  authFormFromCurl,
   authFormFromImport,
   authFormFromOAuth2Guide,
   authFormFromSpec,
@@ -16,8 +18,11 @@ import {
   buildRunSpec,
   classifyEdge,
   compareURL,
+  decodeJwtExp,
+  discoverIssuer,
   formatCount,
   formFromRunSpec,
+  FormError,
   generateCredentialRows,
   MAX_WEB_PATTERN_ROWS,
   getExperimentSpec,
@@ -30,30 +35,42 @@ import {
   heatmapURL,
   heatWidth,
   hostFromBaseUrl,
+  humanDuration,
   importScenario,
+  isOAuth2GuideGeneratedFlow,
   mintManagedIdPAdvisory,
   OAUTH2_GUIDE_DEFAULTS,
+  oauth2GuideCanCompileOver,
   LAT_CELL_EMPTY,
   LAT_CELL_HOT,
   latencyCellColor,
   latencyHeatmapURL,
   layoutGraph,
+  LOGIN_BODY_MULTI,
+  LOGIN_BODY_SINGLE,
+  loginBodyOverwritable,
+  loginBodyReferencesRow,
   lerpColor,
+  localizeError,
   outcomeRates,
   outcomeSummary,
   parseCredentials,
+  parseCurlCommand,
   parseLoginCredentials,
   parseHeatFrame,
   parseLatencyFrame,
   parseAllowlist,
   parseSignupSteps,
+  poolExpiry,
   parseSSEData,
   parseSegments,
   parseTraceFrame,
+  preflightAuth,
   probeRun,
   reportHTMLURL,
   requestTotal,
   runDisabled,
+  runFailureHintKey,
   runIdFromQuery,
   shareTokenFromQuery,
   terminalNodeIds,
@@ -63,6 +80,7 @@ import {
   type ExperimentForm,
   type RunSpec,
 } from './api'
+import { dict, translate } from './i18n'
 
 // expParams unwraps the experiment params for assertions (experiment is typed
 // `unknown` on the wire so the UI never depends on its shape elsewhere).
@@ -1124,6 +1142,39 @@ describe('parseSSEData', () => {
     expect(parseSSEData('data: {bad json')).toBeNull()
     expect(parseSSEData('event: ping')).toBeNull()
   })
+
+  it('carries the terminal frame failure reason through', () => {
+    const frame = parseSSEData('data: {"status":"failed","reason":"api: prewarm login token: 401"}')
+    expect(frame?.status).toBe('failed')
+    expect(frame?.reason).toBe('api: prewarm login token: 401')
+  })
+})
+
+describe('runFailureHintKey', () => {
+  it('maps the prewarm-login failure onto the friendly login hint', () => {
+    expect(runFailureHintKey('api: prewarm login token: request "login" returned status 401')).toBe(
+      'run.failLoginPrewarm',
+    )
+  })
+
+  it('maps the prewarm-bootstrap failure onto the friendly signup hint', () => {
+    expect(runFailureHintKey('api: prewarm bootstrap accounts: signup step "signup" failed')).toBe(
+      'run.failBootstrapPrewarm',
+    )
+  })
+
+  it('returns null for unknown or empty reasons (only the raw reason is shown)', () => {
+    expect(runFailureHintKey('worker 2 disconnected')).toBeNull()
+    expect(runFailureHintKey('')).toBeNull()
+    expect(runFailureHintKey(undefined)).toBeNull()
+  })
+
+  it('has en and ko dictionary lines for every hint it can return', () => {
+    for (const key of ['run.failLoginPrewarm', 'run.failBootstrapPrewarm']) {
+      expect(dict.en[key]).toBeTruthy()
+      expect(dict.ko[key]).toBeTruthy()
+    }
+  })
 })
 
 describe('shareTokenFromQuery', () => {
@@ -2080,6 +2131,31 @@ describe('authFormFromImport (import → Auth auto-fill)', () => {
     expect(patch.loginMode).toBe('simple')
     expect(patch.loginUrlPath).toBe('/oauth/token')
     expect(patch.loginBodyTemplate).toBe('grant_type=password')
+    // The import must clear a stale OAuth2-guide selection so the imported login flow is
+    // shown and validated, not blocked by the guide's empty token URL.
+    expect(patch.authEntryOAuth2).toBe(false)
+  })
+
+  it('clears the OAuth2-guide entry flag for every import shape (login/pool/bootstrap)', () => {
+    const login = authFormFromImport({
+      ...base,
+      loginFlow: {
+        graph: { id: 'login', nodes: [{ id: 'login', apiTemplateId: 't_login' }], edges: [] },
+        templates: { t_login: { method: 'POST', path: '/oauth/token', payloadTemplate: 'grant_type=password' } },
+        start: 'login',
+      },
+    })
+    const pool = authFormFromImport({
+      ...base,
+      credentialPool: { id: 'p', strategy: 'pool', entries: [{ subject: 'alice', token: '' }] },
+    })
+    const boot = authFormFromImport({
+      ...base,
+      suggestedSignup: { steps: [{ id: 'signup', method: 'POST', path: '/register' }], capture: {} },
+    })
+    expect(login.authEntryOAuth2).toBe(false)
+    expect(pool.authEntryOAuth2).toBe(false)
+    expect(boot.authEntryOAuth2).toBe(false)
   })
 
   it('maps secret-omitted pool entries onto pre-filled JSONL the operator completes', () => {
@@ -2232,6 +2308,474 @@ describe('authFormFromOAuth2Guide', () => {
     expect(tokenPathFromUrl('/oauth/token')).toBe('/oauth/token')
     expect(tokenPathFromUrl('')).toBe('')
     expect(tokenPathFromUrl('https://idp.example.com')).toBe('')
+  })
+})
+
+describe('curl paste (parseCurlCommand / authFormFromCurl)', () => {
+  it('parses the canonical docs curl: -X, -H, single-quoted -d JSON', () => {
+    const req = parseCurlCommand(
+      `curl -X POST https://api.example.com/login -H 'Content-Type: application/json' -d '{"username":"alice","password":"secret"}'`,
+    )
+    expect(req).toEqual({
+      method: 'POST',
+      url: 'https://api.example.com/login',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"username":"alice","password":"secret"}',
+    })
+  })
+
+  it('supports long flags, multiple data parts, --url, and backslash continuations', () => {
+    const req = parseCurlCommand(
+      'curl --request PUT \\\n  --url https://idp.example.com/oauth/token \\\n  --header "Accept: application/json" \\\n  --data grant_type=password --data-urlencode "username=al ice"',
+    )
+    expect(req?.method).toBe('PUT')
+    expect(req?.url).toBe('https://idp.example.com/oauth/token')
+    expect(req?.headers).toEqual({ Accept: 'application/json' })
+    expect(req?.body).toBe('grant_type=password&username=al ice')
+  })
+
+  it('defaults the method (POST with a body, GET without) and skips noise flags', () => {
+    const posty = parseCurlCommand("curl -s -k https://x.test/login -d 'a=1'")
+    expect(posty?.method).toBe('POST')
+    const getty = parseCurlCommand('curl -s https://x.test/me')
+    expect(getty?.method).toBe('GET')
+    // A value-taking flag we ignore must not swallow the URL slot.
+    const withUser = parseCurlCommand('curl -u admin:pw https://x.test/login -d a=1')
+    expect(withUser?.url).toBe('https://x.test/login')
+  })
+
+  it('returns null for anything it cannot make sense of (state stays untouched)', () => {
+    expect(parseCurlCommand('')).toBeNull()
+    expect(parseCurlCommand('wget https://x.test')).toBeNull()
+    expect(parseCurlCommand('curl -X POST')).toBeNull() // no URL
+    expect(parseCurlCommand("curl 'https://x.test/unbalanced")).toBeNull() // open quote
+  })
+
+  it('parses curl attached-value flags: -XPUT, -H<value>, -d<value>, and skips -u<value>', () => {
+    const req = parseCurlCommand(
+      `curl -XPUT https://api.example.com/login -H'Content-Type: application/json' -d'a=1' -uadmin:pw`,
+    )
+    expect(req).toEqual({
+      method: 'PUT',
+      url: 'https://api.example.com/login',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'a=1',
+    })
+  })
+
+  it('maps a headerless curl onto the simple mini-form, marking the body hand-authored', () => {
+    const patch = authFormFromCurl({
+      method: 'POST',
+      url: 'https://api.example.com/login',
+      headers: {},
+      body: '{"user":"a","pass":"b"}',
+    })
+    expect(patch.loginMode).toBe('simple')
+    expect(patch.loginUrlMethod).toBe('POST')
+    expect(patch.loginUrlPath).toBe('/login')
+    expect(patch.loginBodyTemplate).toBe('{"user":"a","pass":"b"}')
+    // A curl body is the operator's truth: the quick form must not clobber it.
+    expect(patch.loginBodyGenerated).toBe(false)
+  })
+
+  it('compiles a curl WITH headers into the single-step advanced flow (nothing dropped)', () => {
+    const patch = authFormFromCurl({
+      method: 'POST',
+      url: 'https://api.example.com/oauth/token',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Tenant': 'acme' },
+      body: 'grant_type=password',
+    })
+    expect(patch.loginMode).toBe('advanced')
+    const graph = JSON.parse(patch.loginGraphJSON!) as { nodes: { id: string }[] }
+    expect(graph.nodes).toHaveLength(1)
+    const templates = JSON.parse(patch.loginTemplatesJSON!) as Record<
+      string,
+      { method: string; path: string; headers: Record<string, string>; payloadTemplate: string }
+    >
+    expect(templates['t_login'].path).toBe('/oauth/token')
+    expect(templates['t_login'].headers['X-Tenant']).toBe('acme')
+    expect(templates['t_login'].payloadTemplate).toBe('grant_type=password')
+    expect(patch.loginStart).toBe('login')
+  })
+})
+
+describe('token paste intelligence (decodeJwtExp / poolExpiry / humanDuration)', () => {
+  // jwt crafts an unsigned three-segment token whose payload is real base64url —
+  // exactly the shape the pool decoder feeds on (it never verifies signatures).
+  // btoa keeps the test browser-typed (no Buffer / @types/node dependency).
+  const b64u = (obj: unknown) =>
+    btoa(JSON.stringify(obj)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const jwt = (payload: unknown) => `${b64u({ alg: 'none', typ: 'JWT' })}.${b64u(payload)}.sig`
+  const NOW = 1_800_000_000_000 // fixed "now" in ms
+  const nowSec = NOW / 1000
+
+  it('decodes the exp claim from a JWT without verifying it', () => {
+    expect(decodeJwtExp(jwt({ exp: 1234567890, sub: 'alice' }))).toBe(1234567890)
+  })
+
+  it('silently ignores non-JWT tokens, missing exp, and undecodable payloads', () => {
+    expect(decodeJwtExp('opaque-bearer-token')).toBeNull()
+    expect(decodeJwtExp('a.b')).toBeNull()
+    expect(decodeJwtExp(jwt({ sub: 'no-exp' }))).toBeNull()
+    expect(decodeJwtExp('x.!!!not-base64url!!!.y')).toBeNull()
+    expect(decodeJwtExp(jwt({ exp: 'soon' }))).toBeNull()
+  })
+
+  it('reports the EARLIEST expiry across the pool and skips opaque tokens', () => {
+    const entries = [
+      { token: 'opaque' },
+      { token: jwt({ exp: nowSec + 3600 }) },
+      { token: jwt({ exp: nowSec + 1920 }), subject: 'bob' }, // 32m — the earliest
+    ]
+    const exp = poolExpiry(entries, NOW)
+    expect(exp).not.toBeNull()
+    expect(exp!.expired).toBe(false)
+    expect(exp!.msLeft).toBe(1920 * 1000)
+    expect(humanDuration(exp!.msLeft)).toBe('32m')
+  })
+
+  it('flags an already-expired token and stays silent for all-opaque pools', () => {
+    const expired = poolExpiry([{ token: jwt({ exp: nowSec - 60 }) }], NOW)
+    expect(expired!.expired).toBe(true)
+    expect(expired!.msLeft).toBe(-60 * 1000)
+    expect(poolExpiry([{ token: 'opaque-1' }, { token: 'opaque-2' }], NOW)).toBeNull()
+    expect(poolExpiry([], NOW)).toBeNull()
+  })
+
+  it('renders durations compactly (45s / 32m / 2h 5m / 3h)', () => {
+    expect(humanDuration(45_000)).toBe('45s')
+    expect(humanDuration(1_920_000)).toBe('32m')
+    expect(humanDuration((2 * 3600 + 5 * 60) * 1000)).toBe('2h 5m')
+    expect(humanDuration(3 * 3600 * 1000)).toBe('3h')
+    expect(humanDuration(-5_000)).toBe('0s')
+  })
+})
+
+describe('login quick form (assembleLoginBody / loginBodyOverwritable)', () => {
+  it('assembles a literal-credential JSON body with proper escaping', () => {
+    const body = assembleLoginBody('username', 'password', 'alice', 'p"w\\d', false)
+    expect(JSON.parse(body)).toEqual({ username: 'alice', password: 'p"w\\d' })
+    // A generated body NEVER carries the inert single-brace markers (kills the
+    // item-3a trap at the source).
+    expect(body).not.toMatch(/\{(?:username|password)\}/)
+  })
+
+  it('honors custom field names and defaults blank ones', () => {
+    expect(JSON.parse(assembleLoginBody('email', 'pw', 'a@x.com', 's', false))).toEqual({
+      email: 'a@x.com',
+      pw: 's',
+    })
+    expect(JSON.parse(assembleLoginBody('  ', '', 'u', 'p', false))).toEqual({ username: 'u', password: 'p' })
+  })
+
+  it('templates the credential-list row markers when a list is supplied', () => {
+    const body = assembleLoginBody('login_id', 'passwd', 'ignored', 'ignored', true)
+    expect(JSON.parse(body)).toEqual({ login_id: '{{.username}}', passwd: '{{.password}}' })
+    expect(loginBodyReferencesRow(body)).toBe(true)
+  })
+
+  it('only overwrites a default, empty, or previously generated body', () => {
+    expect(loginBodyOverwritable('', false)).toBe(true)
+    expect(loginBodyOverwritable(LOGIN_BODY_SINGLE, false)).toBe(true)
+    expect(loginBodyOverwritable(LOGIN_BODY_MULTI, false)).toBe(true)
+    // Generated → regenerating is fine even though the text is custom.
+    expect(loginBodyOverwritable('{"email":"a","pw":"b"}', true)).toBe(true)
+    // Hand-authored (or imported) → never clobbered.
+    expect(loginBodyOverwritable('{"email":"a","pw":"b"}', false)).toBe(false)
+    expect(loginBodyOverwritable('{"user":"REPLACE_ME_USER"}', false)).toBe(false)
+  })
+
+  it('a quick-form body flows through buildAuth unchanged (payload contract intact)', () => {
+    const body = assembleLoginBody('username', 'password', 'alice', 'pw-a', false)
+    const form: ExperimentForm = {
+      ...({} as ExperimentForm),
+      ...AUTH_FORM_DEFAULTS,
+      authMode: 'login',
+      loginUrlPath: '/login',
+      loginBodyTemplate: body,
+    } as ExperimentForm
+    const auth = buildAuth(form)
+    expect(auth?.authStrategy).toBe('login')
+    const templates = auth?.loginFlow?.templates as Record<string, { payloadTemplate?: string }>
+    expect(templates['t_login'].payloadTemplate).toBe(body)
+  })
+})
+
+describe('FormError / localizeError (i18n of api error messages)', () => {
+  const tko = (key: string, vars?: Record<string, string | number>) => translate(dict, 'ko', key, vars)
+
+  it('parser errors carry an i18n key and keep the exact English message', () => {
+    let caught: unknown
+    try {
+      parseCredentials('csv', 'subject,secret\nalice,tok')
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    const fe = caught as FormError
+    expect(fe.message).toBe('CSV credentials need a "token" column header')
+    expect(fe.key).toBe('err.credCsvNoTokenCol')
+    // The ko rendering comes from the dictionary, not the stored message.
+    expect(localizeError(fe, tko)).toBe(dict.ko['err.credCsvNoTokenCol'])
+    expect(localizeError(fe, tko)).not.toBe(fe.message)
+  })
+
+  it('the pattern over-cap error localizes with its count and the real cap', () => {
+    let caught: unknown
+    try {
+      generateCredentialRows('u{{.userIndex}}', 'pw', MAX_WEB_PATTERN_ROWS + 1, 'csv')
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    const fe = caught as FormError
+    expect(fe.message).toContain(String(MAX_WEB_PATTERN_ROWS + 1))
+    expect(fe.message).toContain(String(MAX_WEB_PATTERN_ROWS))
+    const ko = localizeError(fe, tko)
+    expect(ko).toContain(String(MAX_WEB_PATTERN_ROWS))
+    expect(ko).toContain('usersPattern')
+  })
+
+  it('builder errors (mint / exec / bootstrap) are FormErrors too', () => {
+    const base: ExperimentForm = {
+      ...({} as ExperimentForm),
+      ...AUTH_FORM_DEFAULTS,
+      authMode: 'mint',
+    } as ExperimentForm
+    let caught: unknown
+    try {
+      buildMintSpecProbe(base)
+    } catch (e) {
+      caught = e
+    }
+    expect(caught).toBeInstanceOf(FormError)
+    expect((caught as FormError).key).toBe('err.mintKeyMissing')
+    expect(localizeError(caught, tko)).toBe(dict.ko['err.mintKeyMissing'])
+  })
+
+  it('localizeError falls back to the raw message for non-Form errors', () => {
+    expect(localizeError(new Error('server said no'), tko)).toBe('server said no')
+    expect(localizeError('plain string', tko)).toBe('plain string')
+  })
+
+  it('every err.* key exists in both dictionaries', () => {
+    const enErr = Object.keys(dict.en).filter((k) => k.startsWith('err.'))
+    expect(enErr.length).toBeGreaterThan(20)
+    for (const key of enErr) {
+      expect(dict.ko[key], `ko ${key}`).toBeTruthy()
+    }
+  })
+})
+
+// buildMintSpecProbe just calls buildAuth on a mint form so the builder-error test
+// exercises the same path the UI does.
+function buildMintSpecProbe(form: ExperimentForm) {
+  return buildAuth(form)
+}
+
+describe('discoverIssuer', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      })
+    })
+    return calls
+  }
+
+  it('POSTs the issuer and returns the discovered endpoints', async () => {
+    const calls = mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        issuer: 'https://idp.example.com',
+        tokenEndpoint: 'https://idp.example.com/oauth/token',
+        grantTypesSupported: ['password', 'client_credentials'],
+      }),
+    })
+    const res = await discoverIssuer('https://idp.example.com', ['localhost', 'idp.example.com'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/auth/discover')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.body).toBe(
+      '{"issuer":"https://idp.example.com","allow":["localhost","idp.example.com"]}',
+    )
+    expect(res.tokenEndpoint).toBe('https://idp.example.com/oauth/token')
+    expect(res.grantTypesSupported).toEqual(['password', 'client_credentials'])
+  })
+
+  it('surfaces the server error message (e.g. an allowlist rejection)', async () => {
+    mockFetch({
+      ok: false,
+      status: 400,
+      body: '{"error":"issuer host is not in the allowlist — add idp.example.com first"}',
+    })
+    await expect(discoverIssuer('https://idp.example.com', ['localhost'])).rejects.toThrow(/allowlist/)
+  })
+
+  it('treats an HTTP-200 { ok:false, reason } body as a failure, not a success', async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({ ok: false, reason: 'https://idp/.well-known/openid-configuration returned status 404 (want 200)' }),
+    })
+    await expect(discoverIssuer('https://idp', ['idp'])).rejects.toThrow(/404/)
+  })
+
+  it('rejects a 200 body without a usable tokenEndpoint instead of storing undefined', async () => {
+    mockFetch({ ok: true, status: 200, body: JSON.stringify({ ok: true, issuer: 'https://idp' }) })
+    await expect(discoverIssuer('https://idp', ['idp'])).rejects.toThrow(/token_endpoint/)
+  })
+
+  it('falls back to the status code on an empty error body and propagates network failures', async () => {
+    mockFetch({ ok: false, status: 502, body: '' })
+    await expect(discoverIssuer('https://x', ['x'])).rejects.toThrow('502')
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
+    await expect(discoverIssuer('https://x', ['x'])).rejects.toThrow('network down')
+  })
+})
+
+describe('preflightAuth', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  // mockFetch installs a fetch stub returning the given response and records the
+  // calls, mirroring the importScenario test harness.
+  function mockFetch(response: { ok: boolean; status: number; body: string }) {
+    const calls: { url: string; init?: RequestInit }[] = []
+    vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      return Promise.resolve({
+        ok: response.ok,
+        status: response.status,
+        text: () => Promise.resolve(response.body),
+        json: () => Promise.resolve(JSON.parse(response.body)),
+      })
+    })
+    return calls
+  }
+
+  const spec = { start: 'login' } as unknown as RunSpec
+
+  it('POSTs the run spec JSON to /api/auth/preflight and parses a success', async () => {
+    const calls = mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        ok: true,
+        strategy: 'login',
+        httpStatus: 200,
+        tokenSource: 'body:access_token',
+        tokenPrefix: 'eyJhbG…',
+        subject: 'alice',
+      }),
+    })
+    const res = await preflightAuth(spec)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/auth/preflight')
+    expect(calls[0].init?.method).toBe('POST')
+    expect(calls[0].init?.body).toBe(JSON.stringify(spec))
+    expect(res.ok).toBe(true)
+    expect(res.tokenSource).toBe('body:access_token')
+    expect(res.tokenPrefix).toBe('eyJhbG…')
+    expect(res.subject).toBe('alice')
+  })
+
+  it('returns a failed acquisition (200 ok:false) with the server reason intact', async () => {
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        ok: false,
+        strategy: 'login',
+        httpStatus: 401,
+        reason: 'login flow step "login" returned status 401 — check the login URL and credentials',
+      }),
+    })
+    const res = await preflightAuth(spec)
+    expect(res.ok).toBe(false)
+    expect(res.httpStatus).toBe(401)
+    expect(res.reason).toMatch(/401/)
+  })
+
+  it('unwraps a 400 {"error"} envelope and surfaces a plain 403 body', async () => {
+    mockFetch({ ok: false, status: 400, body: '{"error":"invalid spec: no credentialPool"}' })
+    await expect(preflightAuth(spec)).rejects.toThrow('invalid spec: no credentialPool')
+    mockFetch({ ok: false, status: 403, body: 'exec is gated: start the server with --allow-exec' })
+    await expect(preflightAuth(spec)).rejects.toThrow('--allow-exec')
+  })
+
+  it('falls back to the status code when the error body is empty', async () => {
+    mockFetch({ ok: false, status: 400, body: '' })
+    await expect(preflightAuth(spec)).rejects.toThrow('400')
+  })
+
+  it('propagates a network failure', async () => {
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('network down')))
+    await expect(preflightAuth(spec)).rejects.toThrow('network down')
+  })
+})
+
+describe('oauth2 guide no-clobber (isOAuth2GuideGeneratedFlow / oauth2GuideCanCompileOver)', () => {
+  const guideForm = (patch: Partial<ExperimentForm>): ExperimentForm =>
+    ({ ...AUTH_FORM_DEFAULTS, ...patch }) as ExperimentForm
+
+  it('recognizes what the guide itself generated', () => {
+    const patch = authFormFromOAuth2Guide({
+      ...OAUTH2_GUIDE_DEFAULTS,
+      tokenUrl: 'https://idp.example.com/oauth/token',
+      grant: 'clientCredentials',
+      clientId: 'web',
+    })
+    expect(isOAuth2GuideGeneratedFlow(patch.loginGraphJSON!, patch.loginTemplatesJSON!)).toBe(true)
+    expect(
+      oauth2GuideCanCompileOver(
+        guideForm({ loginGraphJSON: patch.loginGraphJSON!, loginTemplatesJSON: patch.loginTemplatesJSON! }),
+      ),
+    ).toBe(true)
+  })
+
+  it('allows compiling over the shipped default (both flow fields empty)', () => {
+    expect(oauth2GuideCanCompileOver(guideForm({}))).toBe(true)
+  })
+
+  it('refuses to compile over a hand-authored flow', () => {
+    // A two-step flow (or any non-guide shape) is the operator's work.
+    const graph = JSON.stringify({
+      id: 'login',
+      nodes: [
+        { id: 'csrf', apiTemplateId: 't_csrf' },
+        { id: 'login', apiTemplateId: 't_login' },
+      ],
+      edges: [{ from: 'csrf', to: 'login', weight: 1 }],
+    })
+    const templates = JSON.stringify({
+      t_csrf: { method: 'GET', path: '/csrf' },
+      t_login: { method: 'POST', path: '/login', payloadTemplate: '{"user":"a"}' },
+    })
+    expect(isOAuth2GuideGeneratedFlow(graph, templates)).toBe(false)
+    expect(oauth2GuideCanCompileOver(guideForm({ loginGraphJSON: graph, loginTemplatesJSON: templates }))).toBe(false)
+    // A JSON-body single-step login (no grant_type form body) is also hand work.
+    const jsonBody = JSON.stringify({
+      t_login: { method: 'POST', path: '/login', payloadTemplate: '{"user":"a","pass":"b"}' },
+    })
+    const singleNode = JSON.stringify({
+      id: 'login',
+      nodes: [{ id: 'login', apiTemplateId: 't_login' }],
+      edges: [],
+    })
+    expect(isOAuth2GuideGeneratedFlow(singleNode, jsonBody)).toBe(false)
+  })
+
+  it('treats malformed JSON as hand-authored (never clobber what it cannot read)', () => {
+    expect(isOAuth2GuideGeneratedFlow('{not json', '{}')).toBe(false)
+    expect(oauth2GuideCanCompileOver(guideForm({ loginGraphJSON: '{not json', loginTemplatesJSON: '{}' }))).toBe(false)
   })
 })
 

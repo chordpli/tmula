@@ -87,7 +87,10 @@ func readMintKeyBody(_ context.Context, ref domain.CredentialSourceRef, root str
 	}
 	evalPath, err := filepath.EvalSymlinks(clean)
 	if err != nil {
-		return nil, fmt.Errorf("auth: mint key file %q: %w", ref.File, err)
+		// Name the directory the key was looked for under, so a "no such file" reads as
+		// "not beside the scenario" rather than a bare path error — the common cause is a
+		// key.file resolved against the wrong root.
+		return nil, fmt.Errorf("auth: mint key file %q not found under %s: %w", ref.File, absRoot, err)
 	}
 	if !withinRoot(evalRoot, evalPath) {
 		return nil, fmt.Errorf("auth: mint key path %q escapes its root via a symlink", ref.File)

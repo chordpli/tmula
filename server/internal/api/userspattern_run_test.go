@@ -63,7 +63,10 @@ func TestUsersPatternPoolRunAtScale(t *testing.T) {
 	// run still sends one request per patterned user, proving the path at scale.
 	spec.TargetEnv.RateCap.MaxConcurrency = 50
 
-	rep := runInProcess(t, spec, 30*time.Second)
+	// A generous budget: this 10k-request run is ~1s normally and ~8s under -race in
+	// isolation, but the whole -race suite competing for CPU can starve it well past a
+	// tight 30s bound, so allow headroom to keep the gate deterministic.
+	rep := runInProcess(t, spec, 90*time.Second)
 	if rep.Run.Status != domain.RunCompleted {
 		t.Fatalf("status = %q (reason %q), want completed", rep.Run.Status, rep.Run.KillReason)
 	}

@@ -1,4 +1,4 @@
-import type { Finding, FindingEvidence, MetricSeries, OutcomeSummary, Report, Stats } from './api'
+import { runFailureHintKey, type Finding, type FindingEvidence, type MetricSeries, type OutcomeSummary, type Report, type Stats } from './api'
 import HelpTip from './HelpTip'
 import { useI18n } from './i18n'
 
@@ -164,8 +164,21 @@ export default function ReportView({
   // A Go nil slice marshals to JSON null, so default to an empty list.
   const findings = report.findings ?? []
   const serverMetrics = report.serverMetrics ?? []
+  // A killed/failed run explains itself: killReason says WHY it ended early.
+  // Known prewarm failures get a friendly translated headline; the raw backend
+  // reason always shows beneath so nothing is hidden.
+  const killReason = report.run.killReason ?? ''
+  const killHintKey = runFailureHintKey(killReason)
   return (
     <div>
+      {killReason && (
+        <div className="alert" role="alert" style={{ marginBottom: 14 }}>
+          <span>
+            <strong>{killHintKey ? t(killHintKey) : t('report.killReason')}</strong>
+            <span className="alert__sub">{killReason}</span>
+          </span>
+        </div>
+      )}
       <StatsView stats={report.stats} />
       {outcome && outcome.started > 0 && <OutcomeView outcome={outcome} />}
 

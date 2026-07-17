@@ -9,11 +9,12 @@
 
 | 스킬 | 하는 일 | 실행되는 명령 |
 |---|---|---|
-| **tmula-scaffold** | 스펙에서 시나리오 기본 틀 생성 (+ 콘솔용 graph/templates) | `tmula init`, `to-console.sh` |
+| **tmula-scaffold** | 스펙에서 시나리오 기본 틀 생성 (+ 콘솔용 graph/templates); 스펙에 security scheme이 있으면 auth 자동 도출 | `tmula init`, `to-console.sh` |
+| **tmula-auth** | `auth` 블록만 따로 도출 (로그인 flow + 헤더 + `REPLACE_ME` 비밀 하나) — 아래 데모 shop에는 필요 없음 | `tmula init` (auth 도출) |
 | **tmula-enrich** | 시나리오를 실행 가능·안전하게 구체화 (CLI 명령 없음, 파일 편집) | (없음) |
 | **tmula-run** | 안전 게이트 → dry-run → 부하 실행 | `tmula run` |
 | **tmula-triage** | finding 재현 · 베이스라인 게이트 | `tmula reproduce`, `tmula run --baseline-file` |
-| **tmula-up** | 위 네 스킬을 순서대로 실행 | (위 스킬 호출) |
+| **tmula-up** | 위 파이프라인 스킬을 순서대로 실행 | (위 스킬 호출) |
 
 생성되는 JSON은 모두 `json/` 폴더에 저장됩니다(생성물이므로 gitignore): 시나리오·리포트·베이스라인, 그리고
 웹 콘솔용 `graph.json`·`templates.json`·`source.json`.

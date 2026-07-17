@@ -50,6 +50,12 @@ func initScenario(args []string) error {
 	if note != "" {
 		fmt.Fprintln(os.Stderr, note)
 	}
+	// Surface import-time auth advisories the importer could not act on (the managed-IdP
+	// mint footgun, the OpenID Connect discovery pointer) so the operator sees them before
+	// picking a strategy that cannot work. Each renders to a human-readable line.
+	for _, adv := range sc.AuthAdvisories {
+		fmt.Fprintf(os.Stderr, "note: %s\n", adv.Message())
+	}
 	if *target != "" {
 		sc.Target = *target
 	}
@@ -193,7 +199,11 @@ func importRunSpecWithStats(data []byte, format string) (runspec.RunSpec, *api.I
 	if sc.Target == "" {
 		sc.Target = "http://localhost:9000"
 	}
-	spec, err := scenariofile.Expand(sc)
+	// ExpandScaffold, not Expand: the importer deliberately emits REPLACE_ME_* secrets
+	// for every derived security scheme, and this is the scaffold the web import flow
+	// surfaces for the operator to fill. The placeholder gate fires when they RUN it, not
+	// here — gating at import would 400 every auth-carrying spec upload.
+	spec, err := scenariofile.ExpandScaffold(sc)
 	if err != nil {
 		return runspec.RunSpec{}, nil, err
 	}

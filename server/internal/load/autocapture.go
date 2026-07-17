@@ -2,6 +2,8 @@ package load
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -24,18 +26,60 @@ import (
 // AD-011: the returned token is a secret. DetectCredential never logs it, and the
 // caller folds it into a domain.Credential (whose Secret is json:"-").
 func DetectCredential(body []byte, setCookie []string) (token, subject string) {
+	token, subject, _ = DetectCredentialSource(body, setCookie)
+	return token, subject
+}
+
+// DetectCredentialSource is DetectCredential plus a machine-readable label of WHERE the
+// token came from: "body:<key>" (the response JSON key/path that matched) or
+// "cookie:<name>" (the credential-shaped Set-Cookie that carried it). The label is empty
+// when no token was detected. It is the seam both the auto-capture LOG (which names the
+// source, never the value — see LogAutoCaptureSource) and the preflight endpoint's
+// tokenSource field read, so the two agree on how a token's origin is described.
+//
+// AD-011: the token is a secret; the source label is NOT (it is a key/cookie NAME), so it
+// is safe to log and return in a report.
+func DetectCredentialSource(body []byte, setCookie []string) (token, subject, source string) {
 	var root any
 	if err := json.Unmarshal(body, &root); err != nil {
 		// Not JSON (an HTML error page, a bare cookie response): the body yields
 		// nothing, but a Set-Cookie may still carry a session token.
-		return tokenFromCookies(setCookie), ""
+		if v, name := tokenFromCookiesWithName(setCookie); v != "" {
+			return v, "", "cookie:" + name
+		}
+		return "", "", ""
 	}
-	token = detectToken(root)
+	token, key := detectByKeysWithLabel(root, tokenKeys, tokenPaths)
 	subject = detectByKeys(root, subjectKeys, subjectPaths)
-	if token == "" {
-		token = tokenFromCookies(setCookie)
+	if token != "" {
+		return token, subject, "body:" + key
 	}
-	return token, subject
+	// No body token: a Set-Cookie session cookie is the fallback source.
+	if v, name := tokenFromCookiesWithName(setCookie); v != "" {
+		return v, subject, "cookie:" + name
+	}
+	return "", subject, ""
+}
+
+// LogAutoCaptureSource emits ONE slog.Info line naming where an auto-detected token came
+// from — the response body key, or the Set-Cookie name — and NEVER the token value. It is
+// the visibility seam so an operator who never wrote an explicit capture can still see how
+// tmula authenticated (and, for a cookie token, how to replay it as a Cookie header). An
+// empty source (no auto-detection, e.g. an explicit capture path won) logs nothing.
+func LogAutoCaptureSource(source string) {
+	if source == "" {
+		return
+	}
+	kind, name, ok := strings.Cut(source, ":")
+	if !ok {
+		return
+	}
+	switch kind {
+	case "body":
+		slog.Info(fmt.Sprintf("auth: token auto-detected from response body key %q", name))
+	case "cookie":
+		slog.Info(fmt.Sprintf("auth: token auto-detected from Set-Cookie %q — replay it with a 'Cookie: %s={{.token}}' header if your API expects a cookie", name, name))
+	}
 }
 
 // DetectRefresh is the sibling auto-detector for the OAuth2 refresh grant data in
@@ -146,12 +190,6 @@ var subjectPaths = []string{
 	"user.id",
 }
 
-// detectToken finds the token by the ranked flat keys (deep, case-insensitive)
-// first, then the ranked nested paths.
-func detectToken(root any) string {
-	return detectByKeys(root, tokenKeys, tokenPaths)
-}
-
 // detectByKeys runs the shared ranked lookup: for each key in order, the first
 // non-empty string value found anywhere in the tree (up to maxDetectDepth) wins;
 // if no flat key matches, the ranked dotted paths are tried in order. The flat
@@ -159,17 +197,25 @@ func detectToken(root any) string {
 // "id" key without needing an explicit path; the path list covers only shapes a
 // flat key would mis-resolve.
 func detectByKeys(root any, keys, paths []string) string {
+	v, _ := detectByKeysWithLabel(root, keys, paths)
+	return v
+}
+
+// detectByKeysWithLabel is detectByKeys plus the key (or dotted path) that matched, so
+// a caller can report WHERE a value was found. The label is the ranked key/path itself
+// (e.g. "access_token" or "data.token") — a NAME, never the value — so it is safe to log.
+func detectByKeysWithLabel(root any, keys, paths []string) (value, label string) {
 	for _, key := range keys {
 		if v := firstStringByKey(root, key, maxDetectDepth); v != "" {
-			return v
+			return v, key
 		}
 	}
 	for _, p := range paths {
 		if v := stringAtPath(root, p); v != "" {
-			return v
+			return v, p
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // firstStringByKey returns the first non-empty string value reachable from node
@@ -279,19 +325,27 @@ var cookieTokenNames = []string{"session", "token", "jwt", "auth", "sid"}
 // cookie (name containing session/token/jwt/auth/sid) and returns its value. It
 // parses only the name=value pair, ignoring attributes (Path, HttpOnly, …).
 func tokenFromCookies(setCookie []string) string {
+	v, _ := tokenFromCookiesWithName(setCookie)
+	return v
+}
+
+// tokenFromCookiesWithName is tokenFromCookies plus the matched cookie NAME, so a caller
+// can report which Set-Cookie carried the session token (never the value). It returns
+// ("","") when no credential-shaped cookie is present.
+func tokenFromCookiesWithName(setCookie []string) (value, name string) {
 	for _, raw := range setCookie {
-		name, value := parseCookieNameValue(raw)
-		if value == "" {
+		n, v := parseCookieNameValue(raw)
+		if v == "" {
 			continue
 		}
-		lower := strings.ToLower(name)
+		lower := strings.ToLower(n)
 		for _, want := range cookieTokenNames {
 			if strings.Contains(lower, want) {
-				return value
+				return v, n
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // parseCookieNameValue extracts the name and value from a single Set-Cookie header

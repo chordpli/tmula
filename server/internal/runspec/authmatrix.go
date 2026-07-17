@@ -76,8 +76,9 @@ type authCapability struct {
 
 // authMatrix maps each credential strategy onto its distributed-run capability.
 // CredPool's message covers the inline-entries case (a source-backed pool takes
-// the carve-out before this table is consulted). login shares the same generic
-// inline message — a minted token is an inline secret the fan-out cannot resolve.
+// the carve-out before this table is consulted). login carries its OWN message —
+// a login flow may carry secrets the fan-out cannot ship — and points the operator
+// at the two strategies that CAN distribute (mint's key reference or a source pool).
 // mint ALLOWS workers (it ships only a key reference; P4). bootstrap/exec carry
 // strategy-specific messages naming why each cannot distribute.
 var authMatrix = map[domain.CredentialStrategy]authCapability{
@@ -85,7 +86,7 @@ var authMatrix = map[domain.CredentialStrategy]authCapability{
 		WorkerRejection: "api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)",
 	},
 	domain.CredLogin: {
-		WorkerRejection: "api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)",
+		WorkerRejection: "api: the \"login\" strategy is not supported with distributed workers (a login flow may carry secrets the fan-out cannot ship); use the \"mint\" strategy (a key reference each worker resolves locally) or a pre-issued credential source pool",
 	},
 	domain.CredBootstrapSignup: {
 		WorkerRejection: "api: the \"bootstrap-signup\" strategy is not supported with distributed workers (a bootstrap pool provisions per-node accounts and has no shared reference to fan out; distributed bootstrap is a follow-up)",

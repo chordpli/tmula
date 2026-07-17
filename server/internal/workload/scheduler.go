@@ -82,12 +82,19 @@ type Result struct {
 	// Dropped is the number of arrivals shed by back-pressure (the cap was full).
 	// A non-zero value is the observable signal that demand exceeded capacity.
 	Dropped int
-	// SetupErrors is the number of admitted sessions that could not even start
-	// (the graph references an unknown API template). Setup is deterministic and
-	// identical for every session, so this is all-or-nothing: when it is non-zero
-	// the graph is misconfigured and Run returns an error rather than reporting a
-	// healthy-looking empty run.
+	// SetupErrors is the number of admitted sessions that could not even start —
+	// either the graph references an unknown API template (deterministic, so it fails
+	// every session and Run returns an error rather than reporting a healthy empty run),
+	// or the session's credential could not be acquired (per-index, so SOME sessions can
+	// fail while others authenticate and run). In the latter case Total > 0 and the run
+	// still completes: the OPEN model SKIPS a session it cannot authenticate and keeps
+	// going, unlike the CLOSED model which aborts the whole run on the first auth-setup
+	// failure. The orchestrator surfaces a non-zero SetupErrors as a run note (and, past a
+	// threshold, a finding) so the skipped sessions are never silently swallowed.
 	SetupErrors int
+	// FirstSetupError is one representative setup failure (the first observed), so the
+	// orchestrator's note names an actionable cause. Nil when SetupErrors is zero.
+	FirstSetupError error
 }
 
 // Scheduler runs an open workload: it launches sessions over time as a Poisson
@@ -293,11 +300,12 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 	wg.Wait()
 
 	res := Result{
-		Stats:       collector.Snapshot(),
-		Findings:    agg.Classify(opts.RunID, opts.Classify),
-		Launched:    int(atomic.LoadInt64(&launched)),
-		Dropped:     int(atomic.LoadInt64(&dropped)),
-		SetupErrors: int(atomic.LoadInt64(&setupErr)),
+		Stats:           collector.Snapshot(),
+		Findings:        agg.Classify(opts.RunID, opts.Classify),
+		Launched:        int(atomic.LoadInt64(&launched)),
+		Dropped:         int(atomic.LoadInt64(&dropped)),
+		SetupErrors:     int(atomic.LoadInt64(&setupErr)),
+		FirstSetupError: firstSetupErr,
 	}
 	// Sessions were admitted but not one produced an observation because they all
 	// failed to start: the graph is misconfigured. Surface it as an error so the

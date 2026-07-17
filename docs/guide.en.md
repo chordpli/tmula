@@ -25,6 +25,10 @@ You do not need to read this top to bottom. If you only want to *run something*,
 7. [Reading the results](#reading-the-results)
 8. [Importing OpenAPI / HAR](#importing-openapi--har)
 9. [Authenticated runs](#authenticated-runs)
+   - [Which auth strategy? (start here)](#which-auth-strategy-start-here)
+   - Strategies: [pool](#strategy-pool-pre-supplied-credentials) · [login](#strategy-login-mint-a-token-at-run-time) · [bootstrap-signup](#strategy-bootstrap-signup-provision-real-accounts) · [mint](#strategy-mint-self-issue-a-jwt-locally) · [exec](#strategy-exec-bring-your-own-token--escape-hatch)
+   - [Session-cookie auth](#session-cookie-auth) · [Why secrets stay in-process](#why-secrets-stay-in-process)
+   - [Web OAuth2 guide · basic/apiKey import · what's deferred](#web-oauth2-guide--basicapikey-import--whats-deferred) · [What happens with a refresh token](#what-happens-with-a-refresh-token)
 10. [Distributed mode](#distributed-mode)
 11. [Safety](#safety)
 12. [The example domains](#the-example-domains)
@@ -131,7 +135,7 @@ make build   # Go binary only - fast, but the UI is a placeholder page
 
 ## The web console, field by field
 
-The console (<http://localhost:8080> after `make web`) has three configuration cards: **Target**, **Load model**, and **Scenario**, then a **Run** button and a live view. The help text quoted below is the actual UI copy from `web/src/i18n.ts`. Every `?` Help tooltip is reproduced where relevant.
+The console (<http://localhost:8080> after `make web`) has four configuration cards: **Target**, **Load model**, **Scenario**, and **Auth**, then a **Run** button and a live view. The help text quoted below is the actual UI copy from `web/src/i18n.ts`. Every `?` Help tooltip is reproduced where relevant.
 
 The fastest start: in the **Scenario** card click **Start from a template** and pick **Branching shop**, **Concert tickets**, **Health check**, or **API read flow**. That fills the graph, templates, start node, and max steps for you (the ticketing preset also switches the Base URL to `http://localhost:9100`). Then tweak and Run.
 
@@ -175,6 +179,46 @@ The fastest start: in the **Scenario** card click **Start from a template** and 
 | **Scenario graph** (JSON) | Nodes + weighted edges. *Advanced.* | use a preset | A dependency edge must complete before its target runs. See [Scenario graph](#scenario-graph). |
 | **API templates** (JSON) | The request each node sends: method, path, optional payload. *Advanced.* | use a preset | See [API templates](#api-templates). |
 | **Import** | Turn an OpenAPI spec, a HAR recording, or an access log into the graph + templates (logs come with an [import coverage report](#learning-a-graph-from-an-access-log)). | upload or paste | See [Importing OpenAPI / HAR](#importing-openapi--har). |
+
+### Card: Auth
+
+> *"How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts."*
+
+One radio group: the everyday entry points first, the expert paths folded behind an **Advanced** disclosure. Every entry compiles onto one of the [credential strategies](#authenticated-runs); templates reference the assigned credential as `{{.token}}` (tmula never auto-adds a header).
+
+| UI label | Strategy | Pick it when |
+|----------|----------|--------------|
+| **None** | — | Run anonymously — no credentials are sent. |
+| **I already have tokens** | [pool](#strategy-pool-pre-supplied-credentials) | You hold pre-issued bearer tokens / API keys — paste one, a list, or upload a file. |
+| **Log in to get tokens** | [login](#strategy-login-mint-a-token-at-run-time) | The service has a login endpoint. The simple form assembles the login body from **Username** / **Password** inputs (the body's field names are overridable), so first contact needs no JSON authoring; the raw body lives behind Advanced. |
+| **It's an OAuth2 service** | login, guided | Your IdP speaks OAuth2 — answer two questions and the guide assembles the flow ([below](#the-oauth2-guided-mode)). |
+| **Create test accounts** | [bootstrap-signup](#strategy-bootstrap-signup-provision-real-accounts) | A non-production sandbox where each virtual user should be a real, freshly provisioned account (torn down after). |
+| **Sign a token locally (self-issued JWT)** *(Advanced)* | [mint](#strategy-mint-self-issue-a-jwt-locally) | You hold the JWT signing key. Not for Auth0/Cognito/Firebase — the IdP holds the key, and the console warns when an imported spec says so. |
+| **Run a command for the token (escape hatch)** *(Advanced)* | [exec](#strategy-exec-bring-your-own-token--escape-hatch) | Last resort — a local command prints the token. Gated behind the server's `--allow-exec`. |
+
+Three helpers live on the card:
+
+- **Generate accounts from a pattern** (on the pool/login panels): fill a subject and secret template with `{{.userIndex}}` plus a count, and the rows are generated straight into the credential box. This materializes **in the browser**, so it is capped at **10,000 rows** — for a larger pool declare [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) in a CLI scenario file (generated server-side) and see [Taking a web-authored run to the CLI](#taking-a-web-authored-run-to-the-cli).
+- **Test login** (the label follows the panel: **Test signup** on bootstrap, **Test token** on pool/mint): a preflight that executes the auth config **once** before you commit to a run — the login flow runs once, a pool entry is parsed, a mint key is resolved and a token signed (`POST /api/auth/preflight`). It reports the HTTP status, where the token was detected (a body key or a cookie), and a redacted token prefix — so an unfilled secret or a failed capture costs one click, not a run full of 401s.
+- **Token expiry feedback** (pool): pasting JWTs into the token box decodes them in the browser and warns, as you register them, when a token is already expired — or will expire before the configured run duration ends.
+
+#### The OAuth2 guided mode
+
+The guide asks for two things and assembles the login flow (reviewable as **Generated login flow (JSON)** under Advanced; changing an answer regenerates it):
+
+1. **Token URL** — the endpoint that issues tokens (e.g. `https://idp.example.com/oauth/token`). Two shortcuts fill it for you:
+   - **Issuer URL → Fetch endpoints**: paste the IdP's base URL and tmula fetches `<issuer>/.well-known/openid-configuration` **server-side** and fills the token URL from its `token_endpoint`. The issuer's host must be on the run's allowlist.
+   - An imported `openIdConnect` spec surfaces its **discovery URL** right here — same `token_endpoint` route.
+2. **How do you log in?** — four answers, each mapping onto an OAuth2 grant:
+
+| Answer | OAuth2 grant | What tmula does |
+|--------|--------------|-----------------|
+| **With a username and password** | `password` | Each virtual user logs in with its own account (or one shared account); an optional `username,password` CSV logs in many distinct users. |
+| **With a client key (server-to-server)** | `client_credentials` | One machine token (client_id + client_secret) shared by every session (`scope: shared`). |
+| **I'm already logged in on an app or browser** | `refresh_token` | Paste a refresh token copied once from the app/devtools; tmula exchanges it for fresh access tokens all run long. **This is the answer for authorization-code / consent-screen services** (Auth0, Cognito, social login) — the human consent happened once, outside tmula, and the refresh token is what it left behind. |
+| **I only have an access token** | — (becomes a pool) | Applied as a one-entry token pool via **Use as a token pool**. No refresh: a long run starts failing when it expires. |
+
+Optional fields: **Client ID** / **Client secret** (sent as `client_id`/`client_secret`; the secret is stored in the run's spec like any login body — prefer a throwaway test client) and **Scope** (space-separated). What a refresh token does mid-run — including rotation-on-use — is covered in [What happens with a refresh token](#what-happens-with-a-refresh-token).
 
 When you press **Run**, the console assembles a [RunSpec](#the-full-runspec) and POSTs it. Two things happen automatically: it sends `users: []` plus a `userCount` for closed runs (so a huge run is a tiny request body, and the server synthesizes `u0..uN-1`), and it sizes the safety `rateCap` to your configured load. You never write those by hand in the UI.
 
@@ -268,6 +312,8 @@ A **map** keyed by template id, in the console's "API templates" editor and the 
 - `{{.var}}`: a value from a virtual user's own `vars` map (when you supply per-user objects in a RunSpec).
 - `{{.token}}`: the credential secret assigned to this user/session (only present on an [authenticated run](#authenticated-runs)).
 - `{{.subject}}`: the credential's non-sensitive subject (e.g. a username).
+- `{{.username}}` / `{{.password}}`: **login-flow bodies only** — the credential row the current virtual user is logging in as (`subject` = username, `token` = password). See [Log in N distinct accounts](#log-in-n-distinct-accounts-rows-as-credentials).
+- `{{.userIndex}}`: the virtual user's number, in the **auth templates** — login/signup flow bodies, mint `subject`/`claims`, exec `command`/`env`, and `usersPattern` — for predictable per-user identities like `user{{.userIndex}}`.
 
 A common authenticated header is `"Authorization": "Bearer {{.token}}"`.
 
@@ -471,7 +517,7 @@ segments:
 
 # Optional auth - see "Authenticated runs":
 auth:
-  strategy: pool                  # pool (pre-supplied) | login (mint at run time) | bootstrap-signup (provision)
+  strategy: pool                  # pool (pre-supplied) | login (mint at run time) | bootstrap-signup (provision) | mint (self-sign) | exec (BYO command)
   users:
     - { subject: alice, token: jwt-aaa }
     - { subject: bob,   token: jwt-bbb }
@@ -525,7 +571,7 @@ findings:
 | `thinkMs` | `[min, max]` | Think-time range (must be exactly two ints, else `open.thinkMs must be [min, max]`). |
 | `maxConcurrency` | int | Back-pressure cap. |
 
-**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, or `bootstrap-signup`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }` (mutually exclusive with `users`). For `login`: `login.flow`, `login.capture.token` (required), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool).
+**`auth` fields**: see [Authenticated runs](#authenticated-runs). `strategy` is `pool` (default), `login`, `bootstrap-signup`, `mint`, or `exec`. For `pool`: `users` is a list of `{ subject, token }`, or `source: { file, env, format }`, or `usersPattern: { subject, token, count }` (the three are mutually exclusive). For `login`: `login.flow`, `login.capture.token` (optional; empty = auto-detected), `login.capture.subject` (optional), `login.scope` (`per-user` | `shared`). For `bootstrap-signup`: `signup.flow`, `signup.capture.token`, `signup.teardown` (optional), and `keepAccounts` (bool). For `mint`: the [mint block](#strategy-mint-self-issue-a-jwt-locally). For `exec`: the [exec block](#strategy-exec-bring-your-own-token--escape-hatch) (opt-in gated).
 
 **`findings` fields** (every field optional; a `0`/omitted value keeps its default)
 
@@ -1082,7 +1128,27 @@ use the defaults (auto-detection included).
 
 To make simulated traffic carry real auth material, attach a **credential pool**. Each closed virtual user (by **user index**) or open session (by **session/arrival index**) is assigned a credential, wrapping around when there are more users than entries. Reference it from a template header (`"Authorization": "Bearer {{.token}}"`), or use `{{.subject}}` for the non-sensitive principal.
 
-There are four credential strategies. Pick the one that fits your service.
+There are five credential strategies. Pick the one that fits your service.
+
+### Which auth strategy? (start here)
+
+Key the choice on what you already **have**:
+
+| You have… | Strategy | Realism | Setup cost | IdP load | Distributed workers | Web-console path |
+|-----------|----------|---------|------------|----------|---------------------|------------------|
+| **A pile of tokens** (pre-issued bearer tokens / API keys) | [pool](#strategy-pool-pre-supplied-credentials) | Medium — static tokens, no issuance traffic | Lowest — paste or point at a file | None | ✅ via an external `source` (file/env reference) | **I already have tokens** |
+| **A login endpoint + accounts** | [login](#strategy-login-mint-a-token-at-run-time) | High — every token is really issued | Low — one flow step + credentials | Prewarm, parallel but bounded (≤ 16 concurrent) | ❌ in-process only | **Log in to get tokens** |
+| **The JWT signing key** (self-issued tokens) | [mint](#strategy-mint-self-issue-a-jwt-locally) | High — real per-user JWTs, no login traffic | Medium — key reference + claims | None | ✅ ships only the key reference | **Sign a token locally** (Advanced) |
+| **An OAuth2 IdP** | login, assembled by the [web OAuth2 guide](#web-oauth2-guide--basicapikey-import--whats-deferred) | High | Low — answer two questions | Prewarm, bounded (≤ 16) | ❌ in-process only | **It's an OAuth2 service** |
+| **Only a CLI that prints tokens** | [exec](#strategy-exec-bring-your-own-token--escape-hatch) | Depends on the command | Medium — `--allow-exec` opt-in | None (unless the command calls one) | ❌ in-process only | **Run a command for the token** (Advanced) |
+
+And by **goal**:
+
+- **Auth0 client-credentials (machine token)** → the web [OAuth2 guided mode](#web-oauth2-guide--basicapikey-import--whats-deferred), answering "With a client key" — or the [client_credentials worked example](#client_credentials-shared-machine-token).
+- **Log in a 50k-user CSV** → [login + `source` rows](#log-in-n-distinct-accounts-rows-as-credentials) (one row = one account).
+- **The login sets a session cookie, not a body token** → [Session-cookie auth](#session-cookie-auth).
+- **Per-user JWTs without an IdP** → [mint](#strategy-mint-self-issue-a-jwt-locally) (you must hold the signing key).
+- **I only have an issuer URL** → the OAuth2 guide's issuer discovery (**Fetch endpoints** fills the token URL from `/.well-known/openid-configuration`).
 
 ### Strategy: pool (pre-supplied credentials)
 
@@ -1135,6 +1201,33 @@ auth:
 
 > **Large pool files.** The external-source file cap is 512 MiB by default and parsed by streaming (a 300k-JWT JSONL of ~300–450 MB loads fine). `auth.source.maxBytes` moves the cap (positive only — the cap always stands). Login prewarm runs in parallel but bounded to `RateCap.MaxConcurrency` (at most 16) so it never load-tests the IdP.
 
+#### Taking a web-authored run to the CLI
+
+The browser cap is the signal to switch: when a pattern pool needs more than 10,000 rows (or you want the run in CI), carry the exact run you authored in the console over to a scenario file. The console's two JSON editors are already in scenario-file shape:
+
+1. Copy the **Scenario graph** editor's JSON into a file's `graph:` block and the **API templates** editor's JSON into `templates:` (the [graph-first scenario form](#graph-first-scenario-files)); copy the **Start node** and **Max steps** fields into `start:` / `maxSteps:`.
+2. Move the auth block: re-declare what the Auth card configured under `auth:` — for a pattern pool that is the `usersPattern` block, now free of the browser cap.
+3. Raise `usersPattern.count` past 10,000 (the file path materializes it server-side at Expand).
+4. `tmula run scenario.yaml`.
+
+```yaml
+target: http://localhost:9000        # the console's Base URL
+start: browse                        # the console's Start node
+maxSteps: 12                         # the console's Max steps
+graph: { }        # ← paste the Scenario graph editor's JSON here
+templates: { }    # ← paste the API templates editor's JSON here
+auth:
+  strategy: login
+  usersPattern: { subject: "user{{.userIndex}}", token: "pw-{{.userIndex}}", count: 100000 }
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+```
+
+Two differences from the console to remember: the file path **defaults the allowlist to the target's host** (the console makes you type it into both fields), and the pasted JSON is valid as-is inside the YAML file (YAML is a JSON superset).
+
 ### Strategy: login (mint a token at run time)
 
 Use when the service issues tokens through a login endpoint:
@@ -1149,12 +1242,52 @@ auth:
         body: '{"username":"u1","password":"p1"}'
         extract: { tok: "$.access_token" }
     capture:
-      token: tok          # required: which extracted variable becomes {{.token}}
+      token: tok          # optional: which extracted variable becomes {{.token}} (empty/omitted = auto-detected)
       subject: uid        # optional: which variable becomes {{.subject}}
     scope: per-user       # per-user (default) | shared (client_credentials)
 ```
 
-tmula walks the login flow once per virtual user (`per-user`) or once for all sessions (`shared`), captures the token, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (re-runs the login) and retries; that refresh traffic is excluded from findings. Login runs are **in-process only** — rejected against a remote `--engine` and distributed workers.
+tmula walks the login flow once per virtual user (`per-user`) or once for all sessions (`shared`), captures the token, and sends it as `{{.token}}`. On a 401 mid-run it refreshes once (a real refresh-token exchange when one can be derived, else a re-login — see [What happens with a refresh token](#what-happens-with-a-refresh-token)) and retries; that refresh traffic is excluded from findings. Login runs are **in-process only** — rejected against a remote `--engine` and distributed workers.
+
+> **Login prewarm and your IdP.** All per-user logins run up front (the *prewarm*), in parallel but bounded to the run's `RateCap.MaxConcurrency` capped at **16 concurrent logins** — so a 10,000-user run never turns into a login load test against your IdP. If the IdP still rate-limits, see the [FAQ entry on 429s during prewarm](#troubleshooting--faq).
+
+#### Log in N distinct accounts (rows as credentials)
+
+The block above logs in **one** identity. To make every virtual user a *different* account, add credential **rows** — for the login strategy a row is a login *input*: `subject` = username, `token` = password. Virtual user *i* logs in with row *i* (wrapping), and the login body references the row via `{{.username}}` / `{{.password}}`:
+
+```yaml
+auth:
+  strategy: login
+  source:
+    file: users.csv         # rows of subject,token → username,password
+    format: csv
+  login:
+    flow:
+      - id: signin
+        request: POST /auth/token
+        body: '{"username":"{{.username}}","password":"{{.password}}"}'
+    # capture omitted: the token is auto-detected from the response
+```
+
+No file? [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) generates the rows instead — its `subject`/`token` templates become the username/password here (`user{{.userIndex}}` / `pw-{{.userIndex}}`), so "50,000 patterned accounts, each really logging in" is three lines of YAML.
+
+#### client_credentials (shared machine token)
+
+For a service principal (server-to-server) there is one identity for the whole run: a **form-encoded** `grant_type=client_credentials` exchange with `scope: shared`, so tmula logs in once and every session reuses that token:
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: token
+        request: POST /oauth/token
+        headers: { Content-Type: application/x-www-form-urlencoded }
+        body: "grant_type=client_credentials&client_id=REPLACE_ME_CLIENT_ID&client_secret=REPLACE_ME_CLIENT_SECRET"
+    scope: shared
+```
+
+Add `&scope=read+write` when your IdP scopes the token. Some IdPs require extra parameters — **Auth0 requires `audience`** (`&audience=https://api.example.com`) or it returns an error instead of a token.
 
 ### Strategy: bootstrap-signup (provision real accounts)
 
@@ -1201,6 +1334,30 @@ auth:
 
 mint **can fan out to distributed workers** — only the key **reference** rides on the ShardSpec, and each worker resolves the same key locally and signs per global index. Prerequisite: the referenced key (env/file) must be deployed identically on every worker node; a worker that cannot resolve it fails its shard with a clear runtime error instead of running unauthenticated. **Caution:** mint cannot be used for a service whose signing key the IdP holds (Auth0/Cognito/Firebase) — the issued token would be rejected; use the login strategy or the web OAuth2 guide there. The web console shows a warning banner when you pick mint after importing such a managed-IdP spec.
 
+### Strategy: exec (bring your own token — escape hatch)
+
+Use when nothing above fits but a **local command** can print a token — a vendor CLI already mints them (`aws`, `gcloud`, `vault`, a custom SDK helper), or the auth dance is something tmula cannot model declaratively. tmula runs the command once per virtual user and its stdout becomes `{{.token}}`:
+
+```yaml
+auth:
+  strategy: exec
+  exec:
+    command: ["vault", "token", "create", "-field=token"]  # argv - NOT a shell string
+    env: { VAULT_ADDR: "https://vault.internal:8200" }     # secrets belong here, not in argv
+    timeout: 10s            # optional per-invocation bound (a sane default applies)
+    maxOutputBytes: 65536   # optional stdout cap (a sane default applies)
+```
+
+`command` elements and `env` values may reference `{{.userIndex}}`, so each virtual user can mint its own identity. The command is executed argv-only — **no shell**, so a metacharacter in an argument is passed literally.
+
+**Security caveats — read before using:**
+
+- exec runs an **arbitrary local command**. A scenario file alone never executes anything: the run is rejected unless the operator opts in with the **`--allow-exec`** flag (`tmula run --allow-exec`, or `WithAllowExec` on an embedded server). Off by default.
+- The command's network egress is **outside the safety guard** — whatever it talks to is bound by neither the target allowlist nor the rate cap. Point it only at infrastructure you trust it with.
+- Keep secrets in `env` values (which may reference host env), never in `command` — argv is visible to `ps`.
+
+exec is **in-process only**: like login and bootstrap-signup it is rejected against a remote `--engine` and with distributed workers. Prefer any declarative strategy when one fits — exec is the escape hatch, not the default.
+
 ### Session-cookie auth
 
 For a service whose login returns the credential as a `Set-Cookie` rather than a body token, leave the capture empty and the response's session cookie (a `session`/`token`/`jwt`/`auth`/`sid`-style name) is auto-captured as the credential secret. The scenario replays it as a Cookie header.
@@ -1230,11 +1387,21 @@ The domain `Credential.Secret` field carries `json:"-"`, so the secret is **neve
 
 **Constraints** (from validation): a credential pool **cannot** be combined with distributed workers unless the pool is an external source or the mint strategy (both ship only a secret-free reference). Inline `users`, usersPattern, login, bootstrap-signup, and exec are all rejected with workers. The open workload model is in-process only regardless of auth strategy.
 
+**What IS stored: login-flow bodies.** The `json:"-"` guarantee covers the *captured or minted* credential secret. It does **not** cover secrets you author into a flow body: a `client_credentials` client_secret, a pasted refresh token, or a username/password login body is part of the run spec like any other template body — it rides in the RunSpec, lives in engine memory for the run's lifetime, and is visible in the spec stored on the control plane (the web OAuth2 guide says as much next to its Client secret field). Keep the blast radius small: use a **throwaway test client** for client_credentials, keep per-user passwords out of the file with `--auth-source env:VAR` / an external `source`, or generate them with [`usersPattern`](#generate-accounts-from-a-pattern-userspattern) (the secret template materializes at Expand, and the materialized secrets are `json:"-"`-masked).
+
 ### Web OAuth2 guide · basic/apiKey import · what's deferred
 
 - **OAuth2 web guide.** For a service that only speaks OAuth2, the web console's "It's an OAuth2 service" entry assembles the login flow for you: answer the token URL and how you log in (username/password · client key · paste a refresh token · access token only). For services that need a human consent screen (Auth0/Cognito/social login), the right path is to copy a refresh token once from the app/devtools and paste it. (Note: a client_secret or pasted refresh token is stored in the run's spec like any login body, so prefer a throwaway test client for client_credentials.)
-- **basic auth / apiKey import.** Importing an OpenAPI/Swagger spec derives http `basic` (→ an `Authorization: Basic {{basicAuth .subject .token}}` header + a username/password pool), `apiKey` in query (→ `?name={{.token|urlquery}}` appended to the path), and `apiKey` in cookie (→ a `Cookie: name={{.token}}` header). Fill the `REPLACE_ME` and run. An `openIdConnect` scheme surfaces its discovery URL as an advisory; the web points you to paste its token_endpoint into the OAuth2 guide.
-- **PKCE / device-code are deferred.** The human-consent authorization-code + PKCE and device-code flows (in-app browser, social, MFA) are **not supported** — they aren't a headless-automation target. Workarounds: the OAuth2 guide's **paste-a-refresh-token** path (log in as a human once, copy the refresh token), a pre-issued token pool, or exec (a bring-your-own-token command) as a last resort.
+- **basic auth / apiKey import.** Importing an OpenAPI/Swagger spec derives http `basic` (→ an `Authorization: Basic {{basicAuth .subject .token}}` header + a username/password pool), `apiKey` in query (→ `?name={{.token|urlquery}}` appended to the path), and `apiKey` in cookie (→ a `Cookie: name={{.token}}` header). Fill the `REPLACE_ME` and run — Expand **rejects** an auth block still carrying a literal `REPLACE_ME`, with an error naming the exact field, so an unfilled secret fails fast instead of 401ing mid-run. An `openIdConnect` scheme surfaces its discovery URL as an advisory; the web points you to paste its token_endpoint into the OAuth2 guide.
+- **PKCE / device-code are deferred.** The human-consent authorization-code + PKCE and device-code flows (in-app browser, social, MFA) are **not supported** — they aren't a headless-automation target. Workarounds: the OAuth2 guide's **paste-a-refresh-token** path (log in as a human once, copy the refresh token), a pre-issued token pool, or [exec](#strategy-exec-bring-your-own-token--escape-hatch) (a bring-your-own-token command) as a last resort.
+
+#### What happens with a refresh token
+
+When the login is an OAuth2 **form grant** (`grant_type=…` in a form-encoded body), tmula auto-derives a real refresh exchange from it: a `grant_type=refresh_token&refresh_token={{.refreshToken}}` POST to the same token endpoint (an explicit `login.refresh` override wins over the auto-derivation and works for JSON-body logins too). The refresh token is captured from the login response at run time and never authored in the file. The lifecycle in practice:
+
+- **The 401 one-retry interplay.** Mid-run, a request that 401s triggers **one** refresh — the derived `refresh_token` exchange when there is one, else the re-login fallback — and one retry of the failed request. The refresh/re-login traffic is excluded from findings.
+- **Per-user vs shared scope.** With `scope: per-user` every virtual user holds its own access + refresh token pair and refreshes independently. With `scope: shared` (client_credentials style) there is one credential: a single refresh rotates the token every session uses.
+- **Rotation-on-use.** Many IdPs (Auth0 with rotation enabled, Cognito, most consumer services) **rotate the refresh token on every exchange** — the response carries a *new* refresh token and invalidates the old one. tmula handles this: each exchange stores the rotated (or carried-forward) refresh token for the next one. But it also means the refresh token you pasted into the web OAuth2 guide may be **single-use**: don't reuse the same pasted value in a second concurrent run, and expect the app you copied it from to be logged out once tmula's first refresh consumes it.
 
 ---
 
@@ -1268,6 +1435,8 @@ Because tmula deliberately concentrates traffic, a misfire would be a self-infli
 - **Environment class.** `envClass` is `dev`, `staging`, or `prod-locked`. A `prod-locked` target is refused unless explicitly unlocked (`safety: target env is prod-locked; explicit unlock required (policy §1)`).
 
 Together these mean a run cannot reach a host you did not list, cannot exceed the rate/concurrency you set, can always be stopped, and cannot accidentally hit production.
+
+For how **credentials** are treated — what never serializes, and what *does* ride in a run spec (login-flow bodies such as a client_secret or password) — see [Why secrets stay in-process](#why-secrets-stay-in-process) and its "What IS stored" caveat. Note also that the [exec strategy](#strategy-exec-bring-your-own-token--escape-hatch)'s command egress runs outside these guards, behind its own `--allow-exec` opt-in.
 
 ---
 
@@ -1334,3 +1503,15 @@ That is usually a *real* bug in the system under test, and in the example domain
 
 **Q: My authenticated run "works" against a remote `--engine` but carries no token.**
 It can't, and the run path refuses it: a credential pool against a remote `--engine` is rejected because the secret cannot cross the wire (`json:"-"`). Run in-process (`tmula run` with an `auth:` block, no `--engine`) to authenticate.
+
+**Q: Every request on my authenticated run 401s.**
+Work down this list. (1) In the web console, hit **Test login** first — it executes the auth config once and reports the status, where the token was detected, and a redacted prefix, so a broken login costs one click. (2) A literal `REPLACE_ME` left in the auth block: scenario Expand now **rejects** it with an error naming the exact field — so if the run started at all, this isn't it, but re-check after edits. (3) `{{.token}}` is not wired into any template: the pool injects nothing by itself; a step must reference it in a `headers` block (`"Authorization": "Bearer {{.token}}"` — with the dot). (4) The login captured no token: an unusual response shape needs an explicit `auth.login.capture.token`, and a cookie-based session needs the `Cookie: session={{.token}}` header (see [Session-cookie auth](#session-cookie-auth)).
+
+**Q: My IdP rate-limits (429) during the login prewarm.**
+Per-user logins prewarm in parallel but bounded to the run's `rateCap.maxConcurrency`, capped at 16 concurrent logins — so first lower `rateCap.maxConcurrency` to slow the prewarm burst. If the IdP still throttles, switch to `scope: shared` (one client_credentials token for every session), or take the IdP out of the hot path entirely: [mint](#strategy-mint-self-issue-a-jwt-locally) when you hold the signing key, or a pre-issued [pool](#strategy-pool-pre-supplied-credentials).
+
+**Q: The run starts fine, then requests begin failing after N minutes.**
+That is a token lifetime, not a load bug. Minted JWTs expire after `mint.ttl` — raise it past the run duration. Login tokens refresh on a 401 (one refresh + one retry per failing request; see [What happens with a refresh token](#what-happens-with-a-refresh-token)) — but if the IdP rotates refresh tokens on use and the pasted token was reused elsewhere, the rotation chain breaks and refreshes start failing. An access-token-only pool (the OAuth2 guide's "I only have an access token") has no refresh path at all — prefer a refresh token for runs longer than the token's lifetime.
+
+**Q: My minted JWTs are rejected (401 / invalid signature).**
+Three usual causes. (1) Wrong `secretEncoding` for HS256 — the same key body reads differently as `raw`, `base64`, or `base64url`; match how the service decodes its secret. (2) The service does not verify with a key you hold: a managed IdP (Auth0/Cognito/Firebase — any openIdConnect issuer) keeps the signing key, so a self-minted token can never verify; use [login](#strategy-login-mint-a-token-at-run-time) or the [web OAuth2 guide](#web-oauth2-guide--basicapikey-import--whats-deferred) instead (the console warns about exactly this). (3) Clock skew — the token is valid on your box but "not yet valid" on the server: set `mint.leeway`, and check `ttl` against the run length.

@@ -54,3 +54,20 @@ export function modeForEntry(entry: AuthEntry): AuthMode {
 export function isAdvancedAuthMode(mode: AuthMode): boolean {
   return ADVANCED_AUTH_ENTRIES.some((o) => o.entry === mode)
 }
+
+// entryPatch maps picking a UI entry onto the two form fields it sets: the wire
+// authMode and the UI-only authEntryOAuth2 flag (true only for the guide). It
+// deliberately touches NOTHING else — in particular not oauth2Guide — so switching
+// entry points and back preserves every guide answer.
+export function entryPatch(entry: AuthEntry): { authEntryOAuth2: boolean; authMode: AuthMode } {
+  return { authEntryOAuth2: entry === 'oauth2', authMode: modeForEntry(entry) }
+}
+
+// selectedEntry derives the radio to highlight from the form: the OAuth2 guide is
+// selected only while its flag is set AND the wire mode still matches what the
+// guide compiles onto (login). It self-heals exactly like the old component state:
+// whenever an import or a round-trip moves the wire mode elsewhere, the wire mode
+// wins and the guide's pseudo-entry deselects.
+export function selectedEntry(authMode: AuthMode, authEntryOAuth2: boolean): AuthEntry {
+  return authEntryOAuth2 && authMode === modeForEntry('oauth2') ? 'oauth2' : authMode
+}

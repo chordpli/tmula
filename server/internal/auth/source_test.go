@@ -350,9 +350,46 @@ func TestFileSourceOversizeKeepsErrorMessage(t *testing.T) {
 	if err == nil {
 		t.Fatal("a file over MaxBytes must be rejected")
 	}
-	want := `auth: file credential source "big.jsonl" exceeds the 10-byte limit`
+	want := `auth: file credential source "big.jsonl" exceeds the 10 B limit — raise it with auth.source.maxBytes`
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestHumanizeBytesRendersExactBinaryUnits pins the cap-error humanizer: the default
+// 512 MiB cap reads "512 MiB" (not "536870912-byte"), and a raw custom cap stays exact.
+func TestHumanizeBytesRendersExactBinaryUnits(t *testing.T) {
+	cases := []struct {
+		n    int64
+		want string
+	}{
+		{credSourceMaxBytes, "512 MiB"},
+		{1 << 30, "1 GiB"},
+		{1 << 20, "1 MiB"},
+		{9 << 20, "9 MiB"},
+		{1 << 10, "1 KiB"},
+		{10, "10 B"},
+		{0, "0 B"},
+	}
+	for _, tc := range cases {
+		if got := humanizeBytes(tc.n); got != tc.want {
+			t.Errorf("humanizeBytes(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestGeneratorCapErrorSuggestsAlternatives proves the generator's over-cap error
+// points the operator at the two ways to run a bigger pool (a source file, or a
+// distributed run) rather than just stating the ceiling.
+func TestGeneratorCapErrorSuggestsAlternatives(t *testing.T) {
+	_, err := NewGeneratorSource("u{{.userIndex}}", "pw-{{.userIndex}}", generatorMaxCount+1)
+	if err == nil {
+		t.Fatal("a count over the cap must be rejected")
+	}
+	for _, needle := range []string{"auth.source", "distribute the run across workers"} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Errorf("cap error should suggest %q, got %q", needle, err.Error())
+		}
 	}
 }
 
@@ -457,5 +494,39 @@ func TestGeneratorSourceRejectsBadInput(t *testing.T) {
 	}
 	if _, err := NewGeneratorSource("u{{.userIndex", "pw", 1); err == nil {
 		t.Error("a malformed template should be rejected at construction")
+	}
+}
+
+// TestGeneratorSourceErrorsAreLabelledUsersPattern proves a usersPattern template
+// failure names the usersPattern block — NOT "mint" — even though it shares the mint
+// package's template helper, and that a render failure appends the available-vocabulary
+// hint so an operator sees which variable they can use.
+func TestGeneratorSourceErrorsAreLabelledUsersPattern(t *testing.T) {
+	// A malformed template fails at construction and must be labelled usersPattern.
+	_, err := NewGeneratorSource("u{{.userIndex}}", "pw-{{.userIndex", 1)
+	if err == nil {
+		t.Fatal("a malformed secret template should be rejected at construction")
+	}
+	if !strings.Contains(err.Error(), "usersPattern secret template") {
+		t.Errorf("construction error should name usersPattern, got %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "mint ") {
+		t.Errorf("construction error must not mislabel a usersPattern template as mint: %q", err.Error())
+	}
+
+	// A render failure (undefined variable) must append the available-vocabulary hint.
+	badVar, cErr := NewGeneratorSource("u{{.userIndex}}", "pw-{{.wrongVar}}", 1)
+	if cErr != nil {
+		t.Fatalf("construction should not fail on a parseable-but-wrong var: %v", cErr)
+	}
+	_, lErr := badVar.Load(context.Background())
+	if lErr == nil {
+		t.Fatal("a render referencing an undefined variable should fail on Load")
+	}
+	if !strings.Contains(lErr.Error(), "usersPattern credential 0: render secret") {
+		t.Errorf("render error should name the usersPattern credential and field, got %q", lErr.Error())
+	}
+	if !strings.Contains(lErr.Error(), "only {{.userIndex}} is available in usersPattern templates") {
+		t.Errorf("render error should append the available-vocabulary hint, got %q", lErr.Error())
 	}
 }

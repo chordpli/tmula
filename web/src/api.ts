@@ -1,6 +1,36 @@
 // API helpers for the tmula control plane. Pure functions live here (and are
 // unit-tested) so the React component stays thin.
 
+import { dict, translate } from './i18n'
+
+// FormError is an Error that carries an i18n key (+ vars) alongside its message,
+// so the finite set of credential-parser / pattern-generator / auth-builder
+// errors can be rendered in the operator's language instead of surfacing as
+// hardcoded English in the ko UI. The message is the ENGLISH rendering of the
+// key, byte-identical to what these sites always threw, so non-UI callers
+// (tests, logs) read exactly what they always did. UI sites use localizeError.
+export class FormError extends Error {
+  key: string
+  vars?: Record<string, string | number>
+  constructor(key: string, vars?: Record<string, string | number>) {
+    super(translate(dict, 'en', key, vars))
+    this.name = 'FormError'
+    this.key = key
+    this.vars = vars
+  }
+}
+
+// localizeError renders an error for the UI: a FormError re-translates through
+// its i18n key with the ACTIVE language's t; anything else falls back to its
+// message (server errors are data and shown verbatim).
+export function localizeError(
+  e: unknown,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (e instanceof FormError) return t(e.key, e.vars)
+  return e instanceof Error ? e.message : String(e)
+}
+
 export interface ExperimentForm {
   baseUrl: string
   allowlist: string // comma-separated
@@ -134,6 +164,32 @@ export interface ExperimentForm {
   // bodies right before sending, so the ONLY thing the operator must fill after an
   // auto-detected import is the highlighted secret. Empty for hand-authored flows.
   replaceMeValues: Record<string, string>
+
+  // --- UI-only fields (NEVER serialized into the RunSpec) ----------------------
+  // The login QUICK FORM (first-contact path): Username/Password inputs that
+  // ASSEMBLE the JSON login body, so nobody authors JSON (or meets the inert
+  // {username}/{password} markers) on first contact. The field names default to
+  // username/password and are overridable behind Advanced. These fields only
+  // author loginBodyTemplate — they never cross the wire themselves.
+  loginQuickUser: string
+  loginQuickPass: string
+  loginQuickUserField: string // JSON field name for the username (default "username")
+  loginQuickPassField: string // JSON field name for the password (default "password")
+  // loginBodyGenerated marks that loginBodyTemplate was written by the quick form
+  // (or another assembler), so regenerating over it is safe. Cleared the moment
+  // the operator edits the raw body textarea — a hand-edited body is the source
+  // of truth and is never clobbered (same rule as the OAuth2 guide).
+  loginBodyGenerated: boolean
+  // authEntryOAuth2 remembers that the operator's Auth-card entry is the OAuth2
+  // guide — a pseudo-entry that compiles onto the 'login' wire mode, so it cannot
+  // be derived from authMode alone. Living on the form (instead of component
+  // state) lets the scenario doctor speak the guide's language and survives any
+  // unmount. buildRunSpec never reads it.
+  authEntryOAuth2: boolean
+  // oauth2Guide holds the OAuth2 guide's answers. Hoisted onto the form so
+  // switching entry points and back preserves every answer; compiled onto the
+  // login/pool fields via authFormFromOAuth2Guide. buildRunSpec never reads it.
+  oauth2Guide: OAuth2GuideForm
 }
 
 // AuthAuthoringMode picks how the login / signup material is authored: 'simple' is the
@@ -251,6 +307,91 @@ export interface MintSpec {
   ttl: string // Go duration string (e.g. "1h0m0s") the backend parses into a time.Duration
 }
 
+// LOGIN_BODY_SINGLE is the single-identity default login body — the SAME default
+// AUTH_FORM_DEFAULTS.loginBodyTemplate ships, so callers can detect an untouched
+// body. LOGIN_BODY_MULTI is the multi-user default: each virtual user logs in as
+// the NEXT credential-list row via the {{.username}}/{{.password}} Go-template
+// markers the backend exposes (NOT the inert single-brace markers).
+export const LOGIN_BODY_SINGLE = '{"username": "{username}", "password": "{password}"}'
+export const LOGIN_BODY_MULTI = '{"username": "{{.username}}", "password": "{{.password}}"}'
+
+// assembleLoginBody builds the JSON login body from the quick-form answers, so
+// first contact never requires authoring JSON by hand. With a credential list
+// (useRowMarkers) the body references the per-row {{.username}}/{{.password}}
+// markers; without one it inlines the literal values. Field names default to
+// username/password; everything is JSON-encoded properly, so a generated body
+// NEVER carries the inert single-brace {username}/{password} markers.
+export function assembleLoginBody(
+  userField: string,
+  passField: string,
+  username: string,
+  password: string,
+  useRowMarkers: boolean,
+): string {
+  const uf = userField.trim() || 'username'
+  const pf = passField.trim() || 'password'
+  const body: Record<string, string> = {}
+  body[uf] = useRowMarkers ? '{{.username}}' : username
+  body[pf] = useRowMarkers ? '{{.password}}' : password
+  return JSON.stringify(body)
+}
+
+// loginBodyOverwritable reports whether an assembler (the quick form, the curl
+// filler, the cred-list upgrade) may regenerate the login body without asking:
+// only over an empty body, the shipped defaults, or a body an assembler itself
+// generated (the loginBodyGenerated bit, cleared when the operator edits the raw
+// textarea). A hand-edited body is the source of truth — same no-clobber rule as
+// the OAuth2 guide.
+export function loginBodyOverwritable(body: string, generated: boolean): boolean {
+  const b = body.trim()
+  return generated || b === '' || b === LOGIN_BODY_SINGLE || b === LOGIN_BODY_MULTI
+}
+
+// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
+// guide: a username+password (password grant), a client key (client_credentials),
+// a refresh token pasted from an app/browser session (refresh_token — the answer
+// for human-consent services like Auth0/Cognito/social login), or just an access
+// token (no grant at all — becomes a token pool).
+export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
+
+// OAuth2GuideForm is the OAuth2 guide's own input state: an optional issuer URL
+// (for endpoint discovery), a token URL, plus the grant's fields. It lives on
+// ExperimentForm as a UI-ONLY field (never serialized into the RunSpec) so guide
+// answers survive switching entry points; authFormFromOAuth2Guide compiles it
+// onto the existing login/pool form fields, so the wire payload is untouched.
+export interface OAuth2GuideForm {
+  // issuer is the optional IdP base URL the operator pastes when they do NOT know
+  // their token URL; "Fetch endpoints" resolves it via the server's discovery
+  // proxy and fills tokenUrl. It never crosses into the run spec itself.
+  issuer: string
+  tokenUrl: string
+  grant: OAuth2Grant
+  username: string
+  password: string
+  // users is an optional multi-user CSV (username,password header + rows); when
+  // non-empty it wins over the single username/password identity.
+  users: string
+  clientId: string
+  clientSecret: string
+  scope: string
+  refreshToken: string
+  accessToken: string
+}
+
+export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
+  issuer: '',
+  tokenUrl: '',
+  grant: 'password',
+  username: '',
+  password: '',
+  users: '',
+  clientId: '',
+  clientSecret: '',
+  scope: '',
+  refreshToken: '',
+  accessToken: '',
+}
+
 // AUTH_FORM_DEFAULTS is the off (anonymous) baseline for the form's auth fields, so
 // the initial form, presets, and tests can spread one shared default instead of
 // repeating the 18 fields. authMode 'none' means no credentialPool is attached and
@@ -300,6 +441,13 @@ export const AUTH_FORM_DEFAULTS: Pick<
   | 'execEnvText'
   | 'execTimeoutSeconds'
   | 'replaceMeValues'
+  | 'loginQuickUser'
+  | 'loginQuickPass'
+  | 'loginQuickUserField'
+  | 'loginQuickPassField'
+  | 'loginBodyGenerated'
+  | 'authEntryOAuth2'
+  | 'oauth2Guide'
 > = {
   authMode: 'none',
   authPoolText: '',
@@ -307,7 +455,7 @@ export const AUTH_FORM_DEFAULTS: Pick<
   loginMode: 'simple',
   loginUrlMethod: 'POST',
   loginUrlPath: '',
-  loginBodyTemplate: '{"username": "{username}", "password": "{password}"}',
+  loginBodyTemplate: LOGIN_BODY_SINGLE,
   loginGraphJSON: '',
   loginTemplatesJSON: '',
   loginStart: '',
@@ -344,6 +492,13 @@ export const AUTH_FORM_DEFAULTS: Pick<
   execEnvText: '',
   execTimeoutSeconds: 30,
   replaceMeValues: {},
+  loginQuickUser: '',
+  loginQuickPass: '',
+  loginQuickUserField: 'username',
+  loginQuickPassField: 'password',
+  loginBodyGenerated: false,
+  authEntryOAuth2: false,
+  oauth2Guide: OAUTH2_GUIDE_DEFAULTS,
 }
 
 // CredentialPool is the wire shape the server reads to authenticate a run, matching
@@ -467,7 +622,7 @@ export function parseCredentials(format: CredFormat, body: string): CredentialEn
     case 'tokens':
       return parseCredsTokens(body)
     default:
-      throw new Error(`unknown credential format "${format}"`)
+      throw new FormError('err.credFormatUnknown', { format })
   }
 }
 
@@ -481,20 +636,20 @@ function parseCredsCSV(body: string): CredentialEntry[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map(splitCSVRow)
-  if (rows.length === 0) throw new Error('CSV credential text is empty')
+  if (rows.length === 0) throw new FormError('err.credCsvEmpty')
   const header = rows[0].map((h) => h.trim())
   const subjectIdx = header.indexOf('subject')
   const tokenIdx = header.indexOf('token')
-  if (tokenIdx < 0) throw new Error('CSV credentials need a "token" column header')
+  if (tokenIdx < 0) throw new FormError('err.credCsvNoTokenCol')
   const out: CredentialEntry[] = []
   for (const rec of rows.slice(1)) {
     if (tokenIdx >= rec.length || !rec[tokenIdx].trim()) {
-      throw new Error('a CSV row is missing its token column')
+      throw new FormError('err.credCsvRowMissingToken')
     }
     const subject = subjectIdx >= 0 && subjectIdx < rec.length ? rec[subjectIdx] : ''
     out.push(subject ? { subject, token: rec[tokenIdx] } : { token: rec[tokenIdx] })
   }
-  if (out.length === 0) throw new Error('CSV credentials have no data rows (need at least one credential)')
+  if (out.length === 0) throw new FormError('err.credCsvNoRows')
   return out
 }
 
@@ -543,16 +698,16 @@ function parseCredsJSONL(body: string): CredentialEntry[] {
     try {
       parsed = JSON.parse(line)
     } catch {
-      throw new Error('a JSONL credential line is not valid JSON')
+      throw new FormError('err.credJsonlBadJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('each JSONL credential line must be a {subject, token} object')
+      throw new FormError('err.credJsonlShape')
     }
     const { subject, token } = parsed as { subject?: unknown; token?: unknown }
-    if (typeof token !== 'string' || !token) throw new Error('a JSONL credential is missing its token')
+    if (typeof token !== 'string' || !token) throw new FormError('err.credJsonlMissingToken')
     out.push(subject ? { subject: String(subject), token } : { token })
   }
-  if (out.length === 0) throw new Error('JSONL credentials have no rows (need at least one credential)')
+  if (out.length === 0) throw new FormError('err.credJsonlNoRows')
   return out
 }
 
@@ -568,7 +723,7 @@ function parseCredsTokens(body: string): CredentialEntry[] {
     out.push({ token: line })
   }
   if (out.length === 0) {
-    throw new Error('token credentials have no non-blank line (need at least one credential)')
+    throw new FormError('err.credTokensEmpty')
   }
   return out
 }
@@ -595,7 +750,7 @@ export function parseLoginCredentials(format: LoginCredFormat, body: string): Cr
     case 'jsonl':
       return parseLoginCredsJSONL(body)
     default:
-      throw new Error(`unknown login credential format "${format}"`)
+      throw new FormError('err.loginCredFormatUnknown', { format })
   }
 }
 
@@ -608,23 +763,23 @@ function parseLoginCredsCSV(body: string): CredentialEntry[] {
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .map(splitCSVRow)
-  if (rows.length === 0) throw new Error('login credential text is empty')
+  if (rows.length === 0) throw new FormError('err.loginCredEmpty')
   const header = rows[0].map((h) => h.trim())
   const userIdx = header.indexOf('username')
   const passIdx = header.indexOf('password')
   if (userIdx < 0 || passIdx < 0) {
-    throw new Error('login credentials need a header with "username" and "password" columns')
+    throw new FormError('err.loginCredCsvHeader')
   }
   const out: CredentialEntry[] = []
   for (const rec of rows.slice(1)) {
     const username = userIdx < rec.length ? rec[userIdx].trim() : ''
     const password = passIdx < rec.length ? rec[passIdx] : ''
-    if (!username) throw new Error('a login credential row is missing its username')
-    if (!password) throw new Error('a login credential row is missing its password')
+    if (!username) throw new FormError('err.loginCredRowMissingUsername')
+    if (!password) throw new FormError('err.loginCredRowMissingPassword')
     out.push({ subject: username, token: password })
   }
   if (out.length === 0) {
-    throw new Error('login credentials have no data rows (need at least one username,password)')
+    throw new FormError('err.loginCredCsvNoRows')
   }
   return out
 }
@@ -640,24 +795,229 @@ function parseLoginCredsJSONL(body: string): CredentialEntry[] {
     try {
       parsed = JSON.parse(line)
     } catch {
-      throw new Error('a login credential line is not valid JSON')
+      throw new FormError('err.loginCredJsonlBadJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('each login credential line must be a {username, password} object')
+      throw new FormError('err.loginCredJsonlShape')
     }
     const { username, password } = parsed as { username?: unknown; password?: unknown }
     if (typeof username !== 'string' || !username) {
-      throw new Error('a login credential is missing its username')
+      throw new FormError('err.loginCredJsonlMissingUsername')
     }
     if (typeof password !== 'string' || !password) {
-      throw new Error('a login credential is missing its password')
+      throw new FormError('err.loginCredJsonlMissingPassword')
     }
     out.push({ subject: username, token: password })
   }
   if (out.length === 0) {
-    throw new Error('login credentials have no rows (need at least one username/password)')
+    throw new FormError('err.loginCredJsonlNoRows')
   }
   return out
+}
+
+// --- Curl paste (fill the login mini-form from a pasted curl command) ------------
+
+// CurlRequest is what parseCurlCommand extracts from a pasted curl line: the
+// method, the URL, any -H headers, and the -d body (multiple data flags joined
+// with & — curl's own semantics).
+export interface CurlRequest {
+  method: string
+  url: string
+  headers: Record<string, string>
+  body: string
+}
+
+// CURL_VALUE_FLAGS are common curl flags that consume a value we do NOT use —
+// they must be skipped as pairs so their value is never mistaken for the URL.
+const CURL_VALUE_FLAGS = new Set([
+  '-u', '--user', '-A', '--user-agent', '-e', '--referer', '-b', '--cookie',
+  '-c', '--cookie-jar', '-o', '--output', '-m', '--max-time', '--connect-timeout',
+  '--cacert', '--cert', '--key', '-F', '--form', '--retry', '-w', '--write-out',
+])
+
+// parseCurlCommand parses a pasted `curl …` command into the pieces the login
+// mini-form needs. Supported: -X/--request, -H/--header, -d/--data/--data-raw/
+// --data-urlencode/--data-binary, --url, the bare URL, single/double quotes and
+// backslash-newline continuations; other flags are ignored (value-taking ones
+// from the known list are skipped as pairs). Anything it cannot make sense of —
+// not a curl command, unbalanced quotes, no URL — returns null so the caller
+// shows a friendly "fill the fields manually" and touches NOTHING.
+export function parseCurlCommand(text: string): CurlRequest | null {
+  const tokens = tokenizeShell(text.replace(/\\\r?\n/g, ' '))
+  if (!tokens || tokens.length === 0 || tokens[0].toLowerCase() !== 'curl') return null
+  let method = ''
+  let url = ''
+  const headers: Record<string, string> = {}
+  const dataParts: string[] = []
+  for (let i = 1; i < tokens.length; i++) {
+    const tok = tokens[i]
+    if (tok === '-X' || tok === '--request') {
+      method = (tokens[++i] ?? '').toUpperCase()
+    } else if (tok === '-H' || tok === '--header') {
+      const h = tokens[++i] ?? ''
+      const colon = h.indexOf(':')
+      if (colon > 0) headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim()
+    } else if (
+      tok === '-d' || tok === '--data' || tok === '--data-raw' ||
+      tok === '--data-urlencode' || tok === '--data-binary'
+    ) {
+      dataParts.push(tokens[++i] ?? '')
+    } else if (tok === '--url') {
+      url = tokens[++i] ?? ''
+    } else if (CURL_VALUE_FLAGS.has(tok)) {
+      i++ // skip the flag's value so it is never mistaken for the URL
+    } else if (tok.startsWith('-X') && !tok.startsWith('--') && tok.length > 2) {
+      method = tok.slice(2).toUpperCase() // curl's attached form: -XPUT
+    } else if (tok.startsWith('-H') && !tok.startsWith('--') && tok.length > 2) {
+      const h = tok.slice(2)
+      const colon = h.indexOf(':')
+      if (colon > 0) headers[h.slice(0, colon).trim()] = h.slice(colon + 1).trim()
+    } else if (tok.startsWith('-d') && !tok.startsWith('--') && tok.length > 2) {
+      dataParts.push(tok.slice(2)) // attached form: -d'a=1'
+    } else if (tok.startsWith('-u') && !tok.startsWith('--') && tok.length > 2) {
+      /* attached basic-auth value (-uadmin:pw): consumed, not modeled */
+    } else if (tok.startsWith('-')) {
+      /* boolean flag we don't use (-s, -k, -v, -L, --compressed, …): ignore */
+    } else if (!url) {
+      url = tok
+    }
+  }
+  if (!url.trim()) return null
+  const body = dataParts.filter((d) => d.length > 0).join('&')
+  // curl's own default: -d implies POST; otherwise GET unless -X said so.
+  if (!method) method = body ? 'POST' : 'GET'
+  return { method, url: url.trim(), headers, body }
+}
+
+// tokenizeShell splits a command line into shell-ish words: single quotes are
+// literal, double quotes honor \" and \\, a backslash escapes outside quotes.
+// Returns null on an unbalanced quote (the caller treats that as unparseable).
+function tokenizeShell(text: string): string[] | null {
+  const out: string[] = []
+  let cur = ''
+  let quote: "'" | '"' | null = null
+  let started = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else cur += ch
+    } else if (quote === '"') {
+      if (ch === '"') quote = null
+      else if (ch === '\\' && (text[i + 1] === '"' || text[i + 1] === '\\')) cur += text[++i]
+      else cur += ch
+    } else if (ch === "'" || ch === '"') {
+      quote = ch
+      started = true
+    } else if (ch === '\\' && i + 1 < text.length) {
+      cur += text[++i]
+      started = true
+    } else if (/\s/.test(ch)) {
+      if (started || cur) {
+        out.push(cur)
+        cur = ''
+        started = false
+      }
+    } else {
+      cur += ch
+      started = true
+    }
+  }
+  if (quote !== null) return null
+  if (started || cur) out.push(cur)
+  return out
+}
+
+// authFormFromCurl maps a parsed curl command onto the login form fields. Without
+// headers it fills the simple mini-form (method + path + body — the body counts
+// as hand-authored so the quick form never clobbers it). With headers it compiles
+// the same single-step ADVANCED flow the OAuth2 guide emits, because the simple
+// mini-form carries no header fields — nothing from the curl is dropped.
+export function authFormFromCurl(req: CurlRequest): Partial<ExperimentForm> {
+  const path = tokenPathFromUrl(req.url)
+  if (Object.keys(req.headers).length === 0) {
+    const patch: Partial<ExperimentForm> = {
+      loginMode: 'simple',
+      loginUrlMethod: req.method,
+      loginUrlPath: path,
+    }
+    if (req.body) {
+      patch.loginBodyTemplate = req.body
+      patch.loginBodyGenerated = false
+    }
+    return patch
+  }
+  const template: Record<string, unknown> = { method: req.method, path, headers: req.headers }
+  if (req.body) template.payloadTemplate = req.body
+  return {
+    loginMode: 'advanced',
+    loginGraphJSON: JSON.stringify(
+      { id: LOGIN_NODE_ID, nodes: [{ id: LOGIN_NODE_ID, apiTemplateId: LOGIN_TEMPLATE_ID }], edges: [] },
+      null,
+      2,
+    ),
+    loginTemplatesJSON: JSON.stringify({ [LOGIN_TEMPLATE_ID]: template }, null, 2),
+    loginStart: LOGIN_NODE_ID,
+  }
+}
+
+// --- Token paste intelligence (pool-mode JWT expiry feedback) --------------------
+
+// decodeJwtExp extracts the exp claim (seconds since epoch) from a JWT-shaped
+// token — three base64url segments — WITHOUT any signature verification: this is
+// registration-time feedback only, never a security decision. Returns null for
+// non-JWT tokens, an undecodable payload, or a missing/non-numeric exp, so
+// opaque bearer tokens pass through silently.
+export function decodeJwtExp(token: string): number | null {
+  const parts = token.split('.')
+  if (parts.length !== 3 || !parts[0] || !parts[1]) return null
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1])) as { exp?: unknown }
+    return typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : null
+  } catch {
+    return null
+  }
+}
+
+// base64UrlDecode maps base64url onto the base64 alphabet, restores the padding,
+// and decodes via atob (available in every target browser and Node ≥ 16).
+function base64UrlDecode(s: string): string {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/')
+  return atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))
+}
+
+// PoolExpiry summarizes the EARLIEST exp among the JWT-shaped tokens of a pool:
+// the wall-clock instant, whether it is already past, and the signed time left.
+export interface PoolExpiry {
+  earliestExpMs: number
+  expired: boolean
+  msLeft: number // negative when already expired
+}
+
+// poolExpiry scans parsed pool entries for JWT expiries and reports the earliest,
+// or null when no entry looks like a JWT with an exp (nothing to say — opaque
+// tokens are ignored silently).
+export function poolExpiry(entries: CredentialEntry[], nowMs: number): PoolExpiry | null {
+  let earliest: number | null = null
+  for (const e of entries) {
+    const exp = decodeJwtExp(e.token)
+    if (exp !== null && (earliest === null || exp < earliest)) earliest = exp
+  }
+  if (earliest === null) return null
+  const earliestExpMs = earliest * 1000
+  return { earliestExpMs, expired: earliestExpMs <= nowMs, msLeft: earliestExpMs - nowMs }
+}
+
+// humanDuration renders a millisecond span compactly for the expiry line:
+// 45s / 32m / 2h 5m. Sub-second (and negative) spans clamp to 0s.
+export function humanDuration(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  const rem = m % 60
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`
 }
 
 // loginBodyReferencesRow reports whether a login body pulls a credential-list row in —
@@ -842,13 +1202,11 @@ export function generateCredentialRows(
   count: number,
   format: 'csv' | 'tokens',
 ): string {
-  if (!(count > 0)) throw new Error('pattern needs a positive count')
+  if (!(count > 0)) throw new FormError('err.patternCount')
   if (count > MAX_WEB_PATTERN_ROWS) {
-    throw new Error(
-      `pattern count ${count} exceeds the browser limit of ${MAX_WEB_PATTERN_ROWS} — use the CLI scenario file's usersPattern for a larger pool`,
-    )
+    throw new FormError('err.patternOverCap', { count, max: MAX_WEB_PATTERN_ROWS })
   }
-  if (!tokenTemplate.trim()) throw new Error('pattern needs a token (or password) template')
+  if (!tokenTemplate.trim()) throw new FormError('err.patternTokenEmpty')
   const render = (tmpl: string, i: number) => tmpl.replace(/\{\{\.userIndex\}\}/g, String(i))
   const lines: string[] = []
   if (format === 'tokens') {
@@ -892,7 +1250,7 @@ const LOGIN_TEMPLATE_ID = 't_login'
 export function simpleLoginFlow(form: ExperimentForm): LoginFlowSpec {
   const method = form.loginUrlMethod.trim() || 'POST'
   const path = form.loginUrlPath.trim()
-  if (!path) throw new Error('login needs a request path (e.g. /login)')
+  if (!path) throw new FormError('err.loginPathMissing')
   const body = applyReplaceMe(form.loginBodyTemplate, form.replaceMeValues)
   const template: Record<string, unknown> = { method, path }
   if (body.trim()) template.payloadTemplate = body
@@ -919,7 +1277,7 @@ export function simpleLoginFlow(form: ExperimentForm): LoginFlowSpec {
 export function simpleSignupFlow(form: ExperimentForm): SignupFlowSpec {
   const method = form.signupUrlMethod.trim() || 'POST'
   const path = form.signupUrlPath.trim()
-  if (!path) throw new Error('signup needs a request path (e.g. /register)')
+  if (!path) throw new FormError('err.signupPathMissing')
   const body = applyReplaceMe(form.signupBodyTemplate, form.replaceMeValues)
   const signupStep: SignupStepSpec = { id: 'signup', method, path }
   if (body.trim()) signupStep.body = body
@@ -1000,9 +1358,15 @@ export function placeholderLabel(placeholder: string): string {
 // fall back to advanced (raw JSON) so nothing is lost.
 export function authFormFromImport(result: ImportResult): Partial<ExperimentForm> {
   const { credentialPool, loginFlow, suggestedSignup } = result
+  // An import authors a concrete NON-guide auth mode, so clear the OAuth2-guide entry
+  // flag: without this, importing a login flow while the guide entry was selected keeps
+  // the guide panel showing and the doctor blocking the run on the guide's empty token
+  // URL (selectedEntry only self-heals when the wire mode leaves 'login', which an
+  // imported login flow does not).
+  const reset: Partial<ExperimentForm> = { authEntryOAuth2: false }
   // A derived login flow is the headline easy path: drop it into login mode.
   if (loginFlow) {
-    const patch: Partial<ExperimentForm> = { authMode: 'login' }
+    const patch: Partial<ExperimentForm> = { ...reset, authMode: 'login' }
     const simple = loginFlowToSimpleForm(loginFlow)
     if (simple) {
       Object.assign(patch, simple, { loginMode: 'simple' })
@@ -1022,62 +1386,24 @@ export function authFormFromImport(result: ImportResult): Partial<ExperimentForm
       // A HAR import can carry captured (secret-omitted) entries; surface them as
       // pre-filled JSONL the operator completes with the bearer token.
       return {
+        ...reset,
         authMode: 'pool',
         authPoolFormat: 'jsonl',
         authPoolText: credentialPool.entries.map((e) => JSON.stringify(e)).join('\n'),
       }
     }
     if (credentialPool.strategy === 'bootstrap-signup' && credentialPool.signupFlow) {
-      return signupFormPatch(credentialPool.signupFlow, credentialPool.keepAccounts === true)
+      return { ...reset, ...signupFormPatch(credentialPool.signupFlow, credentialPool.keepAccounts === true) }
     }
   }
   // Only a suggested signup: offer "create test accounts" pre-filled, gate unconfirmed.
   if (suggestedSignup) {
-    return signupFormPatch(suggestedSignup, false)
+    return { ...reset, ...signupFormPatch(suggestedSignup, false) }
   }
   return {}
 }
 
 // --- OAuth2 guide mode (a frontend ASSEMBLY layer, not a new server strategy) --
-
-// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
-// guide: a username+password (password grant), a client key (client_credentials),
-// a refresh token pasted from an app/browser session (refresh_token — the answer
-// for human-consent services like Auth0/Cognito/social login), or just an access
-// token (no grant at all — becomes a token pool).
-export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
-
-// OAuth2GuideForm is the guide's own input state: a token URL plus the grant's
-// fields. It is UI-local (NOT part of ExperimentForm) — authFormFromOAuth2Guide
-// compiles it onto the existing login/pool form fields, so the wire payload and
-// AUTH_FORM_DEFAULTS stay untouched.
-export interface OAuth2GuideForm {
-  tokenUrl: string
-  grant: OAuth2Grant
-  username: string
-  password: string
-  // users is an optional multi-user CSV (username,password header + rows); when
-  // non-empty it wins over the single username/password identity.
-  users: string
-  clientId: string
-  clientSecret: string
-  scope: string
-  refreshToken: string
-  accessToken: string
-}
-
-export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
-  tokenUrl: '',
-  grant: 'password',
-  username: '',
-  password: '',
-  users: '',
-  clientId: '',
-  clientSecret: '',
-  scope: '',
-  refreshToken: '',
-  accessToken: '',
-}
 
 // tokenPathFromUrl reduces a token URL (absolute or bare path) to the request
 // path the login flow POSTs — the run targets the scenario's base URL, so an
@@ -1163,6 +1489,36 @@ export function authFormFromOAuth2Guide(g: OAuth2GuideForm): Partial<ExperimentF
     loginCredText: credText,
     loginCredFormat: 'csv',
   }
+}
+
+// isOAuth2GuideGeneratedFlow reports whether a login flow's graph/templates JSON is
+// (structurally) something the OAuth2 guide generated: the single "login" node bound
+// to t_login whose payload is a grant_type form body. The guide uses it to decide
+// whether re-compiling may overwrite the fields — a hand-authored flow never
+// matches, so it is never silently clobbered. Any parse/shape surprise is a "no".
+export function isOAuth2GuideGeneratedFlow(graphJSON: string, templatesJSON: string): boolean {
+  try {
+    const g = JSON.parse(graphJSON) as { nodes?: { id?: unknown; apiTemplateId?: unknown }[] }
+    const t = JSON.parse(templatesJSON) as Record<string, { payloadTemplate?: unknown }>
+    if (!g || !Array.isArray(g.nodes) || g.nodes.length !== 1) return false
+    if (g.nodes[0]?.id !== LOGIN_NODE_ID || g.nodes[0]?.apiTemplateId !== LOGIN_TEMPLATE_ID) return false
+    const keys = Object.keys(t ?? {})
+    if (keys.length !== 1 || keys[0] !== LOGIN_TEMPLATE_ID) return false
+    const payload = t[LOGIN_TEMPLATE_ID]?.payloadTemplate
+    return typeof payload === 'string' && payload.includes('grant_type=')
+  } catch {
+    return false
+  }
+}
+
+// oauth2GuideCanCompileOver reports whether the OAuth2 guide may write its compiled
+// login flow (graph/templates/cred list) into the form without asking: only when
+// the flow fields are still the shipped default (empty) or were themselves
+// generated by the guide. A hand-authored flow returns false — the guide then
+// requires an explicit Regenerate instead of clobbering on every keystroke.
+export function oauth2GuideCanCompileOver(form: ExperimentForm): boolean {
+  if (!form.loginGraphJSON.trim() && !form.loginTemplatesJSON.trim()) return true
+  return isOAuth2GuideGeneratedFlow(form.loginGraphJSON, form.loginTemplatesJSON)
 }
 
 // loginFlowToSimpleForm tries to express a derived login flow as the simple mini-form
@@ -1300,13 +1656,13 @@ export function buildMintSpec(form: ExperimentForm): MintSpec {
   const env = form.mintKeyEnv.trim()
   const file = form.mintKeyFile.trim()
   if (!env && !file) {
-    throw new Error('mint needs a signing-key reference — set an environment variable or a file path')
+    throw new FormError('err.mintKeyMissing')
   }
   if (env && file) {
-    throw new Error('mint takes either a key environment variable or a key file, not both')
+    throw new FormError('err.mintKeyBoth')
   }
   if (!(form.mintTtlSeconds > 0)) {
-    throw new Error('mint needs a token lifetime (ttl) greater than zero seconds')
+    throw new FormError('err.mintTtl')
   }
   const mint: MintSpec = {
     alg: form.mintAlg,
@@ -1323,10 +1679,10 @@ export function buildMintSpec(form: ExperimentForm): MintSpec {
     try {
       parsed = JSON.parse(claimsText)
     } catch {
-      throw new Error('mint claims must be a JSON object of string values')
+      throw new FormError('err.mintClaimsJson')
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error('mint claims must be a JSON object (e.g. {"role":"tester"})')
+      throw new FormError('err.mintClaimsObject')
     }
     const claims: Record<string, string> = {}
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
@@ -1361,17 +1717,17 @@ const CRED_POOL_ID = 'web-pool'
 // exec stays minimal. maxOutputBytes is left to the backend default.
 export function buildExecSpec(form: ExperimentForm): ExecSpec {
   if (!form.execConfirmed) {
-    throw new Error('exec runs a local command per virtual user — confirm you allow it before running')
+    throw new FormError('err.execUnconfirmed')
   }
   const command = form.execCommandText
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
   if (command.length === 0) {
-    throw new Error('exec needs a command (argv) — one element per line, the first is the program')
+    throw new FormError('err.execCommandEmpty')
   }
   if (!(form.execTimeoutSeconds > 0)) {
-    throw new Error('exec needs a per-invocation timeout greater than zero seconds')
+    throw new FormError('err.execTimeout')
   }
   const exec: ExecSpec = {
     command,
@@ -1383,7 +1739,7 @@ export function buildExecSpec(form: ExperimentForm): ExecSpec {
     if (!line) continue
     const eq = line.indexOf('=')
     if (eq <= 0) {
-      throw new Error(`exec env must be KEY=VALUE lines (got ${JSON.stringify(line)})`)
+      throw new FormError('err.execEnvLine', { line: JSON.stringify(line) })
     }
     env[line.slice(0, eq).trim()] = line.slice(eq + 1)
   }
@@ -1450,9 +1806,7 @@ export function buildAuth(form: ExperimentForm): AuthBuild | null {
     }
     case 'bootstrap': {
       if (!form.authBootstrapConfirmed) {
-        throw new Error(
-          'confirm this targets a non-production system before running bootstrap (it creates/deletes real accounts)',
-        )
+        throw new FormError('err.bootstrapUnconfirmed')
       }
       // The simple mini-form compiles a method+path+body into the single-step signup
       // flow (with optional teardown). Advanced authors the raw steps array.
@@ -1735,6 +2089,11 @@ export function formFromRunSpec(spec: unknown): Partial<ExperimentForm> | null {
   // operator re-supplies the credentials. The login/bootstrap flow shapes carry no
   // secret (tokens are minted at run time), so their structure round-trips; only the
   // live-minted secrets are absent.
+  // A round-trip restores a concrete non-guide auth mode, so clear the UI-only OAuth2
+  // guide flag (same reason as authFormFromImport): a stale flag would keep the guide
+  // panel selected over a restored login/pool/mint flow and block the run on its empty
+  // token URL.
+  patch.authEntryOAuth2 = false
   Object.assign(patch, authFormFromSpec(s))
 
   return patch
@@ -1890,6 +2249,18 @@ export interface StreamFrame {
   status?: string
   reason?: string
   stats?: Stats
+}
+
+// runFailureHintKey maps a run's kill/fail reason onto a friendly i18n key for the
+// known prewarm failures — the cases where the run died BEFORE any traffic flowed
+// because auth could not be established. The raw reason is still shown beneath the
+// friendly line; anything unrecognized returns null and callers show only the raw
+// reason.
+export function runFailureHintKey(reason: string | undefined): string | null {
+  if (!reason) return null
+  if (reason.startsWith('api: prewarm login token')) return 'run.failLoginPrewarm'
+  if (reason.startsWith('api: prewarm bootstrap accounts')) return 'run.failBootstrapPrewarm'
+  return null
 }
 
 // parseSSEData parses a single SSE "data:" line, returning null for anything
@@ -2424,6 +2795,94 @@ export async function importScenario(
     throw new Error(message || `import failed: ${res.status}`)
   }
   return (await res.json()) as ImportResult
+}
+
+// --- Issuer discovery (the OAuth2 guide's "Fetch endpoints" button) --------------
+
+// DiscoveryResult is what POST /api/auth/discover returns with a 200: the resolved
+// issuer, its token endpoint (what belongs in the guide's Token URL field), and
+// optionally the grant types the IdP advertises.
+export interface DiscoveryResult {
+  issuer: string
+  tokenEndpoint: string
+  grantTypesSupported?: string[]
+}
+
+// discoverIssuer resolves an IdP base URL (issuer) into its endpoints via the
+// server's discovery proxy — the answer to "I use Keycloak/Auth0/Cognito and
+// don't know my token URL". The server SSRF-gates the fetch with the same target
+// allowlist a run uses, so the form's allowlist rides along. A non-2xx throws
+// with the server's own actionable message (e.g. an allowlist rejection),
+// unwrapped from the { "error": … } envelope like importScenario.
+export async function discoverIssuer(issuer: string, allow: string[]): Promise<DiscoveryResult> {
+  const res = await fetch(`${API}/auth/discover`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ issuer, allow }),
+  })
+  if (!res.ok) {
+    const text = (await res.text()).trim()
+    let message = text
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) message = parsed.error
+    } catch {
+      /* not JSON: keep the raw text */
+    }
+    throw new Error(message || `discovery failed: ${res.status}`)
+  }
+  // IdP-side failures come back as HTTP 200 with { ok:false, reason } (only an
+  // allowlist rejection is a non-2xx) — treat them as errors too, and never hand
+  // the caller a result without a usable token endpoint.
+  const body = (await res.json()) as DiscoveryResult & { ok?: boolean; reason?: string }
+  if (body.ok === false) throw new Error(body.reason || 'discovery failed')
+  if (typeof body.tokenEndpoint !== 'string' || !body.tokenEndpoint.trim()) {
+    throw new Error(body.reason || 'discovery returned no token_endpoint')
+  }
+  return body
+}
+
+// --- Auth preflight (the "Test login / Test token" button) ----------------------
+
+// PreflightResult is what POST /api/auth/preflight returns with a 200: ok reports
+// whether ONE credential acquisition succeeded against the target using the very
+// spec the run would use. On success the server names where it found the token
+// (tokenSource, e.g. "body:access_token"), a short non-secret prefix of it, and
+// the subject when one was captured. On a failed acquisition ok is false and
+// reason carries the server's explanation (shown verbatim — it is data).
+export interface PreflightResult {
+  ok: boolean
+  strategy?: string
+  httpStatus?: number
+  tokenSource?: string
+  tokenPrefix?: string
+  subject?: string
+  reason?: string
+}
+
+// preflightAuth tests the form's auth configuration WITHOUT starting a run: it
+// POSTs the SAME RunSpec buildRunSpec produces (so what is tested is exactly what
+// the run would send) and the server performs one credential acquisition. A
+// non-2xx (400 invalid spec, 403 gated exec) throws with the server's own error
+// text, unwrapped from the { "error": … } envelope like importScenario.
+export async function preflightAuth(spec: RunSpec): Promise<PreflightResult> {
+  const res = await fetch(`${API}/auth/preflight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(spec),
+  })
+  if (!res.ok) {
+    const text = (await res.text()).trim()
+    let message = text
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown }
+      if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) message = parsed.error
+    } catch {
+      /* not JSON: keep the raw text */
+    }
+    throw new Error(message || `auth preflight failed: ${res.status}`)
+  }
+  return (await res.json()) as PreflightResult
 }
 
 export async function getReport(runId: string): Promise<Report> {

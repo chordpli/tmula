@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,6 +12,57 @@ import (
 	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 )
+
+// flakyAuthProvider authenticates even indices and fails odd ones, so an open run has
+// SOME sessions that cannot acquire a credential (and are skipped) while others run.
+type flakyAuthProvider struct{}
+
+func (flakyAuthProvider) Acquire(_ context.Context, userIndex int) (domain.Credential, error) {
+	if userIndex%2 == 1 {
+		return domain.Credential{}, fmt.Errorf("mock auth: index %d has no credential", userIndex)
+	}
+	return domain.Credential{Subject: "u", Secret: "tok"}, nil
+}
+
+// TestSchedulerSurfacesAuthSetupErrors proves the open model SKIPS a session it cannot
+// authenticate (rather than aborting the run) and reports the count plus a representative
+// first error, so the orchestrator can surface them. Even indices authenticate and run
+// (Total > 0), odd indices are counted as setup errors.
+func TestSchedulerSurfacesAuthSetupErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	g, tmpls := oneNodeGraph()
+	clock := newVirtualClock(time.Unix(0, 0))
+	s := newScheduler(t, srv.URL, tmpls, WithClock(clock))
+	res, err := s.Run(context.Background(), Options{
+		Graph:    g,
+		Start:    "a",
+		MaxSteps: 1,
+		Model: domain.WorkloadModel{
+			Kind:            domain.WorkloadOpen,
+			Arrival:         domain.ArrivalProfile{Shape: domain.RateConstant, PeakRate: 50},
+			DurationSeconds: 4,
+		},
+		Seed:  1,
+		RunID: "run-flaky-auth",
+		Auth:  flakyAuthProvider{},
+	})
+	if err != nil {
+		t.Fatalf("run should NOT fail — the open model skips the sessions it cannot authenticate: %v", err)
+	}
+	if res.SetupErrors == 0 {
+		t.Error("SetupErrors = 0, want > 0 (odd-index sessions could not authenticate)")
+	}
+	if res.FirstSetupError == nil {
+		t.Error("FirstSetupError is nil, want a representative auth-setup cause")
+	}
+	if res.Stats.Total == 0 {
+		t.Error("Total = 0, want > 0 (even-index sessions authenticated and ran)")
+	}
+}
 
 // TestSchedulerInjectsPerSessionCredentials drives an open run with an auth
 // provider and a two-entry pool against an Authorization-echoing SUT, then asserts

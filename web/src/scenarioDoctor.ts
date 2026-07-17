@@ -1,5 +1,7 @@
 import {
   allowlistMatchesHost,
+  applyReplaceMe,
+  findReplaceMePlaceholders,
   hostFromBaseUrl,
   loginBodyReferencesRow,
   parseAllowlist,
@@ -44,6 +46,23 @@ interface TemplateShape {
 
 type TemplateMap = Record<string, TemplateShape>
 
+// runBlockers returns the doctor issues that BLOCK a run (severity error), in
+// order. The run bar derives its displayed blockers from this on EVERY render —
+// never from a string captured at click time — so fixing the condition makes the
+// message disappear, a locale switch re-translates it (the issues carry i18n keys,
+// not rendered strings), and every current blocker shows, not just the first.
+export function runBlockers(issues: DoctorIssue[]): DoctorIssue[] {
+  return issues.filter((i) => i.severity === 'error')
+}
+
+// authDoctorIssues returns the doctor issues that belong to the Auth card — every
+// auth check's code starts with "auth-" by convention — so the card can echo them
+// right next to the panel that caused them. The Scenario card's doctor panel
+// keeps showing the full list; this is an echo, not a move.
+export function authDoctorIssues(issues: DoctorIssue[]): DoctorIssue[] {
+  return issues.filter((i) => i.code.startsWith('auth-'))
+}
+
 export function doctorForm(form: ExperimentForm): DoctorIssue[] {
   const issues: DoctorIssue[] = []
   const baseHost = hostFromBaseUrl(form.baseUrl)
@@ -85,7 +104,98 @@ export function doctorForm(form: ExperimentForm): DoctorIssue[] {
     issues.push(...doctorTemplates(templatesResult.value, graphResult.value))
   }
   issues.push(...doctorAuth(form))
+  issues.push(...doctorAuthTokenWiring(form))
   return issues
+}
+
+// LITERAL_MARKER_RE matches the inert single-brace {username}/{password} markers a
+// simple-mode login/signup body may still carry. NOTHING substitutes them — they go
+// out as literal strings — so a body that still holds one is a guaranteed silent
+// auth failure. The Go-template row markers ({{.username}}/{{.password}}) do not
+// match: their braces are doubled and the name is dotted.
+const LITERAL_MARKER_RE = /\{(?:username|password)\}/
+
+// TOKEN_REF_RE matches a scenario template referencing the acquired credential:
+// the {{.token}} marker or the {{basicAuth …}} helper (whitespace tolerated).
+const TOKEN_REF_RE = /\{\{\s*\.token\s*\}\}|\{\{\s*basicAuth\b/
+
+// doctorAuthTokenWiring catches the two halves of the "auth configured but never
+// wired" trap: auth is on but no scenario template references {{.token}} (the run
+// would send anonymous requests while the operator believes it authenticates), and
+// the inverse — templates reference {{.token}} while auth is off (the marker goes
+// out literally). Both are warnings: a rare scenario may authenticate another way.
+function doctorAuthTokenWiring(form: ExperimentForm): DoctorIssue[] {
+  const referencesToken = TOKEN_REF_RE.test(form.templatesJSON)
+  if (form.authMode !== 'none' && !referencesToken) {
+    return [issue('warning', 'auth-token-unreferenced', 'doctor.authTokenUnreferenced')]
+  }
+  if (form.authMode === 'none' && referencesToken) {
+    return [issue('warning', 'auth-token-without-auth', 'doctor.authTokenWithoutAuth')]
+  }
+  return []
+}
+
+// doctorOAuth2Guide checks the login mode through the OAuth2 guide's eyes — the
+// fields the operator actually saw. Two traps get guide-language messages:
+//   - an empty token URL (the guide's first question) instead of "login URL"
+//   - an access token that was pasted but never APPLIED ("Use as a token pool"
+//     not clicked — the wire mode is still login, so the paste does nothing)
+// With a token URL present, the compiled flow JSON is still validated so a
+// hand-edited (non-regenerated) flow with a typo is caught the same as before.
+function doctorOAuth2Guide(form: ExperimentForm): DoctorIssue[] {
+  const g = form.oauth2Guide
+  if (g.grant === 'accessToken') {
+    return [
+      g.accessToken.trim()
+        ? issue('error', 'auth-oauth2-access-not-applied', 'doctor.authOAuth2AccessNotApplied')
+        : issue('error', 'auth-oauth2-access-empty', 'doctor.authOAuth2AccessEmpty'),
+    ]
+  }
+  const issues: DoctorIssue[] = []
+  if (!g.tokenUrl.trim()) {
+    // An un-compiled (empty) flow is a consequence of the missing token URL —
+    // report only the cause, not the knock-on JSON errors.
+    issues.push(issue('error', 'auth-oauth2-token-url', 'doctor.authOAuth2TokenUrl'))
+    return issues
+  }
+  const graph = parseJSON(form.loginGraphJSON)
+  if (!graph.ok) {
+    issues.push(issue('error', 'auth-login-graph-json', 'doctor.authLoginGraphJson', { error: graph.error }))
+  }
+  const templates = parseJSON(form.loginTemplatesJSON)
+  if (!templates.ok) {
+    issues.push(
+      issue('error', 'auth-login-templates-json', 'doctor.authLoginTemplatesJson', { error: templates.error }),
+    )
+  }
+  return issues
+}
+
+// doctorReplaceMe flags any REPLACE_ME_* placeholder still left in the ACTIVE auth
+// mode's material. Simple-mode bodies are checked after the operator's secret
+// substitution (applyReplaceMe — exactly what buildAuth sends); advanced-mode JSON
+// is checked raw because buildAuth never substitutes there, so a value in
+// replaceMeValues must not hide a placeholder that would still go out literally.
+function doctorReplaceMe(form: ExperimentForm): DoctorIssue[] {
+  const sources: string[] = []
+  if (form.authMode === 'pool') {
+    sources.push(form.authPoolText)
+  } else if (form.authMode === 'login') {
+    sources.push(
+      form.loginMode === 'simple'
+        ? applyReplaceMe(form.loginBodyTemplate, form.replaceMeValues)
+        : form.loginTemplatesJSON,
+    )
+  } else if (form.authMode === 'bootstrap') {
+    sources.push(
+      form.signupMode === 'simple'
+        ? applyReplaceMe(form.signupBodyTemplate, form.replaceMeValues)
+        : form.signupStepsJSON,
+    )
+  }
+  const leftover = findReplaceMePlaceholders(...sources)
+  if (leftover.length === 0) return []
+  return [issue('error', 'auth-replace-me', 'doctor.authReplaceMe', { placeholder: leftover[0] })]
 }
 
 // doctorAuth surfaces the auth-section blockers so a misconfigured pool/login/bootstrap
@@ -109,10 +219,22 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     // An empty token capture is fine: tmula auto-detects the token from the login
     // response (E1), so no "missing capture path" warning is raised. The simple
     // mini-form only needs a request path (buildAuth compiles the rest); the advanced
-    // mode still validates the raw graph/templates JSON.
-    if (form.loginMode === 'simple') {
+    // mode still validates the raw graph/templates JSON. When the operator's UI
+    // entry is the OAuth2 GUIDE, the doctor speaks the guide's language instead:
+    // the user never saw a "login URL" field, so a login-URL error would point at
+    // nothing on their screen.
+    if (form.authEntryOAuth2) {
+      issues.push(...doctorOAuth2Guide(form))
+    } else if (form.loginMode === 'simple') {
       if (!form.loginUrlPath.trim()) {
         issues.push(issue('error', 'auth-login-url', 'doctor.authLoginUrl'))
+      }
+      // The inert-marker trap: a single-brace {username}/{password} marker is NOT
+      // substituted by anything — it would be POSTed literally, so the login can
+      // only fail. Blocks the run until the real value (or a {{.username}} row
+      // reference) replaces it.
+      if (LITERAL_MARKER_RE.test(form.loginBodyTemplate)) {
+        issues.push(issue('error', 'auth-login-body-marker', 'doctor.authLoginBodyMarker'))
       }
     } else {
       const graph = parseJSON(form.loginGraphJSON)
@@ -154,6 +276,10 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
     if (simple) {
       if (!form.signupUrlPath.trim()) {
         issues.push(issue('error', 'auth-bootstrap-url', 'doctor.authBootstrapUrl'))
+      }
+      // Same inert-marker trap as the login body: {password} is never substituted.
+      if (LITERAL_MARKER_RE.test(form.signupBodyTemplate)) {
+        issues.push(issue('error', 'auth-signup-body-marker', 'doctor.authSignupBodyMarker'))
       }
     } else {
       try {
@@ -198,6 +324,7 @@ function doctorAuth(form: ExperimentForm): DoctorIssue[] {
       }
     }
   }
+  issues.push(...doctorReplaceMe(form))
   return issues
 }
 

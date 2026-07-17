@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { AUTH_FORM_DEFAULTS, type ExperimentForm } from './api'
-import { doctorForm } from './scenarioDoctor'
+import {
+  AUTH_FORM_DEFAULTS,
+  authFormFromOAuth2Guide,
+  OAUTH2_GUIDE_DEFAULTS,
+  type ExperimentForm,
+} from './api'
+import { authDoctorIssues, doctorForm, runBlockers } from './scenarioDoctor'
+import { dict, translate } from './i18n'
 
 const form: ExperimentForm = {
   baseUrl: 'http://localhost:9000',
@@ -176,9 +182,233 @@ describe('doctorForm', () => {
     expect(got).not.toContain('auth-login-cred-unused')
   })
 
+  it('flags a simple-mode login body that still carries literal {username}/{password} markers', () => {
+    // The shipped default body carries the markers — nothing substitutes them, so
+    // they would be POSTed literally; the doctor must block that run.
+    const got = codes({ ...form, authMode: 'login', loginUrlPath: '/login' })
+    expect(got).toContain('auth-login-body-marker')
+    // A body with real credentials (or row templates) is clean.
+    expect(
+      codes({
+        ...form,
+        authMode: 'login',
+        loginUrlPath: '/login',
+        loginBodyTemplate: '{"username": "alice", "password": "pw-a"}',
+      }),
+    ).not.toContain('auth-login-body-marker')
+    expect(
+      codes({
+        ...form,
+        authMode: 'login',
+        loginUrlPath: '/login',
+        loginBodyTemplate: '{"username": "{{.username}}", "password": "{{.password}}"}',
+      }),
+    ).not.toContain('auth-login-body-marker')
+  })
+
+  it('flags a simple-mode signup body that still carries a literal {password} marker', () => {
+    const base = {
+      ...form,
+      authMode: 'bootstrap' as const,
+      authBootstrapConfirmed: true,
+      signupUrlPath: '/register',
+    }
+    // The shipped default signup body carries {password}.
+    expect(codes(base)).toContain('auth-signup-body-marker')
+    expect(
+      codes({ ...base, signupBodyTemplate: '{"email":"t+{{.userIndex}}@x.com","password":"pw"}' }),
+    ).not.toContain('auth-signup-body-marker')
+  })
+
+  it('flags an unfilled REPLACE_ME placeholder in the active auth material', () => {
+    const login = {
+      ...form,
+      authMode: 'login' as const,
+      loginUrlPath: '/login',
+      loginBodyTemplate: '{"username": "alice", "password": "REPLACE_ME_PASSWORD"}',
+    }
+    expect(codes(login)).toContain('auth-replace-me')
+    // Filling the secret through the highlighted input clears the error (the
+    // doctor checks the SAME substituted body buildAuth would send).
+    expect(
+      codes({ ...login, replaceMeValues: { REPLACE_ME_PASSWORD: 's3cret' } }),
+    ).not.toContain('auth-replace-me')
+    // A pool with a REPLACE_ME token is equally blocked.
+    expect(
+      codes({ ...form, authMode: 'pool', authPoolFormat: 'tokens', authPoolText: 'REPLACE_ME_TOKEN' }),
+    ).toContain('auth-replace-me')
+  })
+
+  it('warns when auth is configured but no scenario template references the token', () => {
+    const got = codes({
+      ...form,
+      authMode: 'pool',
+      authPoolFormat: 'tokens',
+      authPoolText: 'tok-1',
+    })
+    expect(got).toContain('auth-token-unreferenced')
+    // Referencing {{.token}} (or the {{basicAuth …}} helper) satisfies the check.
+    const withToken = {
+      ...form,
+      authMode: 'pool' as const,
+      authPoolFormat: 'tokens' as const,
+      authPoolText: 'tok-1',
+      templatesJSON: JSON.stringify({
+        browse: { method: 'GET', path: '/browse', headers: { Authorization: 'Bearer {{.token}}' } },
+        product: { method: 'GET', path: '/products/1' },
+      }),
+    }
+    expect(codes(withToken)).not.toContain('auth-token-unreferenced')
+    const withBasic = {
+      ...withToken,
+      templatesJSON: JSON.stringify({
+        browse: {
+          method: 'GET',
+          path: '/browse',
+          headers: { Authorization: 'Basic {{basicAuth .subject .token}}' },
+        },
+        product: { method: 'GET', path: '/products/1' },
+      }),
+    }
+    expect(codes(withBasic)).not.toContain('auth-token-unreferenced')
+  })
+
+  it('warns when templates reference {{.token}} but auth is off', () => {
+    const got = codes({
+      ...form,
+      templatesJSON: JSON.stringify({
+        browse: { method: 'GET', path: '/browse', headers: { Authorization: 'Bearer {{.token}}' } },
+        product: { method: 'GET', path: '/products/1' },
+      }),
+    })
+    expect(got).toContain('auth-token-without-auth')
+    // The clean baseline (no auth, no token reference) stays silent.
+    expect(codes(form)).not.toContain('auth-token-without-auth')
+  })
+
+  it('speaks the OAuth2 guide language when the guide entry is active and the token URL is empty', () => {
+    const got = codes({ ...form, authMode: 'login', authEntryOAuth2: true })
+    expect(got).toContain('auth-oauth2-token-url')
+    // The user never saw a "login URL" field — that message must not appear,
+    // and neither must the knock-on empty-JSON errors.
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-login-graph-json')
+    // Without the guide flag, plain login keeps its own message.
+    expect(codes({ ...form, authMode: 'login' })).toContain('auth-login-url')
+  })
+
+  it('is clean when the guide has a token URL and its compiled flow', () => {
+    const compiled = authFormFromOAuth2Guide({
+      ...OAUTH2_GUIDE_DEFAULTS,
+      tokenUrl: 'https://idp.example.com/oauth/token',
+      grant: 'clientCredentials',
+      clientId: 'web',
+      clientSecret: 's',
+    })
+    const got = codes({
+      ...form,
+      ...compiled,
+      authEntryOAuth2: true,
+      oauth2Guide: {
+        ...OAUTH2_GUIDE_DEFAULTS,
+        tokenUrl: 'https://idp.example.com/oauth/token',
+        grant: 'clientCredentials',
+        clientId: 'web',
+        clientSecret: 's',
+      },
+    } as ExperimentForm)
+    expect(got).not.toContain('auth-oauth2-token-url')
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-login-graph-json')
+    expect(got).not.toContain('auth-login-templates-json')
+  })
+
+  it('flags a pasted-but-not-applied access token with a guide-aware message', () => {
+    const base = {
+      ...form,
+      authMode: 'login' as const,
+      authEntryOAuth2: true,
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const, accessToken: 'tok-1' },
+    }
+    const got = codes(base)
+    expect(got).toContain('auth-oauth2-access-not-applied')
+    expect(got).not.toContain('auth-login-url')
+    expect(got).not.toContain('auth-oauth2-token-url')
+    // Nothing pasted yet → the guide asks for the token instead.
+    const empty = codes({
+      ...base,
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const },
+    })
+    expect(empty).toContain('auth-oauth2-access-empty')
+    // Once applied ("Use as a token pool"), the wire mode is pool and the guide
+    // errors disappear — the ordinary pool checks take over.
+    const applied = codes({
+      ...form,
+      authMode: 'pool' as const,
+      authEntryOAuth2: true,
+      authPoolFormat: 'tokens' as const,
+      authPoolText: 'tok-1',
+      oauth2Guide: { ...OAUTH2_GUIDE_DEFAULTS, grant: 'accessToken' as const, accessToken: 'tok-1' },
+    })
+    expect(applied).not.toContain('auth-oauth2-access-not-applied')
+    expect(applied).not.toContain('auth-pool-empty')
+  })
+
   it('flags a mint run with no signing-key reference', () => {
     const got = codes({ ...form, authMode: 'mint', mintKeyEnv: '', mintKeyFile: '' })
     expect(got).toContain('auth-mint-key')
+  })
+
+  describe('runBlockers (the live run-bar error)', () => {
+    it('collects ALL current blockers and clears once the conditions are fixed', () => {
+      const broken = { ...form, baseUrl: 'http://other-host:9000', graphJSON: 'not json' }
+      const blockers = runBlockers(doctorForm(broken))
+      const blockerCodes = blockers.map((b) => b.code)
+      // Both problems show at once — not just the first.
+      expect(blockerCodes).toContain('allowlist-missing-host')
+      expect(blockerCodes).toContain('graph-json')
+      expect(blockers.every((b) => b.severity === 'error')).toBe(true)
+      // Fixing the form empties the derived list — the alert disappears.
+      expect(runBlockers(doctorForm(form))).toEqual([])
+    })
+
+    it('never blocks on warnings', () => {
+      // A closed-model persona mix is a warning, not a blocker.
+      const withWarning = { ...form, segmentsJSON: '[{"name":"buyer","weight":1}]' }
+      expect(doctorForm(withWarning).some((i) => i.severity === 'warning')).toBe(true)
+      expect(runBlockers(doctorForm(withWarning))).toEqual([])
+    })
+
+    it('authDoctorIssues echoes exactly the auth-scoped issues into the Auth card', () => {
+      const broken = {
+        ...form,
+        baseUrl: 'http://other-host:9000', // scenario-scoped error (allowlist)
+        authMode: 'pool' as const, // auth-scoped error (empty pool) + token-wiring warning
+      }
+      const all = doctorForm(broken)
+      const auth = authDoctorIssues(all)
+      const authCodes = auth.map((i) => i.code)
+      expect(authCodes).toContain('auth-pool-empty')
+      expect(authCodes).toContain('auth-token-unreferenced')
+      expect(authCodes).not.toContain('allowlist-missing-host')
+      expect(auth.every((i) => i.code.startsWith('auth-'))).toBe(true)
+      // It is an echo, not a move: the full list still carries both scopes.
+      expect(all.map((i) => i.code)).toContain('allowlist-missing-host')
+      expect(all.map((i) => i.code)).toContain('auth-pool-empty')
+    })
+
+    it('re-localizes through the i18n key, not a stored string', () => {
+      const blockers = runBlockers(doctorForm({ ...form, baseUrl: 'http://other-host:9000' }))
+      expect(blockers).toHaveLength(1)
+      const b = blockers[0]
+      // The issue carries a key + vars; rendering in either language works off
+      // the SAME issue, so a locale switch re-renders the current language.
+      const enMsg = translate(dict, 'en', b.messageKey, b.vars)
+      const koMsg = translate(dict, 'ko', b.messageKey, b.vars)
+      expect(enMsg).toContain('other-host')
+      expect(koMsg).toContain('other-host')
+      expect(koMsg).not.toBe(enMsg)
+    })
   })
 
   it('does not flag a mint run that references a key, and flags malformed claims', () => {

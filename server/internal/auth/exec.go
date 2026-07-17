@@ -142,8 +142,11 @@ func NewExecTokenFunc(spec domain.ExecSpec) TokenFunc {
 func parseExecOutput(stdout []byte) (token, subject, refresh string, expiresIn time.Duration) {
 	// The exec command speaks only over stdout, so there are no Set-Cookie headers to
 	// consider — pass nil for the cookie fallback.
-	token, subject = load.DetectCredential(stdout, nil)
+	token, subject, source := load.DetectCredentialSource(stdout, nil)
 	if token != "" {
+		// Name where the token was auto-captured from (a stdout JSON key), never the
+		// value, so an exec run that prints a token response is as visible as a login.
+		load.LogAutoCaptureSource(source)
 		// A JSON body: also recover the OAuth2 refresh grant data for completeness, so a
 		// command that prints a full token response feeds Refresh/expiry like a login does.
 		refresh, expiresIn = load.DetectRefresh(stdout)

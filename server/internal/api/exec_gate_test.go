@@ -54,6 +54,11 @@ func TestStartRunExecRejectedWithoutOptIn(t *testing.T) {
 	if !strings.Contains(msg, "exec") || !strings.Contains(msg, "allow") {
 		t.Errorf("rejection should explain the exec opt-in (how to enable it), got %q", err.Error())
 	}
+	// The message must also tell a non-operator what to ask for, so someone who does
+	// not run the engine knows the flag is the engine operator's to set.
+	if !strings.Contains(msg, "ask its operator to start it with --allow-exec") {
+		t.Errorf("rejection should tell a non-operator to ask the engine operator to enable exec, got %q", err.Error())
+	}
 }
 
 // TestStartRunExecAllowedWithOptIn runs an opt-in exec run to completion and confirms

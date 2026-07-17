@@ -13,7 +13,7 @@ what you want ("load-test this API from its swagger").
 
 ## The suite
 
-Four **atoms** (each works standalone, no dependency on the others) and one **orchestrator** that chains
+Five **atoms** (each works standalone, no dependency on the others) and one **orchestrator** that chains
 them:
 
 ```
@@ -25,7 +25,8 @@ them:
 
 | Skill | Does | Standalone use |
 |---|---|---|
-| **tmula-scaffold** | Spec/HAR/access-log → raw `json/scenario.json` + target | "turn my swagger into a tmula scenario" |
+| **tmula-scaffold** | Spec/HAR/access-log → raw `json/scenario.json` + target (auth auto-derived from the spec's security scheme) | "turn my swagger into a tmula scenario" |
+| **tmula-auth** | Spec/API/HAR → a derived `auth` block: login flow, `Authorization` headers, one `REPLACE_ME` secret | "derive auth for this API" |
 | **tmula-enrich** | Raw scenario → runnable & safe (path params, auth, drop destructive ops) | "make my scenario runnable" |
 | **tmula-run** | Scenario → load test, behind a non-prod safety gate | "load-test this safely" |
 | **tmula-triage** | Finished run → reproduce (functional vs load-dependent), baseline gate, CI | "is this finding real?" |
@@ -38,6 +39,7 @@ Atoms pass **artifacts**, not control. The contract:
 Generated JSON lives under a `json/` folder (gitignored):
 
 - `json/scenario.json` - the compact scenario for the CLI (scaffold writes it; enrich rewrites it; run/triage consume it).
+- `json/auth.json` - the standalone derived `auth` block (tmula-auth writes it; paste or merge into any scenario).
 - `json/report.json` - a `tmula run --json` capture (triage's baseline gate consumes it).
 - `json/graph.json` + `json/templates.json` + `json/source.<ext>` - the **web console** edit-field JSON (see below).
 - `./bin/tmula` - built once with `go build -o ./bin/tmula ./server/cmd/tmula`.
@@ -80,6 +82,7 @@ the session after first checkout.)
 
 # or one atom at a time:
 /tmula-scaffold  https://api.example.com/openapi.json   # → json/scenario.json
+/tmula-auth      https://api.example.com/openapi.json   # → derived auth block (json/auth.json)
 /tmula-enrich                                            # → runnable, safe json/scenario.json
 /tmula-run                                               # → load test (after the safety gate)
 /tmula-triage                                            # → reproduce / baseline / CI
