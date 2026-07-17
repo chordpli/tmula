@@ -752,6 +752,9 @@ func checkNoReplaceMe(a Auth) error {
 		if tok := firstReplaceMe(a.UsersPattern.Token); tok != "" {
 			return fmt.Errorf("scenariofile: auth.usersPattern.token still contains %s%s", tok, hint)
 		}
+		if tok := firstReplaceMe(a.UsersPattern.Subject); tok != "" {
+			return fmt.Errorf("scenariofile: auth.usersPattern.subject still contains %s%s", tok, hint)
+		}
 	}
 	if a.Login != nil {
 		if id, tok := firstReplaceMeInSteps(a.Login.Flow); tok != "" {
@@ -761,6 +764,11 @@ func checkNoReplaceMe(a Auth) error {
 	if a.Signup != nil {
 		if id, tok := firstReplaceMeInSteps(a.Signup.Flow); tok != "" {
 			return fmt.Errorf("scenariofile: auth.signup.flow step %q still contains %s%s", id, tok, hint)
+		}
+		// Teardown runs with the same secret-bearing shape as the flow — an unfilled
+		// placeholder there 401s every deprovision and leaks the provisioned accounts.
+		if id, tok := firstReplaceMeInSteps(a.Signup.Teardown); tok != "" {
+			return fmt.Errorf("scenariofile: auth.signup.teardown step %q still contains %s%s", id, tok, hint)
 		}
 	}
 	if a.Exec != nil {

@@ -34,6 +34,12 @@ func TestExpandRejectsReplaceMePlaceholders(t *testing.T) {
 			wantTok: "REPLACE_ME_PW",
 		},
 		{
+			name:    "usersPattern subject",
+			auth:    Auth{Strategy: "pool", UsersPattern: &AuthUsersPattern{Subject: "REPLACE_ME_USER", Token: "pw", Count: 3}},
+			wantLoc: `auth.usersPattern.subject`,
+			wantTok: "REPLACE_ME_USER",
+		},
+		{
 			name: "login flow body",
 			auth: Auth{
 				Strategy: "login",
@@ -70,6 +76,22 @@ func TestExpandRejectsReplaceMePlaceholders(t *testing.T) {
 			},
 			wantLoc: `auth.signup.flow step "signup"`,
 			wantTok: "REPLACE_ME_SECRET",
+		},
+		{
+			name: "signup teardown header",
+			auth: Auth{
+				Strategy: "bootstrap-signup",
+				Signup: &AuthSignup{
+					Flow: []Step{{ID: "signup", Request: "POST /signup", Body: `{"u":"u{{.userIndex}}","pw":"x"}`}},
+					Teardown: []Step{{
+						ID:      "rm",
+						Request: "DELETE /u/{{.subject}}",
+						Headers: map[string]string{"Authorization": "Bearer REPLACE_ME_ADMIN_TOKEN"},
+					}},
+				},
+			},
+			wantLoc: `auth.signup.teardown step "rm"`,
+			wantTok: "REPLACE_ME_ADMIN_TOKEN",
 		},
 		{
 			name: "exec command argv",
