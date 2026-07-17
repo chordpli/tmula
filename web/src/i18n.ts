@@ -209,9 +209,9 @@ const en: Record<string, string> = {
     'How the simulated traffic authenticates. Leave it off to run anonymously, supply a pool of tokens, mint one from a login flow, or generate throwaway accounts.',
   'auth.mode.none': 'None',
   'auth.mode.none.desc': 'Run anonymously — no credentials are sent.',
-  'auth.mode.pool': 'Paste a token / account list',
-  'auth.mode.pool.desc': 'Easiest. Paste one bearer token, or a list of pre-issued tokens — one per user.',
-  'auth.mode.login': 'Login (auto / simple)',
+  'auth.mode.pool': 'I already have tokens',
+  'auth.mode.pool.desc': 'Easiest. Paste one bearer token or API key, or a list of pre-issued tokens — one per user.',
+  'auth.mode.login': 'Log in to get tokens',
   'auth.mode.login.desc': 'Give your login URL and a body — tmula logs in and captures the token for you.',
   'auth.mode.bootstrap': 'Create test accounts',
   'auth.mode.bootstrap.desc': 'Advanced. Sign up a real account per user, then tear it down (non-prod only).',
@@ -221,6 +221,66 @@ const en: Record<string, string> = {
   'auth.mode.exec': 'Run a command for the token (escape hatch)',
   'auth.mode.exec.desc':
     'Last resort. Run your own local command per user and read the token from its stdout — for auth no other strategy can model. Gated, runs locally.',
+
+  // Auth · pattern generator (generate N rows from a subject/token template)
+  'auth.pattern.toggle': 'Generate accounts from a pattern',
+  'auth.pattern.hint':
+    'Fill a subject and secret template with {{.userIndex}} and a count \u2014 tmula generates the rows into the box above. For a very large pool (100k+), use the CLI scenario file\u2019s usersPattern instead (generated server-side).',
+  'auth.pattern.subject': 'Subject template',
+  'auth.pattern.subjectHint': 'e.g. user{{.userIndex}} \u2014 leave empty for a bare token list.',
+  'auth.pattern.token': 'Secret template',
+  'auth.pattern.tokenHint': 'e.g. pw-{{.userIndex}} (the password for login, or a token for a pool). Not for opaque JWTs \u2014 those come from mint.',
+  'auth.pattern.count': 'Count',
+  'auth.pattern.generate': 'Generate',
+  'auth.pattern.generated': 'Generated {count} rows.',
+
+  // Auth · OAuth2 guide (the "It's an OAuth2 service" assembler)
+  'auth.mode.oauth2': 'It\u2019s an OAuth2 service',
+  'auth.mode.oauth2.desc':
+    'Answer two questions \u2014 the token URL and how you log in \u2014 and tmula assembles the login flow for you.',
+  'auth.oauth2.lead':
+    'No OAuth2 knowledge needed: give the token URL, say how you log in, and tmula builds the token exchange (and keeps it refreshed mid-run).',
+  'auth.oauth2.tokenUrl': 'Token URL',
+  'auth.oauth2.tokenUrlHint':
+    'The endpoint that issues tokens (e.g. https://idp.example.com/oauth/token). For an openIdConnect service, use the token_endpoint from its discovery document.',
+  'auth.oauth2.discovery':
+    'This service publishes an OpenID Connect discovery document at {url} \u2014 open it and copy its token_endpoint into the Token URL above.',
+  'auth.oauth2.grant': 'How do you log in?',
+  'auth.oauth2.grantHint': 'Pick the answer that matches what you have \u2014 tmula picks the grant.',
+  'auth.oauth2.grant.password': 'With a username and password',
+  'auth.oauth2.grant.password.desc': 'Each virtual user logs in with its own account (or one shared account).',
+  'auth.oauth2.grant.cc': 'With a client key (server-to-server)',
+  'auth.oauth2.grant.cc.desc': 'A machine identity: client_id + client_secret, one token shared by every user.',
+  'auth.oauth2.grant.refresh': 'I\u2019m already logged in on an app or browser',
+  'auth.oauth2.grant.refresh.desc':
+    'Paste a refresh token copied once from the app/devtools \u2014 the answer for services that need a human consent screen (Auth0, Cognito, social login).',
+  'auth.oauth2.grant.access': 'I only have an access token',
+  'auth.oauth2.grant.access.desc': 'Use it as a token pool. If it expires mid-run, requests will start failing.',
+  'auth.oauth2.username': 'Username',
+  'auth.oauth2.password': 'Password',
+  'auth.oauth2.users.toggle': 'Log in multiple users (optional)',
+  'auth.oauth2.users': 'Accounts (CSV)',
+  'auth.oauth2.usersHint':
+    'A username,password header plus one account per row \u2014 each virtual user logs in as the next row.',
+  'auth.oauth2.refreshToken': 'Refresh token',
+  'auth.oauth2.refreshTokenHint':
+    'Copy it ONCE from the logged-in app or the browser devtools (Application \u2192 Storage, or the token response). tmula exchanges it for fresh access tokens for the whole run. It is stored in the run\u2019s spec on this control plane (like any login body).',
+  'auth.oauth2.accessToken': 'Access token',
+  'auth.oauth2.accessTokenHint':
+    'Becomes a one-entry token pool. Access tokens expire \u2014 a long run may start failing when it does; prefer a refresh token if you have one.',
+  'auth.oauth2.accessToken.apply': 'Use as a token pool',
+  'auth.oauth2.clientId': 'Client ID',
+  'auth.oauth2.clientIdHint': 'Sent as client_id when your IdP requires it (optional otherwise).',
+  'auth.oauth2.clientSecret': 'Client secret',
+  'auth.oauth2.clientSecretHint': 'Sent as client_secret \u2014 required for server-to-server, sometimes for refresh. Stored in the run\u2019s spec on this control plane (like any login body); prefer a throwaway test client.',
+  'auth.oauth2.scope': 'Scope (optional)',
+  'auth.oauth2.scopeHint': 'Space-separated scopes, sent as scope when set.',
+  'auth.oauth2.advanced': 'Generated login flow (JSON)',
+  'auth.oauth2.advancedHint':
+    'This is what the guide assembled \u2014 the same raw flow the Login mode edits. Changing an answer above regenerates it.',
+
+  // Auth · the Advanced fold hiding the expert strategies (mint / exec)
+  'auth.advanced.modes': 'More ways to authenticate (expert)',
 
   // Auth · imported (P7) — success banner shown when an import auto-detects auth
   'auth.imported.login': 'Imported — your login flow is ready. Review it below, or just start the run.',
@@ -348,6 +408,12 @@ const en: Record<string, string> = {
   'auth.bootstrap.teardownHint': 'A JSON array of steps that delete each account. {{.subject}} is the account id.',
   'auth.bootstrap.teardownStart': 'Teardown start step',
   'auth.bootstrap.teardownStartHint': 'Optional teardown entry step (defaults to the first).',
+
+  // Auth · mint advisory (import detected a managed IdP — mint cannot work there)
+  'auth.advisory.mintManagedIdp':
+    'This service\u2019s tokens are issued by {host}, a managed identity provider that holds the signing key \u2014 a locally minted (self-issued) token will be rejected. Use the OAuth2 mode instead.',
+  'auth.advisory.mintManagedIdp.generic':
+    'This service\u2019s tokens are issued by a managed identity provider that holds the signing key \u2014 a locally minted (self-issued) token will be rejected. Use the OAuth2 mode instead.',
 
   // Auth · mint (local JWT signing, M1)
   'auth.mint.lead':
@@ -743,18 +809,76 @@ const ko: Record<string, string> = {
     '시뮬레이션 트래픽이 인증하는 방식입니다. 끄면 익명으로 실행하고, 토큰 풀을 제공하거나, 로그인 흐름으로 토큰을 발급받거나, 일회용 계정을 생성할 수 있습니다.',
   'auth.mode.none': '없음',
   'auth.mode.none.desc': '익명으로 실행 — 자격 증명을 보내지 않습니다.',
-  'auth.mode.pool': '토큰 풀',
-  'auth.mode.pool.desc': '미리 발급한 토큰을 붙여넣거나 업로드합니다. 사용자마다 하나씩 배정됩니다.',
-  'auth.mode.login': '로그인 (토큰 발급)',
-  'auth.mode.login.desc': '로그인 흐름을 한 번 실행해 응답에서 토큰을 캡처합니다.',
-  'auth.mode.bootstrap': '테스트 계정 생성',
-  'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다.',
+  'auth.mode.pool': '이미 토큰이 있어요',
+  'auth.mode.pool.desc': '가장 쉬운 길. bearer 토큰이나 API 키 하나, 또는 미리 발급한 토큰 목록을 붙여넣거나 업로드합니다 — 사용자마다 하나씩 배정됩니다.',
+  'auth.mode.login': '로그인해서 토큰을 받아요',
+  'auth.mode.login.desc': '로그인 URL과 본문만 주면 tmula가 로그인하고 토큰을 캡처합니다.',
+  'auth.mode.bootstrap': '계정을 만들어서 테스트해요',
+  'auth.mode.bootstrap.desc': '사용자마다 실제 계정을 가입시킨 뒤 정리합니다. 비프로덕션 전용, 확인 게이트가 있습니다.',
   'auth.mode.mint': '토큰을 로컬에서 서명(자체 발급 JWT)',
   'auth.mode.mint.desc':
     '토큰이 자체 발급 JWT이고 서명 키를 직접 보유한 서비스용입니다. tmula가 사용자마다 JWT를 새로 서명합니다 — 로그인이 없습니다. Auth0/Cognito/Firebase에는 사용할 수 없습니다.',
   'auth.mode.exec': '명령으로 토큰 가져오기(탈출구)',
   'auth.mode.exec.desc':
     '최후의 수단입니다. 사용자마다 직접 만든 로컬 명령을 실행해 stdout에서 토큰을 읽습니다 — 다른 전략으로 표현할 수 없는 인증용입니다. 게이트가 걸려 있고, 로컬에서 실행됩니다.',
+
+  // Auth · 패턴 생성기 (subject/token 템플릿으로 N개 행 생성)
+  'auth.pattern.toggle': '패턴으로 계정 생성',
+  'auth.pattern.hint':
+    'subject/secret 템플릿에 {{.userIndex}}와 개수를 채우면 tmula가 위 상자에 행을 생성합니다. 아주 큰 풀(10만+)은 CLI 시나리오 파일의 usersPattern을 쓰세요(서버에서 생성).',
+  'auth.pattern.subject': 'Subject 템플릿',
+  'auth.pattern.subjectHint': '예: user{{.userIndex}} \u2014 비우면 토큰만 있는 목록이 됩니다.',
+  'auth.pattern.token': 'Secret 템플릿',
+  'auth.pattern.tokenHint': '예: pw-{{.userIndex}} (로그인의 비밀번호 또는 풀의 토큰). 불투명 JWT에는 쓸 수 없습니다 \u2014 그건 mint의 몫입니다.',
+  'auth.pattern.count': '개수',
+  'auth.pattern.generate': '생성',
+  'auth.pattern.generated': '{count}개 행을 생성했습니다.',
+
+  // Auth · OAuth2 가이드 ("OAuth2 서비스예요" 조립기)
+  'auth.mode.oauth2': 'OAuth2 서비스예요',
+  'auth.mode.oauth2.desc': '토큰 URL과 로그인 방식, 두 가지만 답하면 tmula가 로그인 흐름을 만들어 줍니다.',
+  'auth.oauth2.lead':
+    'OAuth2 지식이 없어도 됩니다: 토큰 URL을 넣고 로그인 방식을 고르면 tmula가 토큰 교환을 조립하고, 실행 중에도 갱신합니다.',
+  'auth.oauth2.tokenUrl': '토큰 URL',
+  'auth.oauth2.tokenUrlHint':
+    '토큰을 발급하는 엔드포인트입니다(예: https://idp.example.com/oauth/token). openIdConnect 서비스라면 discovery 문서의 token_endpoint를 넣으세요.',
+  'auth.oauth2.discovery':
+    '이 서비스는 {url} 에 OpenID Connect discovery 문서를 게시합니다 \u2014 열어서 token_endpoint 값을 위의 토큰 URL에 붙여넣으세요.',
+  'auth.oauth2.grant': '어떻게 로그인하나요?',
+  'auth.oauth2.grantHint': '가진 것에 맞는 답을 고르면 tmula가 grant를 알아서 고릅니다.',
+  'auth.oauth2.grant.password': '아이디/비밀번호로',
+  'auth.oauth2.grant.password.desc': '가상 사용자마다 자기 계정으로(또는 한 계정을 공유해서) 로그인합니다.',
+  'auth.oauth2.grant.cc': '클라이언트 키로 (서버 간)',
+  'auth.oauth2.grant.cc.desc': '머신 아이덴티티: client_id + client_secret, 토큰 하나를 모든 사용자가 공유합니다.',
+  'auth.oauth2.grant.refresh': '앱/브라우저에서 이미 로그인했어요',
+  'auth.oauth2.grant.refresh.desc':
+    '앱이나 개발자도구에서 refresh token을 1회 복사해 붙여넣으세요 \u2014 사람 동의 화면이 필요한 서비스(Auth0, Cognito, 소셜 로그인)의 정답 경로입니다.',
+  'auth.oauth2.grant.access': 'access token만 있어요',
+  'auth.oauth2.grant.access.desc': '토큰 풀로 사용합니다. 실행 중에 만료되면 요청이 실패하기 시작할 수 있습니다.',
+  'auth.oauth2.username': '아이디',
+  'auth.oauth2.password': '비밀번호',
+  'auth.oauth2.users.toggle': '여러 사용자로 로그인 (선택)',
+  'auth.oauth2.users': '계정 목록 (CSV)',
+  'auth.oauth2.usersHint': 'username,password 헤더와 행마다 계정 하나 \u2014 가상 사용자마다 다음 행으로 로그인합니다.',
+  'auth.oauth2.refreshToken': 'Refresh token',
+  'auth.oauth2.refreshTokenHint':
+    '로그인된 앱이나 브라우저 개발자도구(Application \u2192 Storage, 또는 토큰 응답)에서 한 번만 복사하세요. tmula가 실행 내내 새 access token으로 교환합니다. 다른 로그인 본문과 마찬가지로 이 컨트롤 플레인의 실행 spec에 저장됩니다.',
+  'auth.oauth2.accessToken': 'Access token',
+  'auth.oauth2.accessTokenHint':
+    '항목 1개짜리 토큰 풀이 됩니다. access token은 만료됩니다 \u2014 긴 실행은 만료 시점부터 실패할 수 있으니, refresh token이 있다면 그쪽을 쓰세요.',
+  'auth.oauth2.accessToken.apply': '토큰 풀로 사용',
+  'auth.oauth2.clientId': 'Client ID',
+  'auth.oauth2.clientIdHint': 'IdP가 요구하면 client_id로 전송됩니다(그 외에는 선택).',
+  'auth.oauth2.clientSecret': 'Client secret',
+  'auth.oauth2.clientSecretHint': 'client_secret으로 전송됩니다 \u2014 서버 간 통신에는 필수, refresh에도 필요할 수 있습니다. 다른 로그인 본문과 마찬가지로 이 컨트롤 플레인의 실행 spec에 저장되니, 일회용 테스트 클라이언트를 권장합니다.',
+  'auth.oauth2.scope': 'Scope (선택)',
+  'auth.oauth2.scopeHint': '공백으로 구분한 scope 목록입니다. 입력하면 scope로 전송됩니다.',
+  'auth.oauth2.advanced': '생성된 로그인 흐름 (JSON)',
+  'auth.oauth2.advancedHint':
+    '가이드가 조립한 결과입니다 \u2014 로그인 모드가 편집하는 것과 같은 raw 흐름입니다. 위 답을 바꾸면 다시 생성됩니다.',
+
+  // Auth · 전문가 전략(mint / exec)을 감추는 Advanced 접힘
+  'auth.advanced.modes': '다른 인증 방법 (전문가)',
 
   // Auth · imported (P7) — 가져오기가 인증을 자동 감지했을 때 표시되는 성공 배너
   'auth.imported.login': '가져왔습니다 — 로그인 흐름이 준비됐습니다. 아래에서 확인하거나 바로 실행하세요.',
@@ -882,6 +1006,12 @@ const ko: Record<string, string> = {
   'auth.bootstrap.teardownHint': '각 계정을 삭제하는 단계의 JSON 배열입니다. {{.subject}}는 계정 id입니다.',
   'auth.bootstrap.teardownStart': '정리 시작 단계',
   'auth.bootstrap.teardownStartHint': '선택 정리 진입 단계입니다(기본값: 첫 단계).',
+
+  // Auth · mint 경고 (임포트가 관리형 IdP를 감지 — mint가 동작할 수 없는 대상)
+  'auth.advisory.mintManagedIdp':
+    '이 서비스의 토큰은 서명 키를 보유한 관리형 IdP({host})가 발급합니다 \u2014 로컬에서 서명(mint)한 토큰은 거부됩니다. OAuth2 모드를 사용하세요.',
+  'auth.advisory.mintManagedIdp.generic':
+    '이 서비스의 토큰은 서명 키를 보유한 관리형 IdP가 발급합니다 \u2014 로컬에서 서명(mint)한 토큰은 거부됩니다. OAuth2 모드를 사용하세요.',
 
   // Auth · mint (로컬 JWT 서명, M1)
   'auth.mint.lead':

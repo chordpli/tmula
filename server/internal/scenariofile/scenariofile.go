@@ -88,6 +88,10 @@ type Scenario struct {
 	// (a domain.SignupFlow) without making it the run's auth. It carries no secret —
 	// the token is captured from the live signup response. Omit it for no suggestion.
 	SuggestedSignup *AuthSignup `json:"suggestedSignup,omitempty"`
+	// AuthAdvisories are import-time hints about the document's auth the importer
+	// could not act on (managed-IdP mint footgun, openIdConnect discovery pointer).
+	// Expand carries them onto the spec verbatim; the run path never reads them.
+	AuthAdvisories []domain.AuthAdvisory `json:"authAdvisories,omitempty"`
 	// Metrics, when set, correlates the run with server-side Prometheus series:
 	// each named query is fetched over the run's window and shown in the report
 	// beside the client-side stats. The Prometheus host must be allowlisted.
@@ -140,6 +144,13 @@ type Auth struct {
 	// It carries the same rows Users would (tokens for "pool", username/password
 	// login inputs for "login").
 	Source *AuthSource `json:"source,omitempty"`
+	// UsersPattern, when set, GENERATES the credential rows from a subject/token
+	// template pair and a count (subject "user{{.userIndex}}", token
+	// "pw-{{.userIndex}}", count 100000) instead of authoring or loading them —
+	// so tens of thousands of accounts need no file. Mutually exclusive with Users
+	// and Source. Materialized into entries at Expand time; the token template is
+	// a secret and never rides the wire (see auth.GeneratorSource).
+	UsersPattern *AuthUsersPattern `json:"usersPattern,omitempty"`
 	// Login, when set (strategy "login"), describes how to mint a token: a
 	// standalone login flow plus which response captures become the token (and
 	// subject), and an optional scope. The token is minted at run time and never
@@ -329,6 +340,26 @@ type AuthSource struct {
 	// Format is the body encoding: csv (subject,token header), jsonl
 	// ({subject,token} per line) or tokens (one secret per line).
 	Format string `json:"format,omitempty"`
+	// MaxBytes, when positive, overrides the default byte cap on the referenced
+	// file (the cap itself always stands — an override moves it, never disables
+	// it). Zero means the default (512 MiB).
+	MaxBytes int64 `json:"maxBytes,omitempty"`
+}
+
+// AuthUsersPattern generates credential rows from templates instead of authoring
+// or loading them: Subject and Token are Go text/template strings rendered with
+// {{.userIndex}} for i=0..Count-1. For "pool" the Token is a ready secret
+// (typically only useful for non-opaque secrets — an opaque JWT cannot be
+// patterned, that is mint's job); for "login" it is the password each generated
+// username logs in with. It carries the same subject/token vocabulary as an
+// inline Credential.
+type AuthUsersPattern struct {
+	// Subject is the per-row subject template; empty yields empty subjects.
+	Subject string `json:"subject,omitempty"`
+	// Token is the per-row secret/password template (required).
+	Token string `json:"token"`
+	// Count is how many rows to generate (positive, within the pool ceiling).
+	Count int `json:"count"`
 }
 
 // Credential is one pre-supplied principal in the compact file: a non-sensitive
@@ -575,6 +606,12 @@ func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, er
 		spec.SuggestedSignup = flow
 	}
 
+	// Auth advisories are advisory-only import hints; carry them verbatim so the
+	// /import response can surface them.
+	if len(s.AuthAdvisories) > 0 {
+		spec.AuthAdvisories = append([]domain.AuthAdvisory(nil), s.AuthAdvisories...)
+	}
+
 	if s.Metrics != nil {
 		src := domain.MetricsSource{PrometheusURL: s.Metrics.Prometheus, Queries: s.Metrics.Queries}
 		if err := src.Validate(); err != nil {
@@ -669,7 +706,7 @@ func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.Credent
 // than deferred to the run path. exec is mutually exclusive with the pool-shaped inputs
 // (inline users / a source) and the other strategies' blocks.
 func buildExecCredentials(a Auth) (domain.CredentialPool, error) {
-	if len(a.Users) > 0 || a.Source != nil {
+	if len(a.Users) > 0 || a.Source != nil || a.UsersPattern != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy mints its own token from a command and takes no inline users or source", domain.CredExec)
 	}
 	if a.Login != nil || a.Mint != nil {
@@ -708,7 +745,7 @@ func buildExecCredentials(a Auth) (domain.CredentialPool, error) {
 // encoding) runs in domain.MintSpec.Validate via runspec.Validate, so this builder
 // only translates the authored block into the domain shape and parses the durations.
 func buildMintCredentials(a Auth) (domain.CredentialPool, error) {
-	if len(a.Users) > 0 || a.Source != nil {
+	if len(a.Users) > 0 || a.Source != nil || a.UsersPattern != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy self-issues a JWT and takes no inline users or source", domain.CredMint)
 	}
 	if a.Login != nil {
@@ -758,18 +795,18 @@ func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.Creden
 	if a.Login != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
 	}
-	hasUsers, hasSource := len(a.Users) > 0, a.Source != nil
-	if hasUsers && hasSource {
-		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth takes either inline users or a source, not both")
+	hasUsers, hasSource, hasPattern := len(a.Users) > 0, a.Source != nil, a.UsersPattern != nil
+	if err := exactlyOneAuthRowSource(hasUsers, hasSource, hasPattern); err != nil {
+		return domain.CredentialPool{}, err
 	}
-	if !hasUsers && !hasSource {
+	if !hasUsers && !hasSource && !hasPattern {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth needs inline users or a source for the %q strategy", domain.CredPool)
 	}
 
 	if hasSource && keepSourceRef {
 		// Ship the reference unresolved (distributed engine path): validate its
 		// shape but do not read it — the engine's workers load it locally.
-		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format}
+		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format, MaxBytes: a.Source.MaxBytes}
 		if err := ref.Validate(); err != nil {
 			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
 		}
@@ -799,6 +836,19 @@ func resolveAuthRows(a Auth, dir string) ([]domain.Credential, error) {
 		}
 		return entries, nil
 	}
+	if a.UsersPattern != nil {
+		// Generate the rows from the pattern, materialized here (never carried as a
+		// reference — the token template is a secret).
+		gen, err := auth.NewGeneratorSource(a.UsersPattern.Subject, a.UsersPattern.Token, a.UsersPattern.Count)
+		if err != nil {
+			return nil, fmt.Errorf("scenariofile: auth.usersPattern: %w", err)
+		}
+		entries, err := gen.Load(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("scenariofile: auth.usersPattern: %w", err)
+		}
+		return entries, nil
+	}
 	src, err := credentialSourceFor(*a.Source, dir)
 	if err != nil {
 		return nil, err
@@ -808,6 +858,23 @@ func resolveAuthRows(a Auth, dir string) ([]domain.Credential, error) {
 		return nil, fmt.Errorf("scenariofile: %w", err)
 	}
 	return entries, nil
+}
+
+// exactlyOneAuthRowSource rejects a conflict among the three ways to supply
+// credential rows (inline users, an external source, a generated pattern). At
+// most one may be set; zero is allowed here (the caller decides whether that is
+// an error for its strategy — the single-identity login accepts none).
+func exactlyOneAuthRowSource(hasUsers, hasSource, hasPattern bool) error {
+	n := 0
+	for _, set := range []bool{hasUsers, hasSource, hasPattern} {
+		if set {
+			n++
+		}
+	}
+	if n > 1 {
+		return fmt.Errorf("scenariofile: auth takes only one of inline users, a source, or a usersPattern")
+	}
+	return nil
 }
 
 // buildLoginCredentials compiles the login authoring block into a login pool plus
@@ -828,12 +895,12 @@ func resolveAuthRows(a Auth, dir string) ([]domain.Credential, error) {
 // always arrives at the run path with Source nil and real in-process entries. With
 // no users and no source, it is the unchanged single-identity login.
 func buildLoginCredentials(a Auth, dir string) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
-	hasUsers, hasSource := len(a.Users) > 0, a.Source != nil
-	if hasUsers && hasSource {
-		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy takes either inline login-input users or a source, not both", domain.CredLogin)
+	hasUsers, hasSource, hasPattern := len(a.Users) > 0, a.Source != nil, a.UsersPattern != nil
+	if err := exactlyOneAuthRowSource(hasUsers, hasSource, hasPattern); err != nil {
+		return domain.CredentialPool{}, nil, err
 	}
 	var entries []domain.Credential
-	if hasUsers || hasSource {
+	if hasUsers || hasSource || hasPattern {
 		// Login-input rows are always resolved to in-process entries here — a login
 		// pool never ships a source reference to a distributed engine (login is
 		// rejected with workers/--engine), so the run path always carries real rows.
@@ -918,7 +985,7 @@ func buildLoginCredentials(a Auth, dir string) (domain.CredentialPool, *runspec.
 // runs in domain.CredentialPool.Validate / runspec.Validate; this builder only
 // translates the authored steps into the domain shape.
 func buildBootstrapCredentials(a Auth) (domain.CredentialPool, error) {
-	if len(a.Users) > 0 || a.Source != nil {
+	if len(a.Users) > 0 || a.Source != nil || a.UsersPattern != nil {
 		return domain.CredentialPool{}, fmt.Errorf("scenariofile: the %q strategy provisions accounts from a signup flow and takes no inline users or source", domain.CredBootstrapSignup)
 	}
 	if a.Login != nil {
@@ -1017,7 +1084,7 @@ func credentialSourceFor(a AuthSource, dir string) (auth.CredentialSource, error
 	if root == "" {
 		root = "."
 	}
-	return auth.FileSource{Root: root, Path: a.File, Format: format}, nil
+	return auth.FileSource{Root: root, Path: a.File, Format: format, MaxBytes: a.MaxBytes}, nil
 }
 
 // buildTemplates maps each request-bearing step to an API template keyed t_<id>.

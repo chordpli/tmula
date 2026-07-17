@@ -398,3 +398,42 @@ func TestReportShareExpired(t *testing.T) {
 		t.Error("share before expiry must not be expired")
 	}
 }
+
+// TestCredentialWireDecode pins the INBOUND wire contract: a JSON credential
+// entry posted by the console ({"subject","token"}) must land its token in
+// Secret — encoding/json's json:"-" would otherwise silently DROP it, running
+// the pool with empty secrets. Marshal stays secret-free (masking at rest,
+// AD-011): the token is write-only across the wire.
+func TestCredentialWireDecode(t *testing.T) {
+	var c Credential
+	if err := json.Unmarshal([]byte(`{"subject":"alice","token":"tok-123"}`), &c); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if c.Subject != "alice" {
+		t.Errorf("subject = %q, want alice", c.Subject)
+	}
+	if c.Secret != "tok-123" {
+		t.Errorf("secret = %q, want tok-123 (the wire token must not be dropped)", c.Secret)
+	}
+
+	out, err := json.Marshal(Credential{Subject: "alice", Secret: "tok-123", Refresh: "ref-9"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if s := string(out); strings.Contains(s, "tok-123") || strings.Contains(s, "ref-9") || strings.Contains(s, "token") {
+		t.Errorf("marshal leaked a secret: %s (masking at rest, AD-011)", s)
+	}
+}
+
+// TestCredentialPoolWireDecode covers the pool-level path the console posts:
+// entries' tokens survive into Secret through the containing struct's decode.
+func TestCredentialPoolWireDecode(t *testing.T) {
+	var p CredentialPool
+	raw := `{"id":"web-pool","strategy":"pool","entries":[{"subject":"a","token":"t-a"},{"token":"t-b"}]}`
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(p.Entries) != 2 || p.Entries[0].Secret != "t-a" || p.Entries[1].Secret != "t-b" {
+		t.Fatalf("entries = %+v, want secrets t-a and t-b", p.Entries)
+	}
+}

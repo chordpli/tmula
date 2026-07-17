@@ -15,6 +15,7 @@ coverage.*
 # --- Node / web ---
 web/node_modules/
 web/dist/
+web/*.tsbuildinfo
 node_modules/
 
 # Built React UI assets copied into the embed dir (index.html placeholder stays tracked)

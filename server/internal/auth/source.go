@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"text/template"
 
 	"github.com/chordpli/tmula/server/internal/domain"
 )
@@ -30,9 +32,17 @@ const (
 	Tokens Format = "tokens"
 )
 
-// credSourceMaxBytes caps how much a file source will read by default (8 MiB),
-// large enough for tens of thousands of tokens while refusing a runaway file.
-const credSourceMaxBytes = 8 << 20
+// credSourceMaxBytes caps how much a file source will read by default (512 MiB).
+// A JWT is ~1 KiB, so a hundreds-of-thousands-of-accounts JSONL pool runs to
+// hundreds of MB; parsing is streaming (ParseReader), so the cap bounds a
+// runaway file, not memory-per-read. A scenario's auth.source.maxBytes can
+// override it (the cap itself always stands — an override must be positive).
+const credSourceMaxBytes = 512 << 20
+
+// credSourceLineMaxBytes bounds ONE line of a JSONL/tokens body (1 MiB). A line
+// is a single credential, so its bound is deliberately decoupled from the file
+// cap — raising the file cap must not let one absurd line balloon the scanner.
+const credSourceLineMaxBytes = 1 << 20
 
 // CredentialSource loads a set of credentials from somewhere external to the
 // scenario document — an inline list, an environment variable, or a file — so an
@@ -47,31 +57,38 @@ type CredentialSource interface {
 // trailing newline, and errors when zero credentials are parsed (mirroring
 // NewPoolProvider, which needs at least one credential).
 func Parse(format Format, body []byte) ([]domain.Credential, error) {
+	return ParseReader(format, bytes.NewReader(body))
+}
+
+// ParseReader is the streaming form of Parse: it decodes credentials straight
+// off a reader — one CSV record / one line at a time — so a hundreds-of-MB pool
+// file never needs a whole-body buffer (only the parsed rows themselves).
+func ParseReader(format Format, r io.Reader) ([]domain.Credential, error) {
 	switch format {
 	case CSV:
-		return parseCSV(body)
+		return parseCSV(r)
 	case JSONL:
-		return parseJSONL(body)
+		return parseJSONL(r)
 	case Tokens:
-		return parseTokens(body)
+		return parseTokens(r)
 	default:
 		return nil, fmt.Errorf("auth: unknown credential format %q (want one of %q, %q, %q)", format, CSV, JSONL, Tokens)
 	}
 }
 
 // parseCSV reads a header row that must include a "token" column (and may
-// include an optional "subject" column), then one credential per data row.
-func parseCSV(body []byte) ([]domain.Credential, error) {
-	r := csv.NewReader(bytes.NewReader(body))
-	r.FieldsPerRecord = -1 // tolerate ragged rows; we index by header position
-	records, err := r.ReadAll()
+// include an optional "subject" column), then one credential per data row,
+// streaming record by record.
+func parseCSV(r io.Reader) ([]domain.Credential, error) {
+	cr := csv.NewReader(r)
+	cr.FieldsPerRecord = -1 // tolerate ragged rows; we index by header position
+	header, err := cr.Read()
+	if err == io.EOF {
+		return nil, fmt.Errorf("auth: csv credential source is empty")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("auth: parse csv: %w", err)
 	}
-	if len(records) == 0 {
-		return nil, fmt.Errorf("auth: csv credential source is empty")
-	}
-	header := records[0]
 	subjectIdx, tokenIdx := -1, -1
 	for i, col := range header {
 		switch strings.TrimSpace(col) {
@@ -84,8 +101,15 @@ func parseCSV(body []byte) ([]domain.Credential, error) {
 	if tokenIdx < 0 {
 		return nil, fmt.Errorf("auth: csv credential source needs a \"token\" column header")
 	}
-	out := make([]domain.Credential, 0, len(records)-1)
-	for _, rec := range records[1:] {
+	var out []domain.Credential
+	for {
+		rec, err := cr.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("auth: parse csv: %w", err)
+		}
 		if tokenIdx >= len(rec) {
 			return nil, fmt.Errorf("auth: csv row %v is missing its token column", rec)
 		}
@@ -107,10 +131,12 @@ type jsonlCred struct {
 	Token   string `json:"token"`
 }
 
-// parseJSONL reads one {subject,token} object per non-blank line.
-func parseJSONL(body []byte) ([]domain.Credential, error) {
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(make([]byte, 0, 64*1024), credSourceMaxBytes)
+// parseJSONL reads one {subject,token} object per non-blank line, streaming.
+// The scanner's max token is the per-LINE bound, deliberately decoupled from
+// the file cap (a line is one credential).
+func parseJSONL(r io.Reader) ([]domain.Credential, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), credSourceLineMaxBytes)
 	var out []domain.Credential
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -135,10 +161,11 @@ func parseJSONL(body []byte) ([]domain.Credential, error) {
 	return out, nil
 }
 
-// parseTokens reads one secret per non-blank line, leaving the subject empty.
-func parseTokens(body []byte) ([]domain.Credential, error) {
-	sc := bufio.NewScanner(bytes.NewReader(body))
-	sc.Buffer(make([]byte, 0, 64*1024), credSourceMaxBytes)
+// parseTokens reads one secret per non-blank line, leaving the subject empty,
+// streaming. The scanner's max token is the per-LINE bound (see parseJSONL).
+func parseTokens(r io.Reader) ([]domain.Credential, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), credSourceLineMaxBytes)
 	var out []domain.Credential
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -257,18 +284,106 @@ func (s FileSource) Load(_ context.Context) ([]domain.Credential, error) {
 		return nil, fmt.Errorf("auth: open file credential source %q: %w", s.Path, err)
 	}
 	defer f.Close()
-	body, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, fmt.Errorf("auth: read file credential source %q: %w", s.Path, err)
-	}
-	if int64(len(body)) > limit {
+	// Stream the parse (no whole-body buffer) under the cap: reading one byte past
+	// the limit marks the file oversized. The cap check runs BEFORE any parse error
+	// is surfaced — a truncated final line is a symptom of the oversize, not the
+	// operator's real problem.
+	cr := &countingReader{r: io.LimitReader(f, limit+1)}
+	creds, perr := ParseReader(s.Format, cr)
+	if cr.n > limit {
 		return nil, fmt.Errorf("auth: file credential source %q exceeds the %d-byte limit", s.Path, limit)
 	}
-	creds, err := Parse(s.Format, body)
-	if err != nil {
-		return nil, fmt.Errorf("auth: file credential source %q: %w", s.Path, err)
+	if perr != nil {
+		return nil, fmt.Errorf("auth: file credential source %q: %w", s.Path, perr)
 	}
 	return creds, nil
+}
+
+// countingReader counts the bytes actually read through it, so FileSource can
+// tell "file bigger than the cap" apart from a clean EOF at the cap.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// generatorMaxCount caps how many credentials a pattern source materializes,
+// matching the in-process pool ceiling (api.maxLocalPoolUsers) so a pattern
+// cannot declare a pool larger than a single node can run.
+const generatorMaxCount = 1_000_000
+
+// GeneratorSource materializes a credential pool from a subject/secret TEMPLATE
+// pair and a count, rendering {{.userIndex}} for i=0..Count-1 — so an operator
+// can declare tens of thousands of accounts with a pattern instead of a file
+// (auth.usersPattern). It renders with the auth package's own mini-template
+// (the mint/exec convention), so it adds no dependency on the load package. The
+// secret TEMPLATE is a secret: a GeneratorSource is built and materialized at
+// Expand time and is NEVER carried as a non-secret reference (unlike FileSource/
+// EnvSource), so the template string never rides the wire.
+type GeneratorSource struct {
+	subject *template.Template // nil when the subject template is empty
+	secret  *template.Template
+	count   int
+}
+
+// NewGeneratorSource parses the subject/secret templates and validates the count
+// (positive and within the pool ceiling). The secret template is required; an
+// empty subject template yields empty subjects (the opaque-token shape). A
+// malformed template fails here; a template referencing an undefined variable
+// fails on Load (missingkey=error), matching the mint strategy's strictness.
+func NewGeneratorSource(subjectTemplate, secretTemplate string, count int) (*GeneratorSource, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("auth: pattern credential source needs a positive count")
+	}
+	if count > generatorMaxCount {
+		return nil, fmt.Errorf("auth: pattern credential source count %d exceeds the %d limit", count, generatorMaxCount)
+	}
+	if strings.TrimSpace(secretTemplate) == "" {
+		return nil, fmt.Errorf("auth: pattern credential source needs a secret (token/password) template")
+	}
+	g := &GeneratorSource{count: count}
+	if strings.TrimSpace(subjectTemplate) != "" {
+		t, err := parseClaimTemplate("pattern subject", subjectTemplate)
+		if err != nil {
+			return nil, err
+		}
+		g.subject = t
+	}
+	sec, err := parseClaimTemplate("pattern secret", secretTemplate)
+	if err != nil {
+		return nil, err
+	}
+	g.secret = sec
+	return g, nil
+}
+
+// Load materializes the pool: for each index it renders the subject (if any) and
+// the secret with {{.userIndex}} in scope. A render error (e.g. an undefined
+// variable under missingkey=error) aborts with the failing index named.
+func (g *GeneratorSource) Load(_ context.Context) ([]domain.Credential, error) {
+	out := make([]domain.Credential, 0, g.count)
+	for i := 0; i < g.count; i++ {
+		data := map[string]string{"userIndex": strconv.Itoa(i)}
+		var subject string
+		if g.subject != nil {
+			s, err := execTemplate(g.subject, data)
+			if err != nil {
+				return nil, fmt.Errorf("auth: pattern credential %d: render subject: %w", i, err)
+			}
+			subject = s
+		}
+		secret, err := execTemplate(g.secret, data)
+		if err != nil {
+			return nil, fmt.Errorf("auth: pattern credential %d: render secret: %w", i, err)
+		}
+		out = append(out, domain.Credential{Subject: subject, Secret: secret})
+	}
+	return out, nil
 }
 
 // SourceFromRef builds a CredentialSource from a non-secret domain reference (a
@@ -290,7 +405,7 @@ func SourceFromRef(ref domain.CredentialSourceRef, root string) (CredentialSourc
 	if root == "" {
 		root = "."
 	}
-	return FileSource{Root: root, Path: ref.File, Format: format}, nil
+	return FileSource{Root: root, Path: ref.File, Format: format, MaxBytes: ref.MaxBytes}, nil
 }
 
 // withinRoot reports whether path is root itself or lies inside it, comparing on

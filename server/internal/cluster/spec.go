@@ -69,6 +69,18 @@ type ShardSpec struct {
 	// identically ordered across every worker; the master-side SourceShared
 	// checksum (over subjects + order + count, never secrets) is the guard.
 	CredentialSource *domain.CredentialSourceRef `json:"credentialSource,omitempty"`
+
+	// Mint, when set, is the mint strategy's spec: the alg, TTL, claim/subject
+	// templates and the NON-SECRET signing-key REFERENCE (env/file). The resolved
+	// key rides on MintSpec.resolvedKey (json:"-"), so shipping a MintSpec crosses
+	// only the reference — never the key. Each worker resolves the key LOCALLY
+	// (auth.ResolveMintKey) and self-issues a JWT per virtual user by GLOBAL index
+	// (MintProvider.Acquire is deterministic per index), so the run fans out without
+	// a shared credential file. Operator contract: the SAME signing key must be
+	// deployed (as the referenced env/file) on every worker node; a worker that
+	// cannot resolve the reference fails its shard with a clear runtime error rather
+	// than running unauthenticated. Mutually exclusive with CredentialSource.
+	Mint *domain.MintSpec `json:"mint,omitempty"`
 }
 
 // Validate checks the spec is runnable before it is dispatched or executed.
@@ -106,6 +118,19 @@ func (s ShardSpec) Validate() error {
 	if s.CredentialSource != nil {
 		if err := s.CredentialSource.Validate(); err != nil {
 			return fmt.Errorf("cluster: shard spec credential source: %w", err)
+		}
+	}
+	// A shipped mint spec must be a well-formed (shape-only) reference: a signable
+	// alg, a positive TTL, and a key REFERENCE (env/file, never a key body). The
+	// worker resolves the reference locally; validating the shape here keeps a
+	// key-less or malformed mint spec off the wire. A spec carries EITHER a source
+	// reference OR a mint spec, never both.
+	if s.Mint != nil {
+		if s.CredentialSource != nil {
+			return fmt.Errorf("cluster: shard spec: credentialSource and mint are mutually exclusive")
+		}
+		if err := s.Mint.Validate(); err != nil {
+			return fmt.Errorf("cluster: shard spec mint: %w", err)
 		}
 	}
 	return nil

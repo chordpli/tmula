@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -275,5 +276,186 @@ func TestFileSourceMissing(t *testing.T) {
 	src := FileSource{Root: root, Path: "nope.csv", Format: CSV}
 	if _, err := src.Load(context.Background()); err == nil {
 		t.Error("a missing file should error")
+	}
+}
+
+// TestParseReaderMatchesParse pins the streaming decoder against the in-memory
+// one: same rows, same order, for every format.
+func TestParseReaderMatchesParse(t *testing.T) {
+	cases := []struct {
+		format Format
+		body   string
+	}{
+		{CSV, "subject,token\na,t-a\nb,t-b\n"},
+		{JSONL, `{"subject":"a","token":"t-a"}` + "\n" + `{"token":"t-b"}` + "\n"},
+		{Tokens, "t-a\n\nt-b\n"},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.format), func(t *testing.T) {
+			want, err := Parse(tc.format, []byte(tc.body))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			got, err := ParseReader(tc.format, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatalf("ParseReader: %v", err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("rows = %d, want %d", len(got), len(want))
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestFileSourceDefaultCapFitsLargeJWTPools: ~300k JWTs are hundreds of MB, so
+// the default cap must comfortably load a file well past the old 8 MiB — pin it
+// with a 9 MiB synthetic tokens file that the old default rejected.
+func TestFileSourceDefaultCapFitsLargeJWTPools(t *testing.T) {
+	root := t.TempDir()
+	var b bytes.Buffer
+	// ~9 MiB of 1KiB-ish token lines.
+	line := strings.Repeat("x", 1024)
+	for b.Len() < 9<<20 {
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.tokens"), b.Bytes(), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	src := FileSource{Root: root, Path: "big.tokens", Format: Tokens}
+	creds, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("a 9 MiB pool must load under the default cap now: %v", err)
+	}
+	if len(creds) < 9000 {
+		t.Errorf("rows = %d, want >= 9000", len(creds))
+	}
+}
+
+// TestFileSourceOversizeKeepsErrorMessage pins the cap error's exact shape across
+// the streaming rewrite, and that the cap error WINS over any parse error the
+// truncation causes.
+func TestFileSourceOversizeKeepsErrorMessage(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "big.jsonl"), []byte(`{"token":"abcdefgh"}`+"\n"+`{"token":"ijklmnop"}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	src := FileSource{Root: root, Path: "big.jsonl", Format: JSONL, MaxBytes: 10}
+	_, err := src.Load(context.Background())
+	if err == nil {
+		t.Fatal("a file over MaxBytes must be rejected")
+	}
+	want := `auth: file credential source "big.jsonl" exceeds the 10-byte limit`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+}
+
+// TestJSONLLineBufferDecoupledFromCap: the per-line scanner buffer is its own
+// bound (a line is a credential, not a file) — a 100 KiB line parses fine, and a
+// line over the 1 MiB line bound errors as a scan failure rather than OOMing.
+func TestJSONLLineBufferDecoupledFromCap(t *testing.T) {
+	long := `{"token":"` + strings.Repeat("t", 100<<10) + `"}`
+	creds, err := ParseReader(JSONL, strings.NewReader(long+"\n"))
+	if err != nil {
+		t.Fatalf("a 100 KiB line must parse: %v", err)
+	}
+	if len(creds) != 1 || len(creds[0].Secret) != 100<<10 {
+		t.Fatalf("parsed %d creds, secret len %d", len(creds), len(creds[0].Secret))
+	}
+
+	over := `{"token":"` + strings.Repeat("t", (1<<20)+64) + `"}`
+	if _, err := ParseReader(JSONL, strings.NewReader(over+"\n")); err == nil {
+		t.Fatal("a line over the 1 MiB line bound must error")
+	}
+}
+
+// TestSourceFromRefThreadsMaxBytes: the reference's maxBytes override reaches the
+// file source (a worker resolving a shipped reference honors the same cap the
+// authoring side declared).
+func TestSourceFromRefThreadsMaxBytes(t *testing.T) {
+	src, err := SourceFromRef(domain.CredentialSourceRef{File: "u.csv", Format: "csv", MaxBytes: 42}, ".")
+	if err != nil {
+		t.Fatalf("SourceFromRef: %v", err)
+	}
+	fs, ok := src.(FileSource)
+	if !ok {
+		t.Fatalf("source = %T, want FileSource", src)
+	}
+	if fs.MaxBytes != 42 {
+		t.Errorf("MaxBytes = %d, want 42", fs.MaxBytes)
+	}
+}
+
+// TestGeneratorSourceMaterializes renders subject+secret templates for i=0..N-1,
+// substituting {{.userIndex}}, in order.
+func TestGeneratorSourceMaterializes(t *testing.T) {
+	src, err := NewGeneratorSource("user{{.userIndex}}", "pw-{{.userIndex}}", 3)
+	if err != nil {
+		t.Fatalf("NewGeneratorSource: %v", err)
+	}
+	got, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []domain.Credential{
+		{Subject: "user0", Secret: "pw-0"},
+		{Subject: "user1", Secret: "pw-1"},
+		{Subject: "user2", Secret: "pw-2"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestGeneratorSourceEmptySubjectOK: a pattern may generate opaque secrets with
+// no subject (subject template empty → empty subject), the tokens-style shape.
+func TestGeneratorSourceEmptySubjectOK(t *testing.T) {
+	src, err := NewGeneratorSource("", "tok-{{.userIndex}}", 2)
+	if err != nil {
+		t.Fatalf("NewGeneratorSource: %v", err)
+	}
+	got, err := src.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 2 || got[0].Subject != "" || got[0].Secret != "tok-0" {
+		t.Fatalf("rows = %+v, want empty-subject tok-0/tok-1", got)
+	}
+}
+
+// TestGeneratorSourceRejectsBadInput: a non-positive count, a count over the cap,
+// an empty secret template, and a malformed template all fail loudly at build.
+func TestGeneratorSourceRejectsBadInput(t *testing.T) {
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "pw", 0); err == nil {
+		t.Error("count 0 should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "pw", generatorMaxCount+1); err == nil {
+		t.Error("count over the cap should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex}}", "", 1); err == nil {
+		t.Error("an empty secret template should be rejected")
+	}
+	if _, err := NewGeneratorSource("u{{.userInxed}}", "pw", 1); err != nil {
+		// A typo'd var is a build-time render error (missingkey=error) on Load, not
+		// at construction; assert Load surfaces it.
+		t.Fatalf("construction should not fail on a parseable-but-wrong var: %v", err)
+	}
+	badVar, _ := NewGeneratorSource("u{{.userInxed}}", "pw", 1)
+	if _, err := badVar.Load(context.Background()); err == nil {
+		t.Error("a template referencing an undefined var should fail on Load")
+	}
+	if _, err := NewGeneratorSource("u{{.userIndex", "pw", 1); err == nil {
+		t.Error("a malformed template should be rejected at construction")
 	}
 }

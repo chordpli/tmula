@@ -115,7 +115,17 @@ func (p *MintProvider) Acquire(_ context.Context, userIndex int) (domain.Credent
 		}
 		// A reserved standard claim a custom template sets wins over the stamped one,
 		// so an operator can override exp/sub deliberately; the common case is a fresh
-		// claim name that simply adds to the set.
+		// claim name that simply adds to the set. RFC 7519 NumericDate claims must be
+		// JSON numbers — a string "1735689600" is rejected by real verifiers — so an
+		// overridden exp/nbf/iat is parsed to a number (and fails loudly otherwise).
+		if isNumericDateClaim(name) {
+			n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				return domain.Credential{}, fmt.Errorf("auth: mint user %d: claim %q must render to a whole number of seconds since epoch (got %q)", userIndex, name, v)
+			}
+			claims[name] = n
+			continue
+		}
 		claims[name] = v
 	}
 
@@ -128,6 +138,16 @@ func (p *MintProvider) Acquire(_ context.Context, userIndex int) (domain.Credent
 		return domain.Credential{}, fmt.Errorf("auth: mint user %d: %w", userIndex, err)
 	}
 	return domain.Credential{Subject: subject, Secret: token}, nil
+}
+
+// isNumericDateClaim reports whether a claim name is an RFC 7519 NumericDate
+// (seconds since epoch) that must serialize as a JSON number.
+func isNumericDateClaim(name string) bool {
+	switch name {
+	case "exp", "nbf", "iat":
+		return true
+	}
+	return false
 }
 
 // parseClaimTemplate parses one claim/subject template under missingkey=error, the

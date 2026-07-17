@@ -5,19 +5,24 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
 )
 
 // securityScheme is the subset of an OpenAPI components.securitySchemes entry the
 // importer reads to derive auth. It spans the three families tmula can act on:
-// oauth2 (with flows), http (bearer), and apiKey (a static header). Anything else
-// (mutualTLS, openIdConnect, http basic) parses but yields no derivable auth.
+// oauth2 (with flows), http (bearer or basic), and apiKey (a static key). Anything
+// else (mutualTLS, openIdConnect, http digest) parses but yields no derivable auth.
 type securityScheme struct {
 	Type   string                `json:"type"`   // oauth2 | http | apiKey | ...
 	Scheme string                `json:"scheme"` // http: bearer | basic | ...
 	In     string                `json:"in"`     // apiKey: header | query | cookie
 	Name   string                `json:"name"`   // apiKey: the header/param name
 	Flows  map[string]oauth2Flow `json:"flows"`  // oauth2: password | clientCredentials | ...
+	// OpenIDConnectURL is the openIdConnect discovery document URL. The importer
+	// stays offline (it never fetches it) but surfaces it as an advisory so the
+	// operator can read the token_endpoint out of it for the OAuth2 route.
+	OpenIDConnectURL string `json:"openIdConnectUrl"`
 }
 
 // oauth2Flow is one OAuth2 flow object: its tokenUrl is the login endpoint and its
@@ -40,6 +45,11 @@ type derivedAuth struct {
 	auth        *scenariofile.Auth
 	header      string // the header injected on secured operations (e.g. Authorization)
 	headerValue string // the value template (e.g. "Bearer {{.token}}")
+	// queryParam, when set, appends "<name>={{.token|urlquery}}" to each secured
+	// operation's request path instead of injecting a header (the apiKey-in-query
+	// scheme). The template is space-free because parseRequest demands a two-field
+	// "METHOD /path" line.
+	queryParam string
 	// schemeNames are the scheme names this derivation covers, so a per-operation
 	// security requirement naming any of them marks that operation secured.
 	schemeNames map[string]bool
@@ -65,16 +75,11 @@ func deriveAuth(doc openAPIDoc, ops []apiOp) *derivedAuth {
 		return nil
 	}
 
-	// TODO(mint): emit an advisory "managed-IdP — cannot self-issue" warning here when
-	// the picked scheme is a third-party/managed IdP the operator does NOT control the
-	// signing key for — an `openIdConnect` scheme, or an `oauth2` scheme whose tokenUrl
-	// points at a managed issuer (Auth0/Cognito/Firebase/Okta host), or a bearerFormat
-	// naming an external JWKS. The mint strategy can ONLY sign for a key the operator
-	// holds (self-issued JWT, the M1 case), so suggesting it for a managed issuer is the
-	// #1 footgun. Deferred (not built now): the importer has no warning/notes channel
-	// surfaced to the UI yet, so this needs a new advisory surface (server field +
-	// web banner) rather than a one-line hook. Until then the web Auth card's mint
-	// helper text states the self-issued-only constraint (see auth.mode.mint.desc).
+	// The "managed-IdP — cannot self-issue" mint footgun is covered by the advisory
+	// channel: deriveAuthAdvisories (called from FromOpenAPI over ALL schemes, not
+	// just the picked one) emits mint-managed-idp for an openIdConnect scheme or an
+	// oauth2 tokenUrl on a managed issuer host. The mint strategy can ONLY sign for
+	// a key the operator holds (self-issued JWT, the M1 case).
 	switch strings.ToLower(scheme.Type) {
 	case "oauth2":
 		return deriveOAuth2(name, scheme)
@@ -82,15 +87,96 @@ func deriveAuth(doc openAPIDoc, ops []apiOp) *derivedAuth {
 		if strings.EqualFold(scheme.Scheme, "bearer") {
 			return deriveHTTPBearer(name, ops)
 		}
-		return nil // http basic / digest: no token flow to derive
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return deriveHTTPBasic(name)
+		}
+		return nil // http digest: no token flow to derive
 	case "apikey":
-		if strings.EqualFold(scheme.In, "header") && scheme.Name != "" {
+		if apiKeyIn(scheme) != "" {
 			return deriveAPIKey(name, scheme)
 		}
-		return nil // query/cookie apiKey: not a header we can inject here
+		return nil // unnamed or unknown-location apiKey: nothing to inject
 	default:
 		return nil
 	}
+}
+
+// deriveAuthAdvisories scans ALL declared security schemes (not just the one
+// picked for derivation) for auth the importer cannot act on itself and returns
+// import-time hints the UI surfaces:
+//
+//   - "openidconnect-discovery" (detail: the discovery URL) — the scheme is
+//     openIdConnect; the importer stays offline, so the operator reads the
+//     token_endpoint out of the discovery document for the OAuth2 route.
+//   - "mint-managed-idp" (detail: the IdP host) — the token issuer is a managed
+//     IdP (Auth0/Cognito/Firebase/Okta, or any openIdConnect issuer) whose
+//     signing key the operator does NOT hold, so the mint strategy cannot work
+//     (its tokens would be rejected). This is the #1 mint footgun.
+//
+// The scan is deterministic (sorted scheme order) and de-duplicated.
+func deriveAuthAdvisories(schemes map[string]securityScheme) []domain.AuthAdvisory {
+	var out []domain.AuthAdvisory
+	seen := map[domain.AuthAdvisory]bool{}
+	add := func(code, detail string) {
+		a := domain.AuthAdvisory{Code: code, Detail: detail}
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	for _, name := range sortedKeys(schemes) {
+		sc := schemes[name]
+		switch strings.ToLower(sc.Type) {
+		case "openidconnect":
+			add("openidconnect-discovery", sc.OpenIDConnectURL)
+			// Any openIdConnect issuer is a managed IdP from mint's point of view:
+			// the operator holds no signing key for it.
+			add("mint-managed-idp", hostOfURL(sc.OpenIDConnectURL))
+		case "oauth2":
+			for _, flow := range sc.Flows {
+				if host := hostOfURL(flow.TokenURL); host != "" && managedIdPHost(host) {
+					add("mint-managed-idp", host)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// managedIdPHost reports whether a token-issuer host belongs to a managed
+// identity provider the operator cannot hold the signing key for.
+func managedIdPHost(host string) bool {
+	host = strings.ToLower(host)
+	for _, suffix := range []string{
+		".auth0.com",
+		".okta.com",
+		".oktapreview.com",
+		".amazoncognito.com",
+		".firebaseapp.com",
+	} {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	switch host {
+	case "securetoken.google.com", "identitytoolkit.googleapis.com", "oauth2.googleapis.com":
+		return true
+	}
+	// Cognito's issuer hosts: cognito-idp.<region>.amazonaws.com.
+	return strings.HasPrefix(host, "cognito-idp.") && strings.HasSuffix(host, ".amazonaws.com")
+}
+
+// hostOfURL returns the host of an absolute URL, or "" for a relative or
+// malformed value (a relative tokenUrl points at the target itself — self-hosted).
+func hostOfURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.IsAbs() {
+		return u.Hostname()
+	}
+	return ""
 }
 
 // pickScheme chooses which security scheme to derive auth from. A scheme named by
@@ -125,11 +211,26 @@ func classifiable(sc securityScheme) bool {
 		flowName, _ := pickOAuth2Flow(sc.Flows)
 		return flowName != ""
 	case "http":
-		return strings.EqualFold(sc.Scheme, "bearer")
+		return strings.EqualFold(sc.Scheme, "bearer") || strings.EqualFold(sc.Scheme, "basic")
 	case "apikey":
-		return strings.EqualFold(sc.In, "header") && sc.Name != ""
+		return apiKeyIn(sc) != ""
 	default:
 		return false
+	}
+}
+
+// apiKeyIn returns the normalized location of a usable apiKey scheme (header,
+// query or cookie), or "" when the scheme is unnamed or somewhere the importer
+// cannot inject.
+func apiKeyIn(sc securityScheme) string {
+	if sc.Name == "" {
+		return ""
+	}
+	switch strings.ToLower(sc.In) {
+	case "header", "query", "cookie":
+		return strings.ToLower(sc.In)
+	default:
+		return ""
 	}
 }
 
@@ -209,19 +310,46 @@ func deriveHTTPBearer(name string, ops []apiOp) *derivedAuth {
 	}
 }
 
-// deriveAPIKey handles an apiKey-in-header scheme: a pool placeholder for the key
-// plus the named header injected as {{.token}} on secured operations. No login
-// flow is invented — the key is static.
-func deriveAPIKey(name string, sc securityScheme) *derivedAuth {
+// deriveHTTPBasic handles an http basic scheme: the credential row is username
+// (subject) + password (token), and secured operations carry an RFC 7617
+// Authorization header built by the run path's basicAuth template function. No
+// login flow exists to derive — basic re-sends the credential on every request.
+func deriveHTTPBasic(name string) *derivedAuth {
 	return &derivedAuth{
+		auth: &scenariofile.Auth{
+			Strategy: "pool",
+			Users:    []scenariofile.Credential{{Subject: "REPLACE_ME_USERNAME", Token: "REPLACE_ME_PASSWORD"}},
+		},
+		header:      "Authorization",
+		headerValue: "Basic {{basicAuth .subject .token}}",
+		schemeNames: map[string]bool{name: true},
+	}
+}
+
+// deriveAPIKey handles an apiKey scheme: a pool placeholder for the key plus the
+// key injected on secured operations where the scheme says it lives — the named
+// header as {{.token}}, the named query parameter appended to the request path,
+// or a Cookie header pairing the named cookie with {{.token}}. No login flow is
+// invented — the key is static.
+func deriveAPIKey(name string, sc securityScheme) *derivedAuth {
+	d := &derivedAuth{
 		auth: &scenariofile.Auth{
 			Strategy: "pool",
 			Users:    []scenariofile.Credential{{Subject: "tester", Token: "REPLACE_ME_API_KEY"}},
 		},
-		header:      sc.Name,
-		headerValue: "{{.token}}",
 		schemeNames: map[string]bool{name: true},
 	}
+	switch apiKeyIn(sc) {
+	case "query":
+		d.queryParam = sc.Name
+	case "cookie":
+		d.header = "Cookie"
+		d.headerValue = sc.Name + "={{.token}}"
+	default: // header
+		d.header = sc.Name
+		d.headerValue = "{{.token}}"
+	}
+	return d
 }
 
 // secures reports whether an operation requires one of the derived scheme(s).

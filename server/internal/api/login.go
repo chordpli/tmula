@@ -25,6 +25,10 @@ type loginAuth struct {
 	// shared is true for the client_credentials scope: every user shares one token
 	// (cache key 0) and one holder. Per-user mints one token per index.
 	shared bool
+	// prewarmConcurrency bounds the per-user prewarm burst: min(RateCap.MaxConcurrency,
+	// loginMaxPrewarmConcurrency), so priming 200k tokens is parallel yet never wider
+	// than the run's rate cap — the prewarm must not itself load-test the IdP.
+	prewarmConcurrency int
 
 	// sharedMu guards the lazy construction of the single shared holder. In the
 	// shared scope every seed() returns the SAME holder POINTER (and the same
@@ -55,8 +59,13 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		return nil, fmt.Errorf("api: login run has no login flow to mint tokens from")
 	}
 	flow := LoginFlow{
-		Graph:      spec.LoginFlow.Graph,
-		Templates:  spec.LoginFlow.Templates,
+		Graph: spec.LoginFlow.Graph,
+		// Form-urlencoded login bodies get their bare credential-row placeholders
+		// ({{.username}}/{{.password}} and aliases) piped through urlquery, so a
+		// password carrying &, =, + or a space survives the form decode byte-exact.
+		// Same convention as the refresh body (urlqueryRefreshToken); JSON bodies
+		// are untouched (raw substitution is correct there).
+		Templates:  urlqueryFormLoginTemplates(spec.LoginFlow.Templates),
 		Start:      spec.LoginFlow.Start,
 		MaxSteps:   spec.LoginFlow.MaxSteps,
 		TokenVar:   spec.LoginFlow.TokenVar,
@@ -96,20 +105,31 @@ func (s *Server) loginAuthFor(spec RunSpec, guard *safety.Guard) (*loginAuth, er
 		refreshRunner := load.NewRunner(s.adapter, spec.TargetEnv.BaseURL, map[domain.ID]domain.APITemplate{refreshTmpl.ID: refreshTmpl}, load.WithGuard(guard))
 		refreshFunc = NewRefreshTokenFunc(refreshRunner, refreshTmpl, spec.Seed)
 	}
-	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared)
+	return newLoginAuthFromToken(tokenFunc, refreshFunc, spec.CredentialPool.EffectiveLoginScope() == domain.LoginShared, spec.TargetEnv.RateCap.MaxConcurrency)
 }
 
+// loginMaxPrewarmConcurrency caps the per-user login prewarm burst regardless of
+// how generous the run's rate cap is, so priming a huge account pool does not slam
+// the IdP with thousands of simultaneous logins. The effective prewarm concurrency
+// is min(this, RateCap.MaxConcurrency).
+const loginMaxPrewarmConcurrency = 16
+
 // newLoginAuthFromToken builds a loginAuth over a token func, an OPTIONAL
-// refresh-token func, and scope. It is the single construction point for the
-// provider, so the run path and tests build the same seam. A nil refresh func keeps
-// the provider's Refresh on the re-login fallback path.
-func newLoginAuthFromToken(token auth.TokenFunc, refresh auth.RefreshTokenFunc, shared bool) (*loginAuth, error) {
+// refresh-token func, scope, and the run's rate-cap concurrency (which bounds the
+// prewarm burst). It is the single construction point for the provider, so the run
+// path and tests build the same seam. A nil refresh func keeps the provider's
+// Refresh on the re-login fallback path.
+func newLoginAuthFromToken(token auth.TokenFunc, refresh auth.RefreshTokenFunc, shared bool, rateCapMaxConcurrency int) (*loginAuth, error) {
 	provider, err := auth.NewLoginProvider(token)
 	if err != nil {
 		return nil, fmt.Errorf("api: build login provider: %w", err)
 	}
 	provider.SetRefreshToken(refresh) // nil-safe
-	return &loginAuth{provider: provider, shared: shared}, nil
+	return &loginAuth{
+		provider:           provider,
+		shared:             shared,
+		prewarmConcurrency: prewarmConcurrencyFor(rateCapMaxConcurrency, loginMaxPrewarmConcurrency),
+	}, nil
 }
 
 // cacheKey maps a user/arrival index onto the login provider's cache key. Per-user
@@ -182,13 +202,19 @@ func (l *loginAuth) refreshFunc(key int, holder load.CredentialHolder) load.Refr
 
 // Prewarm mints n tokens ahead of the run (per-user) or the single shared token
 // (shared), matching how the run will key them — so the first request of every
-// session has a token without a synchronous login on the hot path.
+// session has a token without a synchronous login on the hot path. The per-user
+// burst is bounded (prewarmBounded) so priming a large pool is parallel yet never
+// wider than the rate cap; the deduping provider still logs in each index exactly
+// once even under concurrency. Shared mints its single token directly.
 func (l *loginAuth) Prewarm(ctx context.Context, n int) error {
 	if l.shared {
 		_, err := l.provider.Acquire(ctx, 0)
 		return err
 	}
-	return l.provider.Prewarm(ctx, n)
+	return prewarmBounded(ctx, n, l.prewarmConcurrency, func(ctx context.Context, idx int) error {
+		_, err := l.provider.Acquire(ctx, idx)
+		return err
+	})
 }
 
 // refreshTemplateFor resolves the mid-run refresh transport's request template for a
@@ -275,6 +301,29 @@ var refreshTokenPlaceholderRE = regexp.MustCompile(`\{\{\s*\.refreshToken\s*\}\}
 // the placeholder (or does not reference it) is returned unchanged.
 func urlqueryRefreshToken(body string) string {
 	return refreshTokenPlaceholderRE.ReplaceAllString(body, "{{.refreshToken | urlquery}}")
+}
+
+// loginRowPlaceholderRE matches a bare credential-row placeholder — {{.username}},
+// {{.password}}, or the {{.subject}}/{{.secret}} aliases, tolerating internal
+// whitespace — that is NOT already piped through a builtin. The capture group is
+// the variable name, re-emitted with the urlquery pipe.
+var loginRowPlaceholderRE = regexp.MustCompile(`\{\{\s*\.(username|password|subject|secret)\s*\}\}`)
+
+// urlqueryFormLoginTemplates returns a copy of a login flow's templates with every
+// form-urlencoded body's bare credential-row placeholders piped through urlquery —
+// the same convention urlqueryRefreshToken applies to the refresh body — so a
+// password carrying &, =, + or a space survives the form decode byte-exact.
+// Non-form (JSON) templates are left byte-identical: raw substitution is correct
+// there. The input map is never mutated (the spec's templates are shared).
+func urlqueryFormLoginTemplates(templates map[domain.ID]domain.APITemplate) map[domain.ID]domain.APITemplate {
+	out := make(map[domain.ID]domain.APITemplate, len(templates))
+	for id, tmpl := range templates {
+		if isFormURLEncoded(tmpl.Headers) && tmpl.PayloadTemplate != "" {
+			tmpl.PayloadTemplate = loginRowPlaceholderRE.ReplaceAllString(tmpl.PayloadTemplate, "{{.$1 | urlquery}}")
+		}
+		out[id] = tmpl
+	}
+	return out
 }
 
 // deriveRefreshTemplate derives a grant_type=refresh_token request template from a
@@ -372,13 +421,17 @@ func isFormURLEncoded(headers map[string]string) bool {
 }
 
 // refreshGrantDrop is the set of form fields a refresh grant must not carry: the
-// grant selector itself (rewritten to refresh_token) and the password/
-// authorization-code grant inputs that a refresh exchange does not use.
+// grant selector itself (rewritten to refresh_token), the password/
+// authorization-code grant inputs that a refresh exchange does not use, and a
+// refresh_token the LOGIN body itself carried (the paste-a-refresh-token path:
+// the derived exchange sends only the freshly captured {{.refreshToken}} — a
+// duplicate param breaks strict IdPs and would pin refresh to the stale paste).
 var refreshGrantDrop = map[string]bool{
-	"grant_type": true,
-	"username":   true,
-	"password":   true,
-	"code":       true,
+	"grant_type":    true,
+	"username":      true,
+	"password":      true,
+	"code":          true,
+	"refresh_token": true,
 }
 
 // rewriteToRefreshGrant rewrites a parsed login form into a refresh-grant body: it

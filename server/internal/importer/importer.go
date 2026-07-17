@@ -65,13 +65,22 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 			Request: strings.ToUpper(o.method) + " " + o.path,
 			Body:    bodyExample(o.op),
 		}
-		// Inject the auth header on operations the security requirement covers (and
+		// Inject the auth material on operations the security requirement covers (and
 		// never on the login endpoint itself — minting a token is unauthenticated).
+		// A query apiKey rides the request path; everything else is a header.
 		if derived != nil && derived.secures(o.op, topLevel) && !isLoginRequest(derived, step.Request) {
-			if step.Headers == nil {
-				step.Headers = map[string]string{}
+			if derived.queryParam != "" {
+				sep := "?"
+				if strings.Contains(step.Request, "?") {
+					sep = "&"
+				}
+				step.Request += sep + derived.queryParam + "={{.token|urlquery}}"
+			} else {
+				if step.Headers == nil {
+					step.Headers = map[string]string{}
+				}
+				step.Headers[derived.header] = derived.headerValue
 			}
-			step.Headers[derived.header] = derived.headerValue
 		}
 		flow = append(flow, step)
 	}
@@ -83,6 +92,10 @@ func FromOpenAPI(data []byte) (scenariofile.Scenario, error) {
 	if derived != nil {
 		sc.Auth = derived.auth
 	}
+	// Advisories cover auth the importer cannot act on (managed-IdP mint footgun,
+	// openIdConnect discovery pointer) across ALL declared schemes, independent of
+	// which one (if any) was derivable above.
+	sc.AuthAdvisories = deriveAuthAdvisories(doc.parseSecuritySchemes())
 	// Offer a signup suggestion when a register/signup operation exists, independent
 	// of the primary auth above (a login may be the primary auth while a signup is
 	// suggested separately). Best-effort: no register op yields no suggestion, so a

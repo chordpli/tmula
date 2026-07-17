@@ -284,3 +284,36 @@ func TestNewRefreshTokenFuncGuarded(t *testing.T) {
 		t.Fatalf("off-allowlist refresh should be refused by the guard, got %v", err)
 	}
 }
+
+// TestDeriveRefreshTemplateFromRefreshTokenGrant pins the OAuth2-guide "paste a
+// refresh token" path: a login that ITSELF is a grant_type=refresh_token exchange
+// (the pasted token inline) derives a refresh template whose refresh_token field
+// is ONLY the freshly captured {{.refreshToken}} — the original pasted literal is
+// dropped, not duplicated beside it (a duplicate param breaks strict IdPs and
+// would pin refresh to the stale pasted token).
+func TestDeriveRefreshTemplateFromRefreshTokenGrant(t *testing.T) {
+	flow := oauthLoginFlow()
+	flow.Templates["ttoken"] = func() domain.APITemplate {
+		tm := flow.Templates["ttoken"]
+		tm.PayloadTemplate = "grant_type=refresh_token&refresh_token=PASTED_OPAQUE_TOKEN&client_id=c"
+		return tm
+	}()
+
+	tmpl, ok := deriveRefreshTemplate(flow)
+	if !ok {
+		t.Fatal("a form-encoded grant_type=refresh_token login should derive a refresh template")
+	}
+	form, err := url.ParseQuery(tmpl.PayloadTemplate)
+	if err != nil {
+		t.Fatalf("derived body is not a parseable form: %v (%q)", err, tmpl.PayloadTemplate)
+	}
+	if got := form["refresh_token"]; len(got) != 1 || got[0] != "{{.refreshToken | urlquery}}" {
+		t.Errorf("derived refresh_token values = %q, want exactly one {{.refreshToken | urlquery}} (the pasted literal must be dropped)", got)
+	}
+	if form.Get("client_id") != "c" {
+		t.Errorf("derived body lost client_id, got %q", tmpl.PayloadTemplate)
+	}
+	if strings.Contains(tmpl.PayloadTemplate, "PASTED_OPAQUE_TOKEN") {
+		t.Errorf("derived body still carries the pasted token literal: %q", tmpl.PayloadTemplate)
+	}
+}

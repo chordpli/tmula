@@ -3,6 +3,7 @@ package load
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -98,11 +99,24 @@ func Render(tmpl domain.APITemplate, baseURL string, cred domain.Credential, var
 	}, nil
 }
 
+// TemplateFuncs is the function set request templates render with, exported so
+// template lint/guard helpers (e.g. the importer's placeholder guard) parse with
+// exactly the run path's functions. basicAuth encodes an RFC 7617 Authorization
+// value from a username+password credential row, opening the http-basic route:
+// "Basic {{basicAuth .subject .token}}".
+func TemplateFuncs() template.FuncMap {
+	return template.FuncMap{
+		"basicAuth": func(user, pass string) string {
+			return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		},
+	}
+}
+
 func apply(name, text string, ctx map[string]string) (string, error) {
 	if !strings.Contains(text, "{{") {
 		return text, nil
 	}
-	t, err := template.New(name).Option("missingkey=error").Parse(text)
+	t, err := template.New(name).Option("missingkey=error").Funcs(TemplateFuncs()).Parse(text)
 	if err != nil {
 		return "", fmt.Errorf("load: parse template %s: %w", name, err)
 	}

@@ -541,6 +541,15 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		ref := *spec.CredentialPool.Source
 		credSource = &ref
 	}
+	// Distributed mint: ship the mint spec (alg/ttl/templates + the NON-SECRET key
+	// reference) so each worker resolves the key locally and self-issues per global
+	// index. The resolved key is json:"-", so only the reference crosses. Validate
+	// has confirmed a mint+workers pool is allowed (the key is deployed per node).
+	var mintSpec *domain.MintSpec
+	if spec.CredentialPool != nil && spec.CredentialPool.Strategy == domain.CredMint && spec.CredentialPool.Mint != nil {
+		m := *spec.CredentialPool.Mint
+		mintSpec = &m
+	}
 	return cluster.ShardSpec{
 		RunID:         runID,
 		ScenarioID:    scenarioIDForSpec(spec),
@@ -562,6 +571,9 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		// Ship the reference-only credential source (never a secret) so an
 		// authenticated distributed run fans out by global index.
 		CredentialSource: credSource,
+		// Ship the mint spec (key REFERENCE only, never the key) so a mint run fans
+		// out: each worker resolves the key locally and self-issues per global index.
+		Mint: mintSpec,
 	}
 }
 

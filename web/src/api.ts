@@ -821,6 +821,47 @@ export interface Report {
 // not whether to enable visualization.
 export const MAX_TRACE_USERS = 200
 
+// MAX_WEB_PATTERN_ROWS caps how many rows the browser generates from a pattern.
+// The browser resolves a pool into inline entries (D1) — it never ships a pattern
+// spec — so a huge count would materialize huge text and a huge payload. For a
+// truly large pool (hundreds of thousands) the CLI scenario file's usersPattern
+// generates server-side at expand time; the web generator is a convenience for
+// modest pools.
+export const MAX_WEB_PATTERN_ROWS = 10000
+
+// generateCredentialRows materializes `count` credential rows from a subject/token
+// template pair, substituting {{.userIndex}} for i=0..count-1, into the pasteable
+// text the pool ('tokens'/'csv') or login ('csv') textarea already parses — so a
+// pattern flows through the SAME browser-side parse into inline entries, with no
+// new wire shape. An empty subject template yields a bare-token list ('tokens');
+// otherwise a username,password CSV. It throws on a non-positive/over-cap count or
+// an empty token template so the caller surfaces the reason.
+export function generateCredentialRows(
+  subjectTemplate: string,
+  tokenTemplate: string,
+  count: number,
+  format: 'csv' | 'tokens',
+): string {
+  if (!(count > 0)) throw new Error('pattern needs a positive count')
+  if (count > MAX_WEB_PATTERN_ROWS) {
+    throw new Error(
+      `pattern count ${count} exceeds the browser limit of ${MAX_WEB_PATTERN_ROWS} — use the CLI scenario file's usersPattern for a larger pool`,
+    )
+  }
+  if (!tokenTemplate.trim()) throw new Error('pattern needs a token (or password) template')
+  const render = (tmpl: string, i: number) => tmpl.replace(/\{\{\.userIndex\}\}/g, String(i))
+  const lines: string[] = []
+  if (format === 'tokens') {
+    for (let i = 0; i < count; i++) lines.push(render(tokenTemplate, i))
+    return lines.join('\n')
+  }
+  lines.push('username,password')
+  for (let i = 0; i < count; i++) {
+    lines.push(`${csvCell(render(subjectTemplate, i))},${csvCell(render(tokenTemplate, i))}`)
+  }
+  return lines.join('\n')
+}
+
 // traceable reports whether a run is small enough that the backend will additionally
 // stream per-request trace events — i.e. whether the live view should animate
 // individual requests ('events') or fall back to the aggregate heatmap. It mirrors
@@ -995,6 +1036,133 @@ export function authFormFromImport(result: ImportResult): Partial<ExperimentForm
     return signupFormPatch(suggestedSignup, false)
   }
   return {}
+}
+
+// --- OAuth2 guide mode (a frontend ASSEMBLY layer, not a new server strategy) --
+
+// OAuth2Grant is how the operator answers "how do you log in?" in the OAuth2
+// guide: a username+password (password grant), a client key (client_credentials),
+// a refresh token pasted from an app/browser session (refresh_token — the answer
+// for human-consent services like Auth0/Cognito/social login), or just an access
+// token (no grant at all — becomes a token pool).
+export type OAuth2Grant = 'password' | 'clientCredentials' | 'refreshToken' | 'accessToken'
+
+// OAuth2GuideForm is the guide's own input state: a token URL plus the grant's
+// fields. It is UI-local (NOT part of ExperimentForm) — authFormFromOAuth2Guide
+// compiles it onto the existing login/pool form fields, so the wire payload and
+// AUTH_FORM_DEFAULTS stay untouched.
+export interface OAuth2GuideForm {
+  tokenUrl: string
+  grant: OAuth2Grant
+  username: string
+  password: string
+  // users is an optional multi-user CSV (username,password header + rows); when
+  // non-empty it wins over the single username/password identity.
+  users: string
+  clientId: string
+  clientSecret: string
+  scope: string
+  refreshToken: string
+  accessToken: string
+}
+
+export const OAUTH2_GUIDE_DEFAULTS: OAuth2GuideForm = {
+  tokenUrl: '',
+  grant: 'password',
+  username: '',
+  password: '',
+  users: '',
+  clientId: '',
+  clientSecret: '',
+  scope: '',
+  refreshToken: '',
+  accessToken: '',
+}
+
+// tokenPathFromUrl reduces a token URL (absolute or bare path) to the request
+// path the login flow POSTs — the run targets the scenario's base URL, so an
+// absolute URL keeps only its path (mirroring the importer's requestPathOf).
+export function tokenPathFromUrl(tokenUrl: string): string {
+  const raw = tokenUrl.trim()
+  if (!raw) return ''
+  try {
+    const u = new URL(raw)
+    return u.pathname && u.pathname !== '/' ? u.pathname : ''
+  } catch {
+    /* not absolute: treat as a bare path */
+  }
+  return raw.startsWith('/') ? raw : '/' + raw
+}
+
+// csvCell quotes one CSV value per the RFC-4180-lite reader the cred list is
+// parsed with, so a password carrying a comma or quote round-trips exactly.
+function csvCell(v: string): string {
+  if (/[",\n\r]/.test(v)) return '"' + v.replace(/"/g, '""') + '"'
+  return v
+}
+
+// authFormFromOAuth2Guide compiles the guide's answers onto the EXISTING form
+// fields — the same pattern authFormFromImport uses. The three token grants
+// become an advanced-mode login flow (a single POST to the token path, form
+// Content-Type so the backend's refresh auto-derivation and urlquery rewrite
+// both engage); an access-token paste becomes a plain token pool. The password
+// grant's identity rides the credential list (one CSV row for a single user), so
+// the body carries only {{.username}}/{{.password}} placeholders — never a
+// literal secret — and the server url-encodes the row at render time.
+export function authFormFromOAuth2Guide(g: OAuth2GuideForm): Partial<ExperimentForm> {
+  if (g.grant === 'accessToken') {
+    return { authMode: 'pool', authPoolFormat: 'tokens', authPoolText: g.accessToken.trim() }
+  }
+
+  const parts: string[] = []
+  let scope: LoginScope = 'shared'
+  let credText = ''
+  switch (g.grant) {
+    case 'password':
+      // Each virtual user logs in as its own row — per-user scope.
+      scope = 'per-user'
+      parts.push('grant_type=password', 'username={{.username}}', 'password={{.password}}')
+      credText = g.users.trim()
+        ? g.users.trim()
+        : `username,password\n${csvCell(g.username)},${csvCell(g.password)}`
+      break
+    case 'clientCredentials':
+      // One machine identity shared by every user.
+      parts.push('grant_type=client_credentials')
+      break
+    case 'refreshToken':
+      // The pasted refresh token belongs to ONE session — shared across users. The
+      // backend's refresh auto-derivation replaces the pasted literal with the
+      // freshly captured {{.refreshToken}} on every subsequent refresh.
+      parts.push('grant_type=refresh_token', `refresh_token=${encodeURIComponent(g.refreshToken.trim())}`)
+      break
+  }
+  if (g.clientId.trim()) parts.push(`client_id=${encodeURIComponent(g.clientId.trim())}`)
+  if (g.clientSecret.trim()) parts.push(`client_secret=${encodeURIComponent(g.clientSecret.trim())}`)
+  if (g.scope.trim()) parts.push(`scope=${encodeURIComponent(g.scope.trim())}`)
+
+  const template = {
+    method: 'POST',
+    path: tokenPathFromUrl(g.tokenUrl),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    payloadTemplate: parts.join('&'),
+  }
+  return {
+    authMode: 'login',
+    // Advanced mode is the storage: the guide IS the friendly form, and the raw
+    // JSON stays reviewable/editable under the existing Advanced panel.
+    loginMode: 'advanced',
+    loginGraphJSON: JSON.stringify(
+      { id: LOGIN_NODE_ID, nodes: [{ id: LOGIN_NODE_ID, apiTemplateId: LOGIN_TEMPLATE_ID }], edges: [] },
+      null,
+      2,
+    ),
+    loginTemplatesJSON: JSON.stringify({ [LOGIN_TEMPLATE_ID]: template }, null, 2),
+    loginStart: LOGIN_NODE_ID,
+    loginScope: scope,
+    loginCredText: credText,
+    loginCredFormat: 'csv',
+  }
 }
 
 // loginFlowToSimpleForm tries to express a derived login flow as the simple mini-form
@@ -2196,6 +2364,36 @@ export interface ImportResult {
   credentialPool?: CredentialPool
   loginFlow?: LoginFlowSpec
   suggestedSignup?: SignupFlowSpec
+  authAdvisories?: AuthAdvisory[]
+}
+
+// AuthAdvisory is an import-time hint about auth the importer could not act on:
+// code is a stable machine key ('mint-managed-idp', 'openidconnect-discovery')
+// and detail its code-specific parameter (the IdP host, the discovery URL).
+export interface AuthAdvisory {
+  code: string
+  detail?: string
+}
+
+// mintManagedIdPAdvisory picks the managed-IdP mint footgun advisory out of an
+// import's advisories, or null. When present, the Auth card warns on the mint
+// mode: the token issuer holds the signing key, so a self-issued (mint) token
+// would be rejected — the OAuth2 route is the answer for that service.
+export function mintManagedIdPAdvisory(advisories: AuthAdvisory[] | undefined): AuthAdvisory | null {
+  for (const a of advisories ?? []) {
+    if (a.code === 'mint-managed-idp') return a
+  }
+  return null
+}
+
+// openIdConnectDiscoveryUrl picks the openIdConnect discovery-document URL out of
+// an import's advisories, or ''. The OAuth2 guide surfaces it next to the token
+// URL: the document's token_endpoint is exactly what belongs in that field.
+export function openIdConnectDiscoveryUrl(advisories: AuthAdvisory[] | undefined): string {
+  for (const a of advisories ?? []) {
+    if (a.code === 'openidconnect-discovery' && a.detail) return a.detail
+  }
+  return ''
 }
 
 // importScenario converts a raw OpenAPI / HAR / access-log document into a

@@ -106,6 +106,10 @@ type importResult struct {
 	// operation, offered as a "create test accounts" suggestion independent of the
 	// primary pool. Present when a register op was detected.
 	SuggestedSignup *domain.SignupFlow `json:"suggestedSignup,omitempty"`
+	// AuthAdvisories are import-time hints about auth the importer could not act on
+	// (managed-IdP mint footgun, openIdConnect discovery pointer), so the UI can
+	// warn before the operator picks a strategy that cannot work. Advisory only.
+	AuthAdvisories []domain.AuthAdvisory `json:"authAdvisories,omitempty"`
 }
 
 // importMaxBytes bounds an uploaded API description. It is larger than a normal
@@ -164,5 +168,6 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		CredentialPool:  spec.CredentialPool,
 		LoginFlow:       spec.LoginFlow,
 		SuggestedSignup: spec.SuggestedSignup,
+		AuthAdvisories:  spec.AuthAdvisories,
 	})
 }

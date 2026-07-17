@@ -1116,7 +1116,24 @@ auth:
 
 > **`tokens` format gotcha.** There is no subject column, so `{{.subject}}` in a header or body template renders as an empty string. Use `csv` or `jsonl` if your teardown or path templates need `{{.subject}}`.
 
-An external source pool can fan out across **distributed workers** — each worker resolves its own slice locally; only a secret-free reference crosses the wire. Inline `users` pools and login/bootstrap strategies cannot fan out to workers.
+An external source pool can fan out across **distributed workers** — each worker resolves its own slice locally; only a secret-free reference crosses the wire. Inline `users` pools and login/bootstrap strategies cannot fan out to workers (mint can — see [Strategy: mint](#strategy-mint-self-issue-a-jwt-locally)).
+
+#### Generate accounts from a pattern (`usersPattern`)
+
+To prepare tens or hundreds of thousands of accounts without a file, declare a subject/token template pair and a count. It materializes at Expand time; the secret template never crosses the wire (only the materialized secrets, still `json:"-"` masked).
+
+```yaml
+auth:
+  strategy: pool            # or login (there subject=username, token=password)
+  usersPattern:
+    subject: "user{{.userIndex}}"
+    token: "pw-{{.userIndex}}"
+    count: 100000
+```
+
+`usersPattern` is mutually exclusive with `users` and `source`. Opaque JWTs cannot be patterned (that is [mint](#strategy-mint-self-issue-a-jwt-locally)'s job). The web console's "generate accounts from a pattern" panel (on the pool/login cards) does the same but materializes inline in the browser, so it is capped at 10,000 rows — for a larger pool use the scenario file's `usersPattern` (generated server-side).
+
+> **Large pool files.** The external-source file cap is 512 MiB by default and parsed by streaming (a 300k-JWT JSONL of ~300–450 MB loads fine). `auth.source.maxBytes` moves the cap (positive only — the cap always stands). Login prewarm runs in parallel but bounded to `RateCap.MaxConcurrency` (at most 16) so it never load-tests the IdP.
 
 ### Strategy: login (mint a token at run time)
 
@@ -1167,6 +1184,42 @@ tmula run scenario.yaml --users 20                 # signup + run + teardown
 tmula run scenario.yaml --users 20 --keep-accounts # signup + run, accounts left in place
 ```
 
+### Strategy: mint (self-issue a JWT locally)
+
+Use when the target **self-issues** JWTs and you hold the signing key: tmula signs a token per virtual user locally, no login. The key is a **reference** (env/file) only — its body is never serialized.
+
+```yaml
+auth:
+  strategy: mint
+  mint:
+    alg: HS256                     # HS256 | RS256 | ES256
+    secretEncoding: raw            # HS256: raw | base64 | base64url
+    key: { env: MINT_SIGNING_KEY }  # or file: a local path (reference only)
+    subject: "user-{{.userIndex}}"
+    ttl: 1h
+```
+
+mint **can fan out to distributed workers** — only the key **reference** rides on the ShardSpec, and each worker resolves the same key locally and signs per global index. Prerequisite: the referenced key (env/file) must be deployed identically on every worker node; a worker that cannot resolve it fails its shard with a clear runtime error instead of running unauthenticated. **Caution:** mint cannot be used for a service whose signing key the IdP holds (Auth0/Cognito/Firebase) — the issued token would be rejected; use the login strategy or the web OAuth2 guide there. The web console shows a warning banner when you pick mint after importing such a managed-IdP spec.
+
+### Session-cookie auth
+
+For a service whose login returns the credential as a `Set-Cookie` rather than a body token, leave the capture empty and the response's session cookie (a `session`/`token`/`jwt`/`auth`/`sid`-style name) is auto-captured as the credential secret. The scenario replays it as a Cookie header.
+
+```yaml
+auth:
+  strategy: login
+  login:
+    flow:
+      - id: signin
+        request: POST /login
+        body: '{"username":"u1","password":"p1"}'
+    # capture omitted: with no token in the body, it is auto-detected from Set-Cookie
+# and a scenario step header:
+#   headers: { Cookie: "session={{.token}}" }
+```
+
+When the session expires and a request 401s, the login strategy's re-login fallback issues a fresh session and retries, so a static session pool self-heals like a token pool.
+
 ### Why secrets stay in-process
 
 The domain `Credential.Secret` field carries `json:"-"`, so the secret is **never serialized**. It cannot cross the HTTP/SSE/store wire and is never persisted (its `String()` also redacts it in logs). Concretely:
@@ -1175,7 +1228,13 @@ The domain `Credential.Secret` field carries `json:"-"`, so the secret is **neve
 - A `users[].cred` you try to POST over HTTP is **silently ignored**: the secret is stripped by `json:"-"`, so HTTP submission cannot carry auth.
 - A remote `--engine` **refuses** an authenticated run (pool with inline users, login, or bootstrap): `a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate`. An **external source** pool is the one exception: only a secret-free reference crosses the wire; workers resolve the file or env variable locally.
 
-**Constraints** (from validation): a credential pool **cannot** be combined with distributed workers unless the pool is an external source. The open workload model is in-process only regardless of auth strategy.
+**Constraints** (from validation): a credential pool **cannot** be combined with distributed workers unless the pool is an external source or the mint strategy (both ship only a secret-free reference). Inline `users`, usersPattern, login, bootstrap-signup, and exec are all rejected with workers. The open workload model is in-process only regardless of auth strategy.
+
+### Web OAuth2 guide · basic/apiKey import · what's deferred
+
+- **OAuth2 web guide.** For a service that only speaks OAuth2, the web console's "It's an OAuth2 service" entry assembles the login flow for you: answer the token URL and how you log in (username/password · client key · paste a refresh token · access token only). For services that need a human consent screen (Auth0/Cognito/social login), the right path is to copy a refresh token once from the app/devtools and paste it. (Note: a client_secret or pasted refresh token is stored in the run's spec like any login body, so prefer a throwaway test client for client_credentials.)
+- **basic auth / apiKey import.** Importing an OpenAPI/Swagger spec derives http `basic` (→ an `Authorization: Basic {{basicAuth .subject .token}}` header + a username/password pool), `apiKey` in query (→ `?name={{.token|urlquery}}` appended to the path), and `apiKey` in cookie (→ a `Cookie: name={{.token}}` header). Fill the `REPLACE_ME` and run. An `openIdConnect` scheme surfaces its discovery URL as an advisory; the web points you to paste its token_endpoint into the OAuth2 guide.
+- **PKCE / device-code are deferred.** The human-consent authorization-code + PKCE and device-code flows (in-app browser, social, MFA) are **not supported** — they aren't a headless-automation target. Workarounds: the OAuth2 guide's **paste-a-refresh-token** path (log in as a human once, copy the refresh token), a pre-issued token pool, or exec (a bring-your-own-token command) as a last resort.
 
 ---
 

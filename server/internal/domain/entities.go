@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -145,6 +146,26 @@ type Credential struct {
 	ExpiresIn time.Duration `json:"-"`
 }
 
+// UnmarshalJSON reads the INBOUND wire shape the console posts for an inline
+// credential entry: {"subject","token"} — token lands in Secret. Without this,
+// json:"-" silently DROPPED the posted token and a web-authored pool ran with
+// empty secrets. The tag stays "-" so Marshal never emits a secret (masking at
+// rest, AD-011): the token is write-only across the wire — a stored/shared spec
+// round-trips with only the subject. Refresh and ExpiresIn are run-time state,
+// never wire-supplied.
+func (c *Credential) UnmarshalJSON(b []byte) error {
+	var w struct {
+		Subject string `json:"subject"`
+		Token   string `json:"token"`
+	}
+	if err := json.Unmarshal(b, &w); err != nil {
+		return err
+	}
+	c.Subject = w.Subject
+	c.Secret = w.Token
+	return nil
+}
+
 // String redacts BOTH secrets (Secret and Refresh) so a Credential cannot leak a
 // token via %v/%+v in logs; the non-sensitive subject and the (non-secret) expiry
 // are shown to keep the value debuggable.
@@ -164,6 +185,19 @@ func (c Credential) String() string {
 	return b.String()
 }
 
+// AuthAdvisory is an import-time hint about the document's auth that the
+// importer could not (or must not) act on itself — e.g. "mint-managed-idp"
+// (the security scheme points at a managed IdP whose signing key the operator
+// does not hold, so the mint strategy cannot work) or "openidconnect-discovery"
+// (the scheme is openIdConnect; the discovery URL names the token_endpoint for
+// the OAuth2 route). Code is a stable machine key the UI translates; Detail is
+// the code-specific parameter (the IdP host, the discovery URL). Advisory only:
+// the run path never reads it.
+type AuthAdvisory struct {
+	Code   string `json:"code"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // CredentialSourceRef is a non-secret pointer to an external credential pool: a
 // file path (relative to the scenario document) or an environment variable, plus
 // the format its body is encoded in. It carries no secret field by design, so a
@@ -173,6 +207,10 @@ type CredentialSourceRef struct {
 	File   string `json:"file,omitempty"`
 	Env    string `json:"env,omitempty"`
 	Format string `json:"format,omitempty"`
+	// MaxBytes, when positive, overrides the resolver's default byte cap on the
+	// referenced file (the cap itself always stands — an override moves it, never
+	// disables it). Non-secret, so it rides the reference wherever it travels.
+	MaxBytes int64 `json:"maxBytes,omitempty"`
 }
 
 // Validate checks the reference is well-formed: exactly one of File/Env is set,
@@ -187,6 +225,9 @@ func (r CredentialSourceRef) Validate() error {
 	case "csv", "jsonl", "tokens":
 	default:
 		return fmt.Errorf("credential source: unknown format %q (want csv, jsonl or tokens)", r.Format)
+	}
+	if r.MaxBytes < 0 {
+		return fmt.Errorf("credential source: maxBytes must be positive (zero means the default cap)")
 	}
 	return nil
 }

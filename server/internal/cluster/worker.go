@@ -314,6 +314,22 @@ func buildUsers(offset, count int) []load.VirtualUser {
 // wraps it in a PoolProvider whose Acquire is a pure function of the GLOBAL
 // index, so every worker reconstructs the identical assignment for its slice.
 func (w *WorkerServer) resolveProvider(ctx context.Context, spec ShardSpec) (auth.Provider, error) {
+	// Mint: self-issue a JWT per virtual user by resolving the key REFERENCE locally
+	// (the key never crossed the wire) and signing deterministically by global index.
+	// A worker that cannot resolve the key (env unset / file missing on this node)
+	// fails its shard with a clear error rather than running unauthenticated — the
+	// operator must deploy the same key on every worker.
+	if spec.Mint != nil {
+		key, err := auth.ResolveMintKey(ctx, *spec.Mint, w.credentialRoot)
+		if err != nil {
+			return nil, fmt.Errorf("cluster: worker resolve mint key: %w", err)
+		}
+		provider, err := auth.NewMintProvider(*spec.Mint, key, nil)
+		if err != nil {
+			return nil, fmt.Errorf("cluster: worker build mint provider: %w", err)
+		}
+		return provider, nil
+	}
 	if spec.CredentialSource == nil {
 		return nil, nil
 	}
