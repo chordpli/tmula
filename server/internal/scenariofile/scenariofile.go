@@ -449,7 +449,16 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 // relative path in auth.source.file is confined to it. An empty dir falls back to
 // the process working directory.
 func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
-	return expandFrom(s, dir, false)
+	return expandFrom(s, dir, false, true)
+}
+
+// ExpandScaffold is Expand for a SCAFFOLD — a spec straight from the importer, which
+// deliberately emits REPLACE_ME_* placeholders where a secret must go. It skips the
+// fill-before-run placeholder gate so the web import flow can return the scaffold for
+// the operator to fill (the gate then fires when they actually run it). Everything else
+// expands identically to Expand.
+func ExpandScaffold(s Scenario) (runspec.RunSpec, error) {
+	return expandFrom(s, "", false, false)
 }
 
 // ExpandRef is ExpandFrom that leaves an external auth SOURCE unresolved: the
@@ -460,13 +469,15 @@ func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
 // It is the seam `tmula run --engine` uses to fan an authenticated run out
 // without reading (or even needing) the credential file on the CLI host.
 func ExpandRef(s Scenario, dir string) (runspec.RunSpec, error) {
-	return expandFrom(s, dir, true)
+	return expandFrom(s, dir, true, true)
 }
 
 // expandFrom is the shared expander. keepSourceRef ships an external auth source
 // as an unresolved reference (for a distributed engine) instead of resolving it
-// into entries (the single-node default).
-func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, error) {
+// into entries (the single-node default). gatePlaceholders rejects an unfilled
+// REPLACE_ME_* secret (the run/CLI path); the scaffold/import path passes false so a
+// placeholder-bearing importer scaffold expands for the operator to fill.
+func expandFrom(s Scenario, dir string, keepSourceRef, gatePlaceholders bool) (runspec.RunSpec, error) {
 	if strings.TrimSpace(s.Target) == "" {
 		return runspec.RunSpec{}, fmt.Errorf("scenariofile: target is required")
 	}
@@ -586,7 +597,7 @@ func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, er
 	}
 
 	if s.Auth != nil {
-		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir, keepSourceRef)
+		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir, keepSourceRef, gatePlaceholders)
 		if err != nil {
 			return runspec.RunSpec{}, err
 		}
@@ -674,13 +685,18 @@ func nodeExists(g domain.ScenarioGraph, id string) bool {
 // (Strategy=pool, Source nil), so a CLI run always carries real credentials and a
 // still-unresolved Source never reaches the run path. Either way the domain type
 // keeps the secret out of any serialization.
-func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+func buildCredentialPool(a Auth, dir string, keepSourceRef, gatePlaceholders bool) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
 	// An importer-scaffolded auth block ships REPLACE_ME_* placeholders where a real
 	// secret must go. Reject a still-unfilled placeholder HERE — at expand time, before
 	// a run boots — naming the exact location, so a scenario never silently authenticates
 	// with the literal "REPLACE_ME_PASSWORD" and fails deep in the login flow instead.
-	if err := checkNoReplaceMe(a); err != nil {
-		return domain.CredentialPool{}, nil, err
+	// The scaffold/import path passes gatePlaceholders=false: the importer's OUTPUT is a
+	// placeholder-bearing scaffold by design, surfaced for the operator to fill, and only
+	// gated when they run it.
+	if gatePlaceholders {
+		if err := checkNoReplaceMe(a); err != nil {
+			return domain.CredentialPool{}, nil, err
+		}
 	}
 	strategy := domain.CredentialStrategy(a.Strategy)
 	if a.Strategy == "" {

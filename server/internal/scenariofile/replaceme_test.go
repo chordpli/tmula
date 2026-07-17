@@ -147,6 +147,24 @@ func TestExpandAcceptsFilledSecrets(t *testing.T) {
 	}
 }
 
+// TestExpandScaffoldToleratesPlaceholders proves the scaffold/import path does NOT gate
+// REPLACE_ME_*: the importer deliberately emits placeholders and the web import flow must
+// receive the scaffold to surface them for filling. Expand (the run path) still rejects
+// the identical block — the gate simply moves to run time.
+func TestExpandScaffoldToleratesPlaceholders(t *testing.T) {
+	auth := &Auth{
+		Strategy: "login",
+		Login:    &AuthLogin{Flow: []Step{{ID: "login", Request: "POST /login", Body: `{"pw":"REPLACE_ME_PASSWORD"}`}}},
+	}
+	s := Scenario{Target: "http://h:1", Flow: baseFlow(), Auth: auth}
+	if _, err := ExpandScaffold(s); err != nil {
+		t.Fatalf("ExpandScaffold must tolerate a REPLACE_ME placeholder (it is the importer's own output): %v", err)
+	}
+	if _, err := Expand(s); err == nil {
+		t.Fatalf("Expand (the run path) must still reject the same placeholder")
+	}
+}
+
 // TestExpandReplaceMeGuardIgnoresKeyReferences proves the guard does not flag a
 // non-secret key/source REFERENCE — those name where a secret lives, not the secret
 // itself, so a REPLACE_ME there is out of scope (and mint uses only references).

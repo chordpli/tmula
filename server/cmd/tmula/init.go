@@ -199,7 +199,11 @@ func importRunSpecWithStats(data []byte, format string) (runspec.RunSpec, *api.I
 	if sc.Target == "" {
 		sc.Target = "http://localhost:9000"
 	}
-	spec, err := scenariofile.Expand(sc)
+	// ExpandScaffold, not Expand: the importer deliberately emits REPLACE_ME_* secrets
+	// for every derived security scheme, and this is the scaffold the web import flow
+	// surfaces for the operator to fill. The placeholder gate fires when they RUN it, not
+	// here — gating at import would 400 every auth-carrying spec upload.
+	spec, err := scenariofile.ExpandScaffold(sc)
 	if err != nil {
 		return runspec.RunSpec{}, nil, err
 	}
