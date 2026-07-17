@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/cluster/clusterpb"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
@@ -62,10 +63,23 @@ type WorkerServer struct {
 
 	id      string
 	adapter load.Adapter
+	// credentialRoot is the directory a file-backed credential source is resolved
+	// under on this worker. A shard's CredentialSourceRef names a path operator-
+	// asserted to exist (identically ordered) on every worker host; this is where
+	// the worker reads it from. Empty falls back to the process working directory.
+	credentialRoot string
 }
 
 // WorkerOption customizes a WorkerServer.
 type WorkerOption func(*WorkerServer)
+
+// WithCredentialRoot sets the directory a file-backed credential source is
+// resolved under. Worker hosts are secret-bearing: the referenced pool must be
+// operator-asserted shared and identically ordered across every worker (the
+// master-side checksum is the guard). An empty root uses the working directory.
+func WithCredentialRoot(root string) WorkerOption {
+	return func(w *WorkerServer) { w.credentialRoot = root }
+}
 
 // WithWorkerID sets the worker's identity, echoed in Ping replies and useful in
 // logs when several workers serve one run.
@@ -127,6 +141,16 @@ func (w *WorkerServer) RunShard(req *clusterpb.RunShardRequest, stream grpc.Serv
 		return fmt.Errorf("cluster: worker build guard: %w", gerr)
 	}
 	users := buildUsers(offset, count)
+	// Authenticate by GLOBAL index: when the spec carries a credential source the
+	// worker resolves it locally and assigns users[i].Cred = Acquire(offset+i), so
+	// the distributed pool authenticates exactly as the single-process path would.
+	provider, perr := w.resolveProvider(stream.Context(), spec)
+	if perr != nil {
+		return perr
+	}
+	if aerr := authenticateUsers(stream.Context(), provider, users, offset); aerr != nil {
+		return aerr
+	}
 
 	// Stream each result as it is produced instead of materializing the whole
 	// shard: a result sink pushes every StepResult straight onto the gRPC stream,
@@ -205,6 +229,15 @@ func (w *WorkerServer) RunShardSummary(ctx context.Context, req *clusterpb.RunSh
 		return nil, fmt.Errorf("cluster: worker build guard: %w", gerr)
 	}
 	users := buildUsers(offset, count)
+	// Authenticate by GLOBAL index, identical to the streaming path: a credential
+	// source is resolved locally and each user is assigned Acquire(offset+i).
+	provider, perr := w.resolveProvider(ctx, spec)
+	if perr != nil {
+		return nil, perr
+	}
+	if aerr := authenticateUsers(ctx, provider, users, offset); aerr != nil {
+		return nil, aerr
+	}
 
 	// Fold each result straight into the shard's Summary as it completes instead
 	// of buffering the whole shard and summing afterward: Summary.Add is already
@@ -272,6 +305,71 @@ func buildUsers(offset, count int) []load.VirtualUser {
 		users[i] = load.VirtualUser{ID: fmt.Sprintf("user-%d", offset+i)}
 	}
 	return users
+}
+
+// resolveProvider rebuilds the shard's credential provider from the spec's
+// reference-only CredentialSource. A source-less spec returns (nil, nil) — the
+// shard runs unauthenticated, exactly as before this seam existed. Otherwise it
+// loads the referenced pool LOCALLY (the secrets never crossed the wire) and
+// wraps it in a PoolProvider whose Acquire is a pure function of the GLOBAL
+// index, so every worker reconstructs the identical assignment for its slice.
+func (w *WorkerServer) resolveProvider(ctx context.Context, spec ShardSpec) (auth.Provider, error) {
+	if spec.CredentialSource == nil {
+		return nil, nil
+	}
+	src, err := auth.SourceFromRef(*spec.CredentialSource, w.credentialRoot)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: worker resolve credential source: %w", err)
+	}
+	entries, err := src.Load(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: worker load credential source: %w", err)
+	}
+	provider, err := auth.NewPoolProvider(entries)
+	if err != nil {
+		return nil, fmt.Errorf("cluster: worker build credential provider: %w", err)
+	}
+	return provider, nil
+}
+
+// SourceChecksum resolves the spec's credential source on this worker and returns
+// a secret-free digest of the pool it loaded — over subjects, their order and the
+// count, never the secrets (see auth.SourceChecksum). It is the cluster-side guard
+// for the operator's "shared, identically-ordered source" assertion: every worker
+// computes it against its OWN resolved pool, and a control plane comparing the
+// digests across workers detects a divergent or differently-ordered source before
+// it silently mis-assigns principals. A source-less spec returns "" (no pool).
+func (w *WorkerServer) SourceChecksum(ctx context.Context, spec ShardSpec) (string, error) {
+	if spec.CredentialSource == nil {
+		return "", nil
+	}
+	src, err := auth.SourceFromRef(*spec.CredentialSource, w.credentialRoot)
+	if err != nil {
+		return "", fmt.Errorf("cluster: worker resolve credential source: %w", err)
+	}
+	entries, err := src.Load(ctx)
+	if err != nil {
+		return "", fmt.Errorf("cluster: worker load credential source: %w", err)
+	}
+	return auth.SourceChecksum(entries), nil
+}
+
+// authenticateUsers assigns each shard user the credential its GLOBAL index
+// selects (users[i] is global index offset+i), so the worker authenticates by
+// global index exactly as the single-process path does — the Acquire keying both
+// run paths share. A nil provider leaves every user unauthenticated.
+func authenticateUsers(ctx context.Context, provider auth.Provider, users []load.VirtualUser, offset int) error {
+	if provider == nil {
+		return nil
+	}
+	for i := range users {
+		cred, err := provider.Acquire(ctx, offset+i)
+		if err != nil {
+			return fmt.Errorf("cluster: worker acquire credential for user %d: %w", offset+i, err)
+		}
+		users[i].Cred = cred
+	}
+	return nil
 }
 
 // toShardResult converts a load.StepResult into its wire form, deriving the

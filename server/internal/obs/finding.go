@@ -42,7 +42,24 @@ type RequestObservation struct {
 	Path []domain.ID
 }
 
+// ErrorClassAuthRefresh marks a request the auth-refresh path swallowed: an
+// exhausted-refresh 401 (the token expired mid-run and re-acquiring it did not
+// recover). It is the SINGLE source of the auth-refresh class string. It is
+// excused by failed() ONLY — an exhausted-refresh 401 should not inflate the run's
+// error rate, since it reflects expired auth, not a target defect. The other three
+// obs predicates are deliberately left untouched: unavailable() keys on
+// status>=500 / timeout / transport and never sees this class; contractSignal()
+// and mutationSignal() gate on their own shapes. (The operator-facing "auth likely
+// expired" run note is a later phase; here the class only keeps the churn out of
+// findings.)
+const ErrorClassAuthRefresh = "auth-refresh"
+
 func (o RequestObservation) failed() bool {
+	// The auth-refresh class is excused here (and only here): an exhausted-refresh
+	// 401 is expired auth, not a failure to attribute to the target.
+	if o.ErrorClass == ErrorClassAuthRefresh {
+		return false
+	}
 	return o.StatusCode >= 400 || o.ErrorClass != ""
 }
 

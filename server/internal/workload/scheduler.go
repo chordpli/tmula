@@ -17,6 +17,13 @@ import (
 	"github.com/chordpli/tmula/server/internal/obs"
 )
 
+// WireAuthFunc seeds one arrival's login credential: given the arrival's
+// zero-based index it returns a live credential holder (the seam the runner reads
+// the token from per step) and a refresh closure (re-acquires that index's token
+// on a mid-run 401). The orchestrator builds it over a LoginProvider, binding the
+// index arithmetic so the scheduler never re-derives one.
+type WireAuthFunc func(ctx context.Context, userIndex int) (load.CredentialHolder, load.RefreshFunc, error)
+
 // Options configures one open-model run.
 type Options struct {
 	// Graph is the behavior frame every arriving user traverses.
@@ -37,6 +44,12 @@ type Options struct {
 	// principal (a pool wraps around its entries). Nil leaves every session
 	// unauthenticated (the User's credential as-is), exactly as before.
 	Auth auth.Provider
+	// WireAuth, when non-nil, is the login (CredLogin) seam: instead of a static
+	// per-arrival credential it seeds each arrival a live credential holder plus a
+	// refresh closure keyed by the arrival index, so a mid-run 401 re-acquires that
+	// session's token. It is mutually exclusive with Auth — a login run sets this,
+	// a static/pool run sets Auth. Nil keeps the historical (static or no) auth.
+	WireAuth WireAuthFunc
 	// Seed makes both the arrival process and per-session graph traversal
 	// reproducible: the sampler and the i-th session derive their RNG from it.
 	Seed int64
@@ -243,6 +256,21 @@ func (s *Scheduler) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 			user.Cred = cred
 		}
+		// Login seam: seed a live holder + refresh keyed by the same zero-based
+		// arrival index the static path keys credentials by (arrival-1), so a refresh
+		// re-mints the SAME principal's token. A failed mint is a setup error, the
+		// same all-or-nothing signal Auth.Acquire raises.
+		if opts.WireAuth != nil {
+			holder, refresh, err := opts.WireAuth(ctx, int(arrival-1))
+			if err != nil {
+				atomic.AddInt64(&setupErr, 1)
+				setupOnce.Do(func() { firstSetupErr = err })
+				atomic.AddInt64(&live, -1)
+				continue
+			}
+			user.Holder = holder
+			user.Refresh = refresh
+		}
 
 		wg.Add(1)
 		go func() {
@@ -350,6 +378,13 @@ func record(collector *obs.Collector, agg *obs.Aggregator, results []load.StepRe
 // cancelled mid-request), and a generic "transport" class for any other send
 // failure — the same classification the closed runner paths use.
 func errorClass(sr load.StepResult) string {
+	// A class the runtime stamped (e.g. obs.ErrorClassAuthRefresh on an
+	// exhausted-refresh 401) wins, so the open path excuses the same auth churn the
+	// closed path does. An exhausted-refresh 401 carries no Err, so this is the only
+	// place its class survives.
+	if sr.ErrorClass != "" {
+		return sr.ErrorClass
+	}
 	if sr.Err == nil {
 		return ""
 	}

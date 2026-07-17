@@ -144,26 +144,109 @@ func (c Credential) String() string {
 	return fmt.Sprintf("Credential{Subject:%q, Secret:***}", c.Subject)
 }
 
-// CredentialPool supplies credentials to virtual users.
-type CredentialPool struct {
-	ID              ID                 `json:"id"`
-	Strategy        CredentialStrategy `json:"strategy"`
-	Entries         []Credential       `json:"entries,omitempty"`
-	BootstrapFlowID *ID                `json:"bootstrapFlowId,omitempty"`
+// CredentialSourceRef is a non-secret pointer to an external credential pool: a
+// file path (relative to the scenario document) or an environment variable, plus
+// the format its body is encoded in. It carries no secret field by design, so a
+// pool that references an external source can serialize (and cross the wire) with
+// only the reference — never the tokens it resolves to (AD-011).
+type CredentialSourceRef struct {
+	File   string `json:"file,omitempty"`
+	Env    string `json:"env,omitempty"`
+	Format string `json:"format,omitempty"`
 }
 
-// Validate checks the pool can actually provide credentials.
+// Validate checks the reference is well-formed: exactly one of File/Env is set,
+// and Format is one of the known credential encodings. It validates shape only;
+// resolving the reference (and reading the file/env) is a layer above the domain.
+func (r CredentialSourceRef) Validate() error {
+	hasFile, hasEnv := r.File != "", r.Env != ""
+	if hasFile == hasEnv {
+		return fmt.Errorf("credential source: set exactly one of file or env")
+	}
+	switch r.Format {
+	case "csv", "jsonl", "tokens":
+	default:
+		return fmt.Errorf("credential source: unknown format %q (want csv, jsonl or tokens)", r.Format)
+	}
+	return nil
+}
+
+// CredentialPool supplies credentials to virtual users.
+type CredentialPool struct {
+	ID       ID                 `json:"id"`
+	Strategy CredentialStrategy `json:"strategy"`
+	Entries  []Credential       `json:"entries,omitempty"`
+	// Source, when set, points at an external credential pool (a file or an env
+	// var) instead of inlining Entries. It is layer-agnostic: the domain validates
+	// only the reference's shape, never reads it, and a layer above (the CLI's
+	// scenariofile.Expand) resolves it into Entries before a run. omitempty keeps
+	// an Entries-only pool serializing byte-identically to before this field
+	// existed.
+	Source          *CredentialSourceRef `json:"source,omitempty"`
+	BootstrapFlowID *ID                  `json:"bootstrapFlowId,omitempty"`
+	// LoginFlowID names the standalone login flow a CredLogin pool walks to mint a
+	// token (POST a login/token endpoint, capture the token). It is a declarative
+	// reference, not a node in the main scenario graph, so the simulated traffic
+	// never observes the login. Required for the CredLogin strategy, ignored
+	// otherwise. omitempty keeps a non-login pool serializing byte-identically.
+	LoginFlowID *ID `json:"loginFlowId,omitempty"`
+	// LoginScope selects how many principals a CredLogin pool mints: per-user (the
+	// default, empty value) runs the login once per virtual user; shared runs it
+	// once and shares the single token (client_credentials). Ignored by other
+	// strategies. omitempty keeps a non-login pool serializing byte-identically.
+	LoginScope LoginScope `json:"loginScope,omitempty"`
+}
+
+// Validate checks the pool can actually provide credentials. For the pool
+// strategy, exactly one of Entries or Source must be present: both-empty is the
+// long-standing "needs an entry" error, and both-set is a new conflict error. A
+// present Source is validated for shape but never rejected for being unresolved —
+// that is a concern for the layer that runs the pool, not the domain.
 func (c CredentialPool) Validate() error {
 	if !c.Strategy.Valid() {
 		return fmt.Errorf("credential pool %q: invalid strategy %q", c.ID, c.Strategy)
 	}
-	if c.Strategy == CredPool && len(c.Entries) == 0 {
-		return fmt.Errorf("credential pool %q: pool strategy needs at least one entry", c.ID)
+	if c.Strategy == CredPool {
+		hasEntries, hasSource := len(c.Entries) > 0, c.Source != nil
+		switch {
+		case !hasEntries && !hasSource:
+			return fmt.Errorf("credential pool %q: pool strategy needs at least one entry", c.ID)
+		case hasEntries && hasSource:
+			return fmt.Errorf("credential pool %q: pool strategy takes either inline entries or a source, not both", c.ID)
+		}
+		if c.Source != nil {
+			if err := c.Source.Validate(); err != nil {
+				return fmt.Errorf("credential pool %q: %w", c.ID, err)
+			}
+		}
 	}
 	if c.Strategy == CredBootstrapSignup && (c.BootstrapFlowID == nil || *c.BootstrapFlowID == "") {
 		return fmt.Errorf("credential pool %q: bootstrap-signup needs a non-empty bootstrapFlowId", c.ID)
 	}
+	if c.Strategy == CredLogin {
+		if c.LoginFlowID == nil || *c.LoginFlowID == "" {
+			return fmt.Errorf("credential pool %q: login strategy needs a non-empty loginFlowId", c.ID)
+		}
+		// The empty scope is the per-user default; any explicit value must be known.
+		if c.LoginScope != "" && !c.LoginScope.Valid() {
+			return fmt.Errorf("credential pool %q: invalid loginScope %q (want %q or %q)", c.ID, c.LoginScope, LoginPerUser, LoginShared)
+		}
+		// A login pool mints its tokens at run time, so it must not also carry a
+		// pre-supplied pool (inline entries or an external source).
+		if len(c.Entries) > 0 || c.Source != nil {
+			return fmt.Errorf("credential pool %q: login strategy mints tokens at run time and takes no inline entries or source", c.ID)
+		}
+	}
 	return nil
+}
+
+// EffectiveLoginScope resolves the pool's login scope, defaulting an empty value
+// to per-user. It is meaningful only for a CredLogin pool.
+func (c CredentialPool) EffectiveLoginScope() LoginScope {
+	if c.LoginScope == "" {
+		return LoginPerUser
+	}
+	return c.LoginScope
 }
 
 // --- Load profile -----------------------------------------------------------

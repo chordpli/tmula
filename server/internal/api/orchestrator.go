@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/cluster"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
@@ -183,9 +184,25 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 	}
 	// When a credential pool is set, the scheduler assigns each arrival a
 	// credential by its global session index; nil leaves sessions unauthenticated.
-	provider, err := spec.CredentialProvider()
-	if err != nil {
+	// The login strategy takes the holder/refresh seam instead: a LoginProvider is
+	// prewarmed and each arrival is seeded a live holder + refresh closure keyed by
+	// its arrival index, mirroring the closed path.
+	var provider auth.Provider
+	var wireAuth workload.WireAuthFunc
+	if login, err := s.loginAuthFor(spec, rs.guard); err != nil {
 		return obs.Stats{}, nil, err
+	} else if login != nil {
+		if err := login.Prewarm(ctx, 1); err != nil {
+			return obs.Stats{}, nil, fmt.Errorf("api: prewarm login token: %w", err)
+		}
+		wireAuth = func(ctx context.Context, userIndex int) (load.CredentialHolder, load.RefreshFunc, error) {
+			return login.seed(ctx, userIndex)
+		}
+	} else {
+		provider, err = spec.CredentialProvider()
+		if err != nil {
+			return obs.Stats{}, nil, err
+		}
 	}
 	res, err := workload.New(runner).Run(ctx, workload.Options{
 		Graph:    spec.Graph,
@@ -206,6 +223,10 @@ func (s *Server) executeOpen(ctx context.Context, rs *runState, spec RunSpec) (o
 		// Auth, when non-nil, makes each session authenticate as a distinct
 		// principal keyed by its arrival index (a pool wraps around its entries).
 		Auth: provider,
+		// WireAuth, when non-nil (the login strategy), seeds each arrival a live
+		// credential holder plus a refresh closure keyed by its arrival index, so a
+		// mid-run 401 re-acquires that session's token. Mutually exclusive with Auth.
+		WireAuth: wireAuth,
 	})
 	if err != nil {
 		return obs.Stats{}, nil, err
@@ -285,7 +306,7 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 	// collector + aggregator and return nothing, so a huge in-process run never
 	// buffers its results. closedUsers synthesizes the pool from UserCount when the
 	// client sent only a count (the large-run path), or returns the explicit pool.
-	users, err := s.authenticateClosedUsers(ctx, spec)
+	users, err := s.authenticateClosedUsers(ctx, rs, spec)
 	if err != nil {
 		return err
 	}
@@ -301,8 +322,32 @@ func (s *Server) executeLocal(ctx context.Context, rs *runState, spec RunSpec, a
 // unauthenticated), so a run without auth is byte-for-byte what it was before.
 // The pool provider's Acquire is pure, so the per-user assignment is deterministic
 // and independent of the seeded traversal.
-func (s *Server) authenticateClosedUsers(ctx context.Context, spec RunSpec) ([]load.VirtualUser, error) {
+//
+// The login (CredLogin) strategy takes a separate seam: it mints a token per user
+// up front (Prewarm) and seeds each user a live CredentialHolder plus a refresh
+// closure, so a mid-run 401 re-acquires that user's token. The static-pool path is
+// untouched — every static user keeps Holder==nil and renders Cred directly.
+func (s *Server) authenticateClosedUsers(ctx context.Context, rs *runState, spec RunSpec) ([]load.VirtualUser, error) {
 	users := spec.ClosedUsers()
+
+	// Login strategy: holder + refresh per user, minted from the login flow.
+	if login, err := s.loginAuthFor(spec, rs.guard); err != nil {
+		return nil, err
+	} else if login != nil {
+		if err := login.Prewarm(ctx, len(users)); err != nil {
+			return nil, fmt.Errorf("api: prewarm login tokens: %w", err)
+		}
+		for i := range users {
+			holder, refresh, err := login.seed(ctx, i)
+			if err != nil {
+				return nil, fmt.Errorf("api: mint login token for user %d: %w", i, err)
+			}
+			users[i].Holder = holder
+			users[i].Refresh = refresh
+		}
+		return users, nil
+	}
+
 	provider, err := spec.CredentialProvider()
 	if err != nil {
 		return nil, err
@@ -442,6 +487,18 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 	if spec.Workload != nil {
 		think = spec.Workload.ThinkTime
 	}
+	// Distributed auth: a source-backed credential pool ships its reference-only
+	// CredentialSourceRef (file/env + format, never a secret) so each worker
+	// resolves its own slice locally and assigns by global index. Validate has
+	// already confirmed that an authenticated distributed run carries a source (not
+	// inline entries, not bootstrap/login) — those are rejected with workers — so a
+	// non-nil Source here is always a usable shared reference. A nil pool or an
+	// inline pool leaves CredentialSource nil (the latter never reaches here).
+	var credSource *domain.CredentialSourceRef
+	if spec.CredentialPool != nil && spec.CredentialPool.Source != nil {
+		ref := *spec.CredentialPool.Source
+		credSource = &ref
+	}
 	return cluster.ShardSpec{
 		RunID:         runID,
 		ScenarioID:    scenarioIDForSpec(spec),
@@ -460,6 +517,9 @@ func shardSpecFor(spec RunSpec, runID domain.ID) cluster.ShardSpec {
 		Allowlist: spec.TargetEnv.Allowlist,
 		RateCap:   spec.TargetEnv.RateCap,
 		EnvClass:  spec.TargetEnv.EnvClass,
+		// Ship the reference-only credential source (never a secret) so an
+		// authenticated distributed run fans out by global index.
+		CredentialSource: credSource,
 	}
 }
 
@@ -489,6 +549,12 @@ func scenarioIDForSpec(spec RunSpec) domain.ID {
 }
 
 func errorClass(res load.StepResult) string {
+	// A class stamped by the runtime (e.g. obs.ErrorClassAuthRefresh on an
+	// exhausted-refresh 401) wins — it carries semantics the status/Err alone do
+	// not, and lets the aggregator excuse the auth churn from the error rate.
+	if res.ErrorClass != "" {
+		return res.ErrorClass
+	}
 	if res.Err != nil {
 		return "transport"
 	}

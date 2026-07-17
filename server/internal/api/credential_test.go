@@ -274,6 +274,40 @@ func TestCreateExperimentRejectsBootstrapPool(t *testing.T) {
 	}
 }
 
+// TestCreateExperimentRejectsUnresolvedSource confirms the Go-level submission
+// path rejects a pool that still carries an external source: the CLI resolves a
+// source into entries at expand time, so a spec reaching the server must carry
+// real entries, and the server never reads a client-chosen path off the wire (the
+// D1 contract). It also pins that a source-carrying spec never leaks anything
+// secret-shaped on the wire (it only ever carries the non-secret reference).
+func TestCreateExperimentRejectsUnresolvedSource(t *testing.T) {
+	srv := NewServer(load.NewRESTAdapter(time.Second))
+	spec := specAuth("http://127.0.0.1:1", 1, &domain.CredentialPool{
+		ID:       "p",
+		Strategy: domain.CredPool,
+		Source:   &domain.CredentialSourceRef{File: "creds.csv", Format: "csv"},
+	})
+	if _, err := srv.CreateExperiment(spec); err == nil {
+		t.Fatal("CreateExperiment should reject a pool carrying an unresolved source")
+	}
+
+	// A source-carrying spec marshals its reference (the path/format) but nothing
+	// secret-shaped — the source ref has no secret field by construction.
+	b, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	out := string(b)
+	if !strings.Contains(out, "creds.csv") {
+		t.Errorf("source spec dropped its non-secret reference: %s", out)
+	}
+	for _, leak := range []string{"secret", "\"token\""} {
+		if strings.Contains(out, leak) {
+			t.Errorf("source spec leaked a secret-shaped field %q: %s", leak, out)
+		}
+	}
+}
+
 // TestSpecMarshalNeverLeaksSecret confirms a persisted/streamed RunSpec carries the
 // non-sensitive subject but never the credential secret — the json:"-" guarantee
 // holds through the spec, not just the bare domain.Credential. This is what makes

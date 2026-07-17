@@ -21,12 +21,14 @@
 package scenariofile
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"strings"
 
 	"sigs.k8s.io/yaml"
 
+	"github.com/chordpli/tmula/server/internal/auth"
 	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/obs"
@@ -104,13 +106,74 @@ type Metrics struct {
 // the file can hand-author tokens while the domain type keeps masking the secret
 // at rest. Only the pre-supplied "pool" strategy is supported here; bootstrap
 // signup is a follow-up that needs a signup transport this path does not wire.
+//
+// Credentials come from one of two places: inline Users, or an external Source (a
+// file beside the scenario, or an environment variable). They are mutually
+// exclusive. A Source keeps the secrets out of the document entirely — Expand
+// reads it at expand time and resolves it into the pool's Entries, so the token
+// still never round-trips through YAML.
 type Auth struct {
-	// Strategy selects how users obtain credentials; it defaults to "pool". Only
-	// "pool" is accepted on this path (bootstrap-signup is a follow-up).
+	// Strategy selects how users obtain credentials; it defaults to "pool". "pool"
+	// (pre-supplied entries or a source) and "login" (mint a token from a login
+	// flow) are accepted; bootstrap-signup is a follow-up.
 	Strategy string `json:"strategy,omitempty"`
 	// Users is the pool of pre-supplied credentials, assigned to virtual users by
 	// index (wrapping around when there are more users than entries).
 	Users []Credential `json:"users,omitempty"`
+	// Source, when set, names an external credential pool instead of inlining
+	// Users: a file (resolved against the scenario file's directory) or an
+	// environment variable, in an explicit format. Mutually exclusive with Users.
+	Source *AuthSource `json:"source,omitempty"`
+	// Login, when set (strategy "login"), describes how to mint a token: a
+	// standalone login flow plus which response captures become the token (and
+	// subject), and an optional scope. The token is minted at run time and never
+	// authored in the file, so a login block carries no secret.
+	Login *AuthLogin `json:"login,omitempty"`
+}
+
+// AuthLogin authors a login (token-minting) credential strategy: a standalone
+// login flow (its own list of steps, exactly like the main flow), the captures
+// that become the credential, and an optional scope. It carries no secret — the
+// token comes from the live login response.
+type AuthLogin struct {
+	// Flow is the ordered login journey (usually a single POST to a login/token
+	// endpoint). Each step's extract captures response fields; capture names which
+	// of those becomes the token (and subject). It is a sibling of the main flow,
+	// never a node in it, so the simulated traffic never observes the login.
+	Flow []Step `json:"flow,omitempty"`
+	// Capture maps the credential fields to captured variable names: token (the
+	// secret, required) and subject (the principal id, optional).
+	Capture AuthCapture `json:"capture"`
+	// Scope is per-user (default) — one token per virtual user — or shared — one
+	// client_credentials token for every session.
+	Scope string `json:"scope,omitempty"`
+	// Start overrides the login flow's start node (defaults to the first step).
+	Start string `json:"start,omitempty"`
+}
+
+// AuthCapture names the captured variables that become the minted credential.
+type AuthCapture struct {
+	// Token is the captured variable that becomes the credential's secret (the
+	// bearer token). Required.
+	Token string `json:"token"`
+	// Subject is the captured variable that becomes the non-sensitive subject.
+	// Optional.
+	Subject string `json:"subject,omitempty"`
+}
+
+// AuthSource names where an external credential pool lives. Exactly one of File
+// or Env is set; Format declares how the body is encoded (csv|jsonl|tokens). It
+// carries no secret — the secret lives only in the referenced file or variable.
+type AuthSource struct {
+	// File is a path to the credential file, resolved against the scenario file's
+	// directory (the FileSource root). Mutually exclusive with Env.
+	File string `json:"file,omitempty"`
+	// Env names an environment variable holding the credential body. Mutually
+	// exclusive with File.
+	Env string `json:"env,omitempty"`
+	// Format is the body encoding: csv (subject,token header), jsonl
+	// ({subject,token} per line) or tokens (one secret per line).
+	Format string `json:"format,omitempty"`
 }
 
 // Credential is one pre-supplied principal in the compact file: a non-sensitive
@@ -180,7 +243,38 @@ var defaultRateCap = domain.RateCap{MaxRPS: 10000, MaxConcurrency: 1000}
 // control plane needs with defaults derived from the flow. It returns an error
 // if the scenario is missing something it cannot default (a target, a usable
 // flow, or a malformed request line).
+//
+// A file-backed auth source is resolved against the process working directory.
+// Callers that loaded the scenario from a file should use ExpandFrom with that
+// file's directory so a relative source path resolves predictably (least
+// surprise) and is confined there.
 func Expand(s Scenario) (runspec.RunSpec, error) {
+	return ExpandFrom(s, "")
+}
+
+// ExpandFrom is Expand with an explicit base directory for resolving a
+// file-backed auth source. dir is the FileSource root: an operator-supplied
+// relative path in auth.source.file is confined to it. An empty dir falls back to
+// the process working directory.
+func ExpandFrom(s Scenario, dir string) (runspec.RunSpec, error) {
+	return expandFrom(s, dir, false)
+}
+
+// ExpandRef is ExpandFrom that leaves an external auth SOURCE unresolved: the
+// pool carries its reference-only domain.CredentialSourceRef (file/env + format,
+// never a secret) instead of loaded entries, so the reference can cross to a
+// distributed engine whose workers resolve it locally. Inline users, login and
+// bootstrap auth expand identically to ExpandFrom — only a source pool differs.
+// It is the seam `tmula run --engine` uses to fan an authenticated run out
+// without reading (or even needing) the credential file on the CLI host.
+func ExpandRef(s Scenario, dir string) (runspec.RunSpec, error) {
+	return expandFrom(s, dir, true)
+}
+
+// expandFrom is the shared expander. keepSourceRef ships an external auth source
+// as an unresolved reference (for a distributed engine) instead of resolving it
+// into entries (the single-node default).
+func expandFrom(s Scenario, dir string, keepSourceRef bool) (runspec.RunSpec, error) {
 	if strings.TrimSpace(s.Target) == "" {
 		return runspec.RunSpec{}, fmt.Errorf("scenariofile: target is required")
 	}
@@ -300,11 +394,12 @@ func Expand(s Scenario) (runspec.RunSpec, error) {
 	}
 
 	if s.Auth != nil {
-		pool, err := buildCredentialPool(*s.Auth)
+		pool, loginFlow, err := buildCredentialPool(*s.Auth, dir, keepSourceRef)
 		if err != nil {
 			return runspec.RunSpec{}, err
 		}
 		spec.CredentialPool = &pool
+		spec.LoginFlow = loginFlow
 		spec.Experiment.Params.AuthStrategy = pool.Strategy
 	}
 
@@ -360,25 +455,154 @@ func nodeExists(g domain.ScenarioGraph, id string) bool {
 
 // buildCredentialPool maps the compact Auth block onto a domain.CredentialPool.
 // The strategy defaults to "pool" and only "pool" is accepted here (bootstrap
-// signup is a follow-up that needs a signup transport this path does not wire);
-// each authored Token is copied into a domain credential's secret, which the
-// domain type then keeps out of any serialization.
-func buildCredentialPool(a Auth) (domain.CredentialPool, error) {
+// signup is a follow-up that needs a signup transport this path does not wire).
+//
+// Credentials come from one of two mutually-exclusive places. Inline Users copy
+// each authored Token into a domain credential's secret. An external Source (a
+// file under dir, or an environment variable) is resolved HERE — this is the
+// single resolution point: the source is loaded into a plain Entries-based pool
+// (Strategy=pool, Source nil), so a CLI run always carries real credentials and a
+// still-unresolved Source never reaches the run path. Either way the domain type
+// keeps the secret out of any serialization.
+func buildCredentialPool(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
 	strategy := domain.CredentialStrategy(a.Strategy)
 	if a.Strategy == "" {
 		strategy = domain.CredPool
 	}
-	if strategy != domain.CredPool {
-		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users)", strategy, domain.CredPool)
+	switch strategy {
+	case domain.CredPool:
+		pool, err := buildPoolCredentials(a, dir, keepSourceRef)
+		return pool, nil, err
+	case domain.CredLogin:
+		return buildLoginCredentials(a)
+	default:
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth strategy %q is not supported (use %q with pre-supplied users or a source, or %q with a login flow)", strategy, domain.CredPool, domain.CredLogin)
 	}
-	if len(a.Users) == 0 {
-		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.users must list at least one credential for the %q strategy", domain.CredPool)
+}
+
+// buildPoolCredentials maps the inline-users or source form onto a plain pool.
+// When keepSourceRef is set, an external source is carried as an unresolved
+// reference (pool.Source) instead of being loaded into entries, so the reference
+// — never the secrets, and without needing the file locally — can cross to a
+// distributed engine whose workers resolve it. Inline users are unaffected.
+func buildPoolCredentials(a Auth, dir string, keepSourceRef bool) (domain.CredentialPool, error) {
+	if a.Login != nil {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth.login is only valid with the %q strategy", domain.CredLogin)
 	}
-	entries := make([]domain.Credential, len(a.Users))
-	for i, c := range a.Users {
-		entries[i] = domain.Credential{Subject: c.Subject, Secret: c.Token}
+	hasUsers, hasSource := len(a.Users) > 0, a.Source != nil
+	if hasUsers && hasSource {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth takes either inline users or a source, not both")
+	}
+	if !hasUsers && !hasSource {
+		return domain.CredentialPool{}, fmt.Errorf("scenariofile: auth needs inline users or a source for the %q strategy", domain.CredPool)
+	}
+
+	if hasSource && keepSourceRef {
+		// Ship the reference unresolved (distributed engine path): validate its
+		// shape but do not read it — the engine's workers load it locally.
+		ref := domain.CredentialSourceRef{File: a.Source.File, Env: a.Source.Env, Format: a.Source.Format}
+		if err := ref.Validate(); err != nil {
+			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+		}
+		return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Source: &ref}, nil
+	}
+
+	var entries []domain.Credential
+	if hasUsers {
+		entries = make([]domain.Credential, len(a.Users))
+		for i, c := range a.Users {
+			entries[i] = domain.Credential{Subject: c.Subject, Secret: c.Token}
+		}
+	} else {
+		src, err := credentialSourceFor(*a.Source, dir)
+		if err != nil {
+			return domain.CredentialPool{}, err
+		}
+		entries, err = src.Load(context.Background())
+		if err != nil {
+			return domain.CredentialPool{}, fmt.Errorf("scenariofile: %w", err)
+		}
 	}
 	return domain.CredentialPool{ID: "cli-pool", Strategy: domain.CredPool, Entries: entries}, nil
+}
+
+// buildLoginCredentials compiles the login authoring block into a login pool plus
+// the standalone login flow the orchestrator mints tokens from. The login flow is
+// built with the SAME buildGraph/buildTemplates helpers the main flow uses, so a
+// login journey is authored exactly like any other flow, and it never carries a
+// secret (the token is minted at run time).
+func buildLoginCredentials(a Auth) (domain.CredentialPool, *runspec.LoginFlowSpec, error) {
+	if len(a.Users) > 0 || a.Source != nil {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy mints tokens from a login flow and takes no inline users or source", domain.CredLogin)
+	}
+	if a.Login == nil || len(a.Login.Flow) == 0 {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: the %q strategy needs an auth.login.flow describing how to mint a token", domain.CredLogin)
+	}
+	if a.Login.Capture.Token == "" {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.capture.token is required (the captured variable that becomes the token)")
+	}
+
+	templates, err := buildTemplates(a.Login.Flow)
+	if err != nil {
+		return domain.CredentialPool{}, nil, err
+	}
+	graph, err := buildGraph(a.Login.Flow)
+	if err != nil {
+		return domain.CredentialPool{}, nil, err
+	}
+	graph.ID = "login"
+	if err := scenario.Validate(graph); err != nil {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: login flow: %w", err)
+	}
+	start := a.Login.Flow[0].ID
+	if a.Login.Start != "" {
+		start = a.Login.Start
+	}
+	if !nodeExists(graph, start) {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: login flow start node %q is not in the login flow", start)
+	}
+
+	scope := domain.LoginScope(a.Login.Scope)
+	if a.Login.Scope != "" && !scope.Valid() {
+		return domain.CredentialPool{}, nil, fmt.Errorf("scenariofile: auth.login.scope %q is not valid (want %q or %q)", a.Login.Scope, domain.LoginPerUser, domain.LoginShared)
+	}
+
+	flowID := domain.ID("login")
+	pool := domain.CredentialPool{
+		ID:          "cli-pool",
+		Strategy:    domain.CredLogin,
+		LoginFlowID: &flowID,
+		LoginScope:  scope,
+	}
+	loginFlow := &runspec.LoginFlowSpec{
+		Graph:      graph,
+		Templates:  templates,
+		Start:      domain.ID(start),
+		MaxSteps:   len(a.Login.Flow),
+		TokenVar:   a.Login.Capture.Token,
+		SubjectVar: a.Login.Capture.Subject,
+	}
+	return pool, loginFlow, nil
+}
+
+// credentialSourceFor builds the auth.CredentialSource an AuthSource block names.
+// A file source is rooted at dir (the scenario file's directory) so a relative
+// path resolves there and is confined to it; an empty dir falls back to the
+// process working directory.
+func credentialSourceFor(a AuthSource, dir string) (auth.CredentialSource, error) {
+	hasFile, hasEnv := a.File != "", a.Env != ""
+	if hasFile == hasEnv {
+		return nil, fmt.Errorf("scenariofile: auth.source needs exactly one of file or env")
+	}
+	format := auth.Format(a.Format)
+	if hasEnv {
+		return auth.EnvSource{Var: a.Env, Format: format}, nil
+	}
+	root := dir
+	if root == "" {
+		root = "."
+	}
+	return auth.FileSource{Root: root, Path: a.File, Format: format}, nil
 }
 
 // buildTemplates maps each request-bearing step to an API template keyed t_<id>.

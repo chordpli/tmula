@@ -55,6 +55,12 @@ type Server struct {
 	// the oldest terminal runs first.
 	runOrder       []domain.ID
 	defaultWorkers []string
+	// credentialRoot is the directory a file-backed credential source is resolved
+	// under when the reproduce path rebuilds a distributed-auth run's source pool
+	// server-side. It is the same operator-asserted location the workers read, so
+	// the reproduce principal matches the shard's. Empty falls back to the engine's
+	// working directory (FileSource's "." fallback).
+	credentialRoot string
 	// importFn, when set (WithImporter), converts an uploaded OpenAPI/HAR spec into
 	// a RunSpec for POST /import. Injected so the api package avoids the
 	// importer/scenariofile import cycle (both depend on api).
@@ -85,6 +91,15 @@ type Option func(*Server)
 // be launched pointing at a fixed worker pool; per-experiment Workers always win.
 func WithDefaultWorkers(addrs []string) Option {
 	return func(s *Server) { s.defaultWorkers = addrs }
+}
+
+// WithCredentialRoot sets the directory a file-backed credential source is
+// resolved under when the reproduce path rebuilds a distributed-auth run's
+// source pool server-side. It must be the same operator-asserted location the
+// workers read so the reproduce principal matches the shard's. Empty uses the
+// engine's working directory.
+func WithCredentialRoot(root string) Option {
+	return func(s *Server) { s.credentialRoot = root }
 }
 
 // WithStore sets the persistence backend (system of record) for finalized runs.

@@ -55,6 +55,20 @@ type ShardSpec struct {
 	Allowlist []string        `json:"allowlist,omitempty"`
 	RateCap   domain.RateCap  `json:"rateCap,omitempty"`
 	EnvClass  domain.EnvClass `json:"envClass,omitempty"`
+
+	// CredentialSource, when set, is a reference-only pointer (a file path or an
+	// env-var name plus its format — NEVER a secret) to a shared credential pool
+	// each worker resolves LOCALLY. It is how an authenticated run fans out across
+	// distributed workers without serializing secrets onto the wire: only the
+	// reference crosses, and each worker loads its own slice and assigns by global
+	// index, so every worker reconstructs the same index-deterministic provider.
+	// It is a CredentialSourceRef — structurally pool-only (no bootstrap flow, no
+	// inline entries) — so a bootstrap-signup or inline pool can never travel here.
+	// Operator contract: worker hosts are SECRET-BEARING (they read the resolved
+	// pool), and the referenced file/env must be operator-asserted shared and
+	// identically ordered across every worker; the master-side SourceShared
+	// checksum (over subjects + order + count, never secrets) is the guard.
+	CredentialSource *domain.CredentialSourceRef `json:"credentialSource,omitempty"`
 }
 
 // Validate checks the spec is runnable before it is dispatched or executed.
@@ -83,6 +97,16 @@ func (s ShardSpec) Validate() error {
 	// build the guard (NewGuard requires positive caps).
 	if len(s.Allowlist) > 0 && (s.RateCap.MaxRPS <= 0 || s.RateCap.MaxConcurrency <= 0) {
 		return fmt.Errorf("cluster: shard spec: rateCap must be positive when an allowlist is set")
+	}
+	// A shipped credential source must be a well-formed pool reference (exactly
+	// one of file/env, a known format). A CredentialSourceRef carries no strategy
+	// and no bootstrap flow, so validating its shape is what keeps anything but a
+	// shared, index-deterministic pool reference off the wire — a bootstrap-signup
+	// pool has no source to copy, so it can never reach a worker through here.
+	if s.CredentialSource != nil {
+		if err := s.CredentialSource.Validate(); err != nil {
+			return fmt.Errorf("cluster: shard spec credential source: %w", err)
+		}
 	}
 	return nil
 }

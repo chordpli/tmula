@@ -85,10 +85,61 @@ type RunSpec struct {
 	// unauthenticated, exactly as before.
 	CredentialPool *domain.CredentialPool `json:"credentialPool,omitempty"`
 
+	// LoginFlow carries the standalone login flow a CredLogin pool mints tokens
+	// from: its own graph, templates, start node and the response captures that
+	// become the token (and subject). It is a sibling of the main scenario graph —
+	// never a node in it — so the simulated traffic never observes the login. It is
+	// required when the pool's strategy is "login" and ignored otherwise. The
+	// orchestrator compiles it (above the load runner) into the login transport;
+	// runspec stays a leaf and only carries the declarative domain types.
+	LoginFlow *LoginFlowSpec `json:"loginFlow,omitempty"`
+
 	// id is internal run-bookkeeping: the run identifier the control plane assigns
 	// after creation (see SetID). It is never serialized and never read back out
 	// of the spec by the run path.
 	id domain.ID
+}
+
+// LoginFlowSpec is the declarative login flow a CredLogin pool walks to mint a
+// token. It carries only domain types (graph, templates, capture variable names),
+// so runspec stays a leaf the orchestrator compiles into a runnable login
+// transport. It holds no secret — the token is captured at run time from the live
+// login response and never round-trips through a spec.
+type LoginFlowSpec struct {
+	Graph     domain.ScenarioGraph             `json:"graph"`
+	Templates map[domain.ID]domain.APITemplate `json:"templates"`
+	Start     domain.ID                        `json:"start"`
+	MaxSteps  int                              `json:"maxSteps,omitempty"`
+	// TokenVar names the captured variable that becomes the credential's secret
+	// (required). SubjectVar, when set, names the captured variable that becomes
+	// the non-sensitive subject.
+	TokenVar   string `json:"tokenVar"`
+	SubjectVar string `json:"subjectVar,omitempty"`
+}
+
+// Validate checks the login flow is well-formed: a non-empty graph, a start node
+// present in it, and a token capture variable.
+func (f LoginFlowSpec) Validate() error {
+	if err := f.Graph.Validate(); err != nil {
+		return fmt.Errorf("login flow: %w", err)
+	}
+	if f.Start == "" {
+		return fmt.Errorf("login flow: a start node is required")
+	}
+	known := false
+	for _, n := range f.Graph.Nodes {
+		if n.ID == f.Start {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return fmt.Errorf("login flow: start node %q is not in the login graph", f.Start)
+	}
+	if f.TokenVar == "" {
+		return fmt.Errorf("login flow: a token capture variable (tokenVar) is required")
+	}
+	return nil
 }
 
 // ID returns the run identifier the control plane assigned to this spec.
@@ -174,19 +225,41 @@ func (r RunSpec) Validate() error {
 
 // validateCredentialPool checks an optional credential pool is usable on this
 // path. A nil pool is fine (the run is unauthenticated). The domain validation
-// rejects an unknown strategy and an empty "pool" strategy; on top of that, the
-// run path supports only the pre-supplied "pool" strategy today, so a
-// bootstrap-signup request fails loudly rather than silently running
-// unauthenticated, and a credential pool combined with distributed workers is
-// refused because the worker fan-out synthesizes its own (unauthenticated) users.
+// rejects an unknown strategy, an empty "pool" strategy, and an inline-vs-source
+// conflict; on top of that the run path applies the D1 split that decides which
+// authenticated runs may distribute.
 //
-// LOAD-BEARING FOR REPRODUCE FIDELITY: the rejection of (CredentialPool ≠ nil)
-// combined with (Workers > 0 || AggregateWorkers) is what guarantees that any
-// distributed run is always unauthenticated. CredentialProvider therefore returns
-// (nil, nil) for every distributed spec, which is the assumption reproduce.go's
-// sessionUser relies on to stay user-consistent: if a distributed run could carry
-// a credential pool, sessionUser would silently replay it under the wrong user.
-// See also: CredentialProvider and the sessionUser function in reproduce.go.
+// D1 SPLIT (the load-bearing distributed-auth contract): a distributed run
+// authenticates ONLY from a shared, index-deterministic SourceRef that the worker
+// resolves LOCALLY; inline secrets and bootstrap stay rejected with workers.
+// Concretely:
+//
+//   - Source != nil && NO workers  → REJECTED. The in-process/API server must not
+//     read a client-chosen path off the wire; the CLI resolves single-node sources
+//     into entries at scenariofile.Expand, so a non-distributed spec must carry
+//     real entries.
+//   - Source (file/env) != nil && workers → ALLOWED, the distributed carve-out:
+//     only the reference crosses the wire and each worker loads its own slice and
+//     assigns by GLOBAL index, so every worker reconstructs the same provider
+//     (PoolProvider.Acquire is a pure function of the global index). No secret is
+//     serialized. shardSpecFor copies the ref into ShardSpec.CredentialSource.
+//   - Inline Entries != nil && workers → REJECTED. The secrets would serialize
+//     into the wire spec.
+//   - Bootstrap-signup && workers → REJECTED. A bootstrap pool mints real accounts
+//     and has no shared reference to fan out; P4 keeps this rejected. (Domain
+//     Validate already forbids a Source on a bootstrap pool.)
+//   - Login && workers → REJECTED. A minted login token is a json:"-" secret the
+//     worker fan-out cannot resolve. (Domain Validate forbids a Source on a login
+//     pool, so login never reaches the carve-out.)
+//
+// LOAD-BEARING FOR REPRODUCE FIDELITY: every distributed authenticated run is
+// either rejected here or carries a source the workers (and reproduce) resolve by
+// the SAME pure Acquire(global index). reproduce.go's sessionUser relies on this:
+// a distributed-auth finding replays under the same principal the shard ran as
+// because both rebuild the source-backed provider and key it by the global index.
+// If this split is ever changed, sessionUser must be updated in lockstep (D4: PR3
+// and PR4 land together). See also: CredentialProvider, the sessionUser function
+// in reproduce.go, and shardSpecFor in orchestrator.go.
 func (r RunSpec) validateCredentialPool() error {
 	if r.CredentialPool == nil {
 		return nil
@@ -194,34 +267,78 @@ func (r RunSpec) validateCredentialPool() error {
 	if err := r.CredentialPool.Validate(); err != nil {
 		return fmt.Errorf("api: %w", err)
 	}
+	hasWorkers := len(r.Workers) > 0 || r.AggregateWorkers
+	if r.CredentialPool.Source != nil {
+		// Distributed carve-out: a source pool fanned out across workers ships only
+		// a reference; each worker resolves it locally and assigns by global index.
+		// Domain Validate guarantees a Source only ever rides a CredPool (login and
+		// bootstrap reject it), and the ref's shape (exactly one of file/env, known
+		// format) is already validated, so a present source here is always a usable
+		// distributed pool reference.
+		if hasWorkers {
+			return nil
+		}
+		// Source without workers: the single-node path must arrive pre-resolved.
+		// The CLI resolves auth.source into entries at scenariofile.Expand time, so
+		// the server never reads a client-chosen path off the wire.
+		return fmt.Errorf("api: credential source must be resolved before running (the CLI resolves it at expand time; a distributed run with workers ships the reference instead)")
+	}
 	if r.CredentialPool.Strategy == domain.CredBootstrapSignup {
 		// Follow-up: the bootstrap provider exists but needs a signup transport this
 		// run path does not yet wire. Refuse rather than run unauthenticated.
 		return fmt.Errorf("api: credential strategy %q is not yet supported via this run path (follow-up); use the %q strategy with pre-supplied entries", domain.CredBootstrapSignup, domain.CredPool)
 	}
-	if len(r.Workers) > 0 || r.AggregateWorkers {
-		// This rejection is load-bearing for reproduce fidelity — see the doc
-		// comment above before relaxing it.
-		return fmt.Errorf("api: a credential pool is not yet supported with distributed workers (the worker fan-out synthesizes its own users)")
+	if r.CredentialPool.Strategy == domain.CredLogin {
+		// A login pool mints tokens by walking a standalone login flow, so the spec
+		// must carry that flow (the orchestrator compiles it into the login
+		// transport). Reject a login pool with no — or a malformed — login flow.
+		if r.LoginFlow == nil {
+			return fmt.Errorf("api: the %q strategy needs a loginFlow describing how to mint a token", domain.CredLogin)
+		}
+		if err := r.LoginFlow.Validate(); err != nil {
+			return fmt.Errorf("api: %w", err)
+		}
+	}
+	if hasWorkers {
+		// Inline-secret carry (entries pool or a minted login token) cannot fan out:
+		// the secret would serialize into the wire spec / a json:"-" secret the
+		// worker cannot resolve. Only a source-backed pool reaches workers (handled
+		// above). This rejection is load-bearing for reproduce fidelity — see the
+		// doc comment before relaxing it.
+		return fmt.Errorf("api: an inline credential pool is not supported with distributed workers (only a reference-only source pool fans out; ship a credential source instead)")
 	}
 	return nil
 }
 
-// CredentialProvider builds the auth provider for a run from its credential pool,
-// or returns (nil, nil) when the run is unauthenticated. Validate has already
-// confirmed the pool is a usable "pool" strategy, so no signup function is needed.
+// CredentialProvider builds the auth provider for an IN-PROCESS run from its
+// credential pool, or returns (nil, nil) when the run is unauthenticated. Validate
+// has already confirmed the pool is a usable "pool" strategy with resolved entries
+// (an unresolved source is rejected without workers, and the distributed path
+// below never calls this).
 //
-// LOAD-BEARING FOR REPRODUCE FIDELITY: a distributed run always returns (nil,
-// nil) here because validateCredentialPool rejects any spec that combines a
-// credential pool with distributed workers. The reproduce path (sessionUser in
-// reproduce.go) relies on this: a nil provider means the replayed session runs
-// as the same user the evidence session ran as, keeping the reproduce verdict
-// user-consistent. See validateCredentialPool for the full invariant.
+// IN-PROCESS ONLY: the distributed path does NOT call CredentialProvider — it
+// copies the pool's reference-only source into the shard spec (shardSpecFor) and
+// each worker resolves it locally. A source pool therefore only ever reaches a
+// distributed run, so it never arrives here (Validate rejects source + no workers
+// on the in-process path). The reproduce path rebuilds a distributed-auth run's
+// provider directly from the source (sessionUser/sourceProviderFor in
+// reproduce.go), keyed by the same global index the shards used. See
+// validateCredentialPool for the full D1 split invariant.
 func (r RunSpec) CredentialProvider() (auth.Provider, error) {
 	if r.CredentialPool == nil {
 		return nil, nil
 	}
-	return auth.NewProvider(*r.CredentialPool, nil)
+	// The login strategy needs a token transport (the compiled login flow) that this
+	// leaf package cannot build — runspec must not import load/api. The api
+	// orchestrator builds the login provider itself (see api.providerFor / the login
+	// transport) and never reaches here for a login pool, so a login pool arriving
+	// here is a wiring bug, not a silent unauthenticated run.
+	if r.CredentialPool.Strategy == domain.CredLogin {
+		return nil, fmt.Errorf("api: a login credential pool's provider is built by the orchestrator, not runspec (login transport lives above this leaf)")
+	}
+	// The remaining strategies (pool today) need no signup/token function — an empty
+	// ProviderDeps.
+	return auth.NewProvider(*r.CredentialPool, auth.ProviderDeps{})
 }
 
 // IsOpen reports whether the spec uses the open (arrival-rate) workload model.

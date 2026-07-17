@@ -11,11 +11,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/chordpli/tmula/server/internal/api"
+	"github.com/chordpli/tmula/server/internal/domain"
 	"github.com/chordpli/tmula/server/internal/gate"
 	"github.com/chordpli/tmula/server/internal/load"
 	"github.com/chordpli/tmula/server/internal/scenariofile"
@@ -144,7 +146,23 @@ func runScenario(args []string) error {
 	if sc.Target == "" {
 		return fmt.Errorf("no target URL in the scenario; pass --target")
 	}
-	spec, err := scenariofile.Expand(sc)
+	// Resolve an external auth source (auth.source.file) against the scenario
+	// file's own directory, so a relative path is read predictably from beside the
+	// scenario and confined there. Single-endpoint mode has no file: dir is empty
+	// and ExpandFrom falls back to the working directory.
+	scenarioDir := ""
+	if file != "" {
+		scenarioDir = filepath.Dir(file)
+	}
+	// Against a remote --engine, a source-backed pool ships its reference-only
+	// SourceRef (the engine's workers resolve it locally) instead of being read
+	// into entries here: only the reference crosses the wire, and the CLI need not
+	// even hold the credential file. Every other auth form (inline users, login)
+	// still expands to in-process secrets and is rejected against --engine below.
+	spec, err := scenariofile.ExpandFrom(sc, scenarioDir)
+	if *engine != "" && sourceBackedAuth(sc.Auth) {
+		spec, err = scenariofile.ExpandRef(sc, scenarioDir)
+	}
 	if err != nil {
 		return err
 	}
@@ -194,7 +212,12 @@ func runScenario(args []string) error {
 			}
 		}
 	} else {
-		if spec.CredentialPool != nil {
+		// A source-backed pool is allowed against a remote engine: it carries only a
+		// reference-only SourceRef (no secret), which the engine's distributed
+		// workers resolve locally and assign by global index. Any pool that would put
+		// a secret on the wire — inline entries or a minted login token — is still
+		// refused; run in-process to authenticate with those.
+		if spec.CredentialPool != nil && spec.CredentialPool.Source == nil {
 			return fmt.Errorf("a credential pool is not supported against a remote --engine (the secret cannot cross the wire); run in-process to authenticate")
 		}
 		report, err = driveRun(ctx, *engine, spec)
@@ -327,6 +350,21 @@ func buildScenario(file, target, get, post string) (scenariofile.Scenario, error
 		sc.Target = target
 	}
 	return sc, nil
+}
+
+// sourceBackedAuth reports whether the scenario's auth is a pool backed by an
+// external SOURCE (a file or env reference) rather than inline secrets. Only this
+// form may fan out to a remote engine: it carries a reference, never a secret. An
+// inline-users pool or a login flow is not source-backed (their secrets are
+// in-process), so it stays rejected against --engine.
+func sourceBackedAuth(a *scenariofile.Auth) bool {
+	if a == nil || a.Source == nil {
+		return false
+	}
+	// The pool strategy (empty defaults to "pool") is the only one that takes a
+	// source; login/bootstrap with a source is a malformed document that expand
+	// rejects, so it never reaches the engine as a source pool.
+	return a.Strategy == "" || a.Strategy == string(domain.CredPool)
 }
 
 // startInProcessEngine boots a local control plane on an ephemeral loopback port
